@@ -52,3 +52,9 @@ def test_report_prints_a_table_and_a_missing_recording_is_an_error_row(tmp_path,
     assert out[0]["error"].startswith("ProviderError") and out[1]["change"] == "SAME"
     assert main([str(INVOICES / "invoice_1004.json"), "--inventory", str(tmp_path / "missing.db")]) == 1
     assert "seed_inventory.py" in capsys.readouterr().err
+
+
+def test_the_saved_demo_report_is_current():
+    """demo/self_correction_report.txt is what the report prints today, so the demo numbers can't drift from the code."""
+    saved = (ROOT / "demo" / "self_correction_report.txt").read_text(encoding="utf-8")
+    assert saved.rstrip("\n") == render(list(rows().values()))

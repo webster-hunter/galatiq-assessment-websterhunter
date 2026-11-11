@@ -1,0 +1,28 @@
+file                       attempts       retry  ocr  names   holding flags   worst flag          change
+-------------------------------------------------------------------------------------------------------
+invoice_1001.txt                  1           -    -      -   0 -> 0          INFO                
+invoice_1002.txt                  2    RESOLVED    -      -   3 -> 2          REVIEW              BETTER
+invoice_1003.txt                  1           -    -      -   3 -> 3          REVIEW              
+invoice_1004.json                 -           -    -      -   0 -> 0          NONE                
+invoice_1004_revised.json         -           -    -      -   0 -> 0          NONE                
+invoice_1005.json                 -           -    -      -   2 -> 2          REVIEW              
+invoice_1006.csv                  -           -    -      -   0 -> 0          INFO                
+invoice_1007.csv                  -           -    -      -   4 -> 4          BLOCK               
+invoice_1008.txt                  1           -    -      -   2 -> 2          REVIEW              
+invoice_1009.json                 -           -    -      -   5 -> 5          BLOCK               
+invoice_1010.txt                  1           -    -      -   0 -> 0          WARN                
+invoice_1011.pdf                  1           -    -      -   0 -> 0          INFO                
+invoice_1011.txt                  1           -    -      -   0 -> 0          INFO                
+invoice_1012.pdf                  1           -    2      2   4 -> 0          REVIEW -> WARN      BETTER
+invoice_1012.txt                  1           -    2      2   4 -> 0          REVIEW -> WARN      BETTER
+invoice_1013.json                 -           -    -      -   5 -> 5          BLOCK               
+invoice_1013.pdf                  1           -    -      -   5 -> 5          BLOCK               
+invoice_1014.xml                  -           -    -      -   1 -> 1          REVIEW              
+invoice_1015.csv                  -           -    -      -   0 -> 0          INFO                
+invoice_1016.json                 -           -    -      -   1 -> 1          REVIEW              
+
+20 files: 3 better, 0 worse, 17 unchanged
+Holding flags (BLOCK or REVIEW): 39 without self-correction, 30 with
+Model calls: 10 without, 11 with (1 retry resolved, 0 unresolved)
+Repairs: 4 OCR values, 4 item names
+No longer held: invoice_1012.pdf, invoice_1012.txt
