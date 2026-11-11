@@ -88,7 +88,8 @@ def test_transcription_is_typed_and_checked_like_a_json_file():
     assert inv.unexpected_fields == {"other.TO": "ACME Corp", "other.formerly": "FastShip Ltd."}
     assert {(f["field"], f["value"]) for f in inv.flags if f["code"] == "OCR_REPAIRED"} == {
         ("date", "26-Jan-2O26"), ("line_items[1].amount", "$3,500.O0")}
-    assert {f["code"] for f in inv.flags} >= {"UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"}
+    assert [li.item for li in inv.line_items] == ["WidgetA", "WidgetB", "GadgetX"]  # "Widget A", "Gadget X" matched to inventory
+    assert {f["code"] for f in inv.flags} >= {"ITEM_NAME_REPAIRED", "UNEXPECTED_FIELDS"}
     assert all("severity" in f for f in inv.flags)
 
 

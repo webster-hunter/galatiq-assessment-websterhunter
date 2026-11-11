@@ -18,9 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
 INVENTORY = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
 
-# Two OCR-damaged values, both repaired; "Widget A" and "Gadget X" each unknown and oddly formed; number "INV 1012".
-OCR_1012 = ["OCR_REPAIRED", "OCR_REPAIRED", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT",
-            "UNEXPECTED_FORMAT"]
+# Two OCR-damaged values, both repaired; "Widget A" and "Gadget X" matched to inventory names; number "INV 1012".
+OCR_1012 = ["OCR_REPAIRED", "OCR_REPAIRED", "ITEM_NAME_REPAIRED", "ITEM_NAME_REPAIRED", "UNEXPECTED_FORMAT"]
 # file -> (vendor, total, flag codes in order)
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
@@ -108,7 +107,16 @@ def test_unexpected_formats_on_the_samples():
     """Across all ten recorded samples, exactly these values are not in their field's usual form."""
     found = {(name, f["field"], f["value"]) for name in EXPECTED
              for f in load(INVOICES / name, Replay(REPLAYS), INVENTORY).flags if f["code"] == "UNEXPECTED_FORMAT"}
-    both_1012 = {(n, field, value) for n in ("invoice_1012.txt", "invoice_1012.pdf") for field, value in (
-        ("invoice_number", "INV 1012"), ("line_items[0].item", "Widget A"), ("line_items[2].item", "Gadget X"))}
+    both_1012 = {(n, "invoice_number", "INV 1012") for n in ("invoice_1012.txt", "invoice_1012.pdf")}
     assert found == both_1012 | {("invoice_1002.txt", "invoice_number", "1002"),
                                  ("invoice_1003.txt", "payment_terms", "Immediate")}
+
+
+def test_1012_is_fully_read_and_carries_no_review_or_block_flag():
+    """After repair, 1012 is a normal invoice: inventory item names, stock checked and within limits, arithmetic reconciled. What remains are warnings recording what was changed."""
+    for name in ("invoice_1012.txt", "invoice_1012.pdf"):
+        inv = load(INVOICES / name, Replay(REPLAYS), INVENTORY)
+        assert [(li.item, li.quantity) for li in inv.line_items] == [("WidgetA", 12), ("WidgetB", 7), ("GadgetX", 4)]
+        assert [(f["value"], f["repaired"]) for f in inv.flags if f["code"] == "ITEM_NAME_REPAIRED"] == [
+            ("Widget A", "WidgetA"), ("Gadget X", "GadgetX")]
+        assert {f["severity"] for f in inv.flags} <= {"WARN", "INFO"}

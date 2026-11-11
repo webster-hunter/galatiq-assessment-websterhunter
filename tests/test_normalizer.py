@@ -964,3 +964,51 @@ def test_repair_cannot_make_a_wrong_number_right(tmp_path):
     inv = load(f)
     assert repaired(inv) == [] and not any("suggested" in x for x in inv.flags)
     assert [x["code"] for x in inv.flags].count("UNPARSEABLE") == 2
+
+
+# --- Item names: matched to the inventory only on an exact stripped match -------------------------
+
+def items_invoice(tmp_path, *lines):
+    f = tmp_path / "inv.json"
+    f.write_text('{"invoice_number": "INV-1", "vendor": "V", "due_date": "2026-02-01", "currency": "USD", "line_items": [%s], "total": %s}' % (
+        ", ".join('{"item": "%s", "quantity": %s, "unit_price": 1}' % line for line in lines), sum(q for _, q in lines)))
+    return f
+
+
+def test_spacing_hyphen_and_case_variants_are_matched_to_the_inventory_name(tmp_path):
+    """"Widget A", "widget-a" and "GADGET_X" become the inventory's names, each with a WARN flag holding what was written; the product and format flags no longer apply."""
+    inv = load(items_invoice(tmp_path, ("Widget A", 1), ("widget-b", 1), ("GADGET_X", 1)), README_INVENTORY)
+    assert [li.item for li in inv.line_items] == ["WidgetA", "WidgetB", "GadgetX"]
+    assert [(x["severity"], x["code"], x["value"], x["repaired"]) for x in inv.flags] == [
+        ("WARN", "ITEM_NAME_REPAIRED", "Widget A", "WidgetA"), ("WARN", "ITEM_NAME_REPAIRED", "widget-b", "WidgetB"),
+        ("WARN", "ITEM_NAME_REPAIRED", "GADGET_X", "GadgetX")]
+
+
+def test_a_matched_name_is_summed_with_the_same_product_for_stock(tmp_path):
+    """The point of the rename: 10 "Widget A" plus 10 WidgetA is 20 WidgetA against 15 in stock, not one unknown product and one line within stock."""
+    inv = load(items_invoice(tmp_path, ("Widget A", 10), ("WidgetA", 10)), README_INVENTORY)
+    [stock] = [x for x in inv.flags if x["code"] == "STOCK_EXCEEDED"]
+    assert (stock["item"], stock["requested"], stock["available"], stock["lines"]) == ("WidgetA", 20, 15, [0, 1])
+    assert not any(x["code"] == "UNKNOWN_PRODUCT" for x in inv.flags)
+
+
+def test_a_near_miss_or_a_new_product_is_not_matched(tmp_path):
+    """Only an exact match on the stripped name counts: a typo, a longer name and a product the inventory lacks stay as written and UNKNOWN_PRODUCT."""
+    names = ("WidgtA", "WidgetA (rush order)", "WidgetC", "Widget")
+    inv = load(items_invoice(tmp_path, *[(n, 1) for n in names]), README_INVENTORY)
+    assert [li.item for li in inv.line_items] == list(names)
+    assert [x["value"] for x in inv.flags if x["code"] == "UNKNOWN_PRODUCT"] == list(names)
+    assert not any(x["code"] == "ITEM_NAME_REPAIRED" for x in inv.flags)
+
+
+def test_an_ambiguous_match_is_not_made(tmp_path):
+    """If two inventory names strip to the same key, there is no single answer, so the name is left alone."""
+    inv = load(items_invoice(tmp_path, ("widget a", 1)), {"WidgetA": 5, "Widget-A": 5})
+    assert inv.line_items[0].item == "widget a" and [x["code"] for x in inv.flags] == ["UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT"]
+
+
+def test_names_are_not_matched_without_an_inventory(tmp_path):
+    """With no inventory there is nothing to match against: the name stays as written."""
+    inv = normalizer.load(items_invoice(tmp_path, ("Widget A", 1)))
+    assert inv.line_items[0].item == "Widget A"
+    assert [x["code"] for x in inv.flags] == ["UNEXPECTED_FORMAT", "INVENTORY_NOT_CHECKED"]

@@ -1,7 +1,7 @@
 """Deterministic invoice normalizer: files in, standard Invoices with graded flags out.
 
     parsing.py   file formats -> Invoice (only UNPARSEABLE flags)
-    repair.py    OCR-damaged values, read only where the invoice proves the reading
+    repair.py    OCR-damaged values and item-name variants, read only where there is proof
     checks.py    format-agnostic checks -> flags with evidence
     severity.py  flag code -> BLOCK / REVIEW / WARN / INFO
     this file    load, expand, normalize: the three wired together
@@ -16,7 +16,7 @@ from xml.parsers.expat import ExpatError
 from .checks import flag, inventory_from_db
 from .models import Invoice, LineItem
 from .parsing import LOADERS
-from .repair import repair
+from .repair import repair, repair_item_names
 from .severity import SEVERITIES, SEVERITY, severity
 
 __all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "check", "expand", "flag", "inventory_from_db",
@@ -60,6 +60,8 @@ def check(inv: Invoice, inventory: dict[str, int] | None = None) -> Invoice:
         The same Invoice, with the check flags added and a severity on every flag.
     """
     repair(inv)  # before the checks, so a repaired value is checked like any other
+    if inventory is not None:
+        repair_item_names(inv, inventory)
     inv.flags += flag(inv, inventory)  # here, not in each loader, so every format gets the same checks
     # Severity is set once, here, so parse-time and check-time flags are graded by the same table.
     inv.flags = [{"code": f["code"], "severity": severity(f), **f} for f in inv.flags]

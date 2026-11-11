@@ -12,6 +12,10 @@ becomes OCR_REPAIRED (WARN). Not proven: nothing is applied. The field stays emp
 UNPARSEABLE, with the reading attached as `suggested` for whoever reviews it. Code never changes
 a value on a guess.
 
+Item names get the same treatment against the inventory: "Widget A" becomes WidgetA only when
+exactly one inventory name is the same apart from spacing, hyphens and letter case. That exact
+match is the proof. Nothing fuzzy: a typo or a new product stays unknown, for a person.
+
 No model is involved. The model's job was to copy the damage faithfully; this is where it is read.
 """
 import re
@@ -105,6 +109,43 @@ def _set(inv: Invoice, field: str, value) -> None:
         setattr(inv, field, value)
 
 
+def _name_key(name: str) -> str:
+    """A product name with spacing, hyphens, underscores and letter case removed: "Widget A" and "widget-a" -> "widgeta"."""
+    return re.sub(r"[\s_-]+", "", name).casefold()
+
+
+def repair_item_names(inv: Invoice, inventory: dict) -> Invoice:
+    """Rename a line item to its inventory name when the two differ only in spacing, hyphens or case.
+
+    Runs before the checks, so the product and stock checks see the inventory's name: "Widget A"
+    is found, and its quantity is summed with any other WidgetA line. Only an exact match on the
+    stripped name counts, and only if it points to one inventory name. A near miss ("WidgtA") or
+    a product the inventory doesn't have (WidgetC) is left as written, to be flagged
+    UNKNOWN_PRODUCT and reviewed.
+
+    Args:
+        inv: An Invoice straight from a loader. Changed in place: a matched item is renamed and
+            gets an ITEM_NAME_REPAIRED flag holding the original name.
+        inventory: Item name -> stock on hand.
+
+    Returns:
+        The same Invoice.
+    """
+    by_key = {}
+    for name in inventory:
+        if isinstance(name, str):
+            by_key.setdefault(_name_key(name), []).append(name)
+    for i, li in enumerate(inv.line_items):
+        if li.item is None or li.item in inventory:
+            continue
+        matches = by_key.get(_name_key(li.item), [])
+        if len(matches) == 1:  # two inventory names that collapse to the same key can't be told apart
+            inv.flags.append({"code": "ITEM_NAME_REPAIRED", "field": f"line_items[{i}].item", "value": li.item,
+                              "repaired": matches[0], "proof": "the only inventory name that matches without spacing, hyphens and case"})
+            li.item = matches[0]
+    return inv
+
+
 def repair(inv: Invoice) -> Invoice:
     """Apply every OCR repair the invoice itself proves; attach a suggestion where it can't.
 
@@ -146,4 +187,4 @@ def repair(inv: Invoice) -> Invoice:
     return inv
 
 
-__all__ = ["LOOKALIKES", "repair"]
+__all__ = ["LOOKALIKES", "repair", "repair_item_names"]

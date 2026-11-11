@@ -48,6 +48,7 @@ SEVERITY = {
     # A value damaged by OCR, read and confirmed by an independent value on the invoice. Change to
     # REVIEW to have a person look at every repaired invoice.
     "OCR_REPAIRED": "WARN",
+    "ITEM_NAME_REPAIRED": "WARN",  # "Widget A" matched to the inventory's WidgetA
     "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form ("1002", "Widget A", "Immediate")
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
     # For the record only.
