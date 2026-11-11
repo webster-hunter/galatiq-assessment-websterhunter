@@ -185,14 +185,14 @@ amount, shipping, total, currency, payment terms, revision, notes and source fil
   read totals from footer rows; `Tax (6%):` gives both the rate (0.06) and the amount. Common label
   variants map to the same fields: `Sales Tax` (and `Sales Tax (5%)`), `Shipping & Handling`,
   `Grand Total` and `Total Amount`.
-- **XML.** The root must be `<invoice>`; any other document is a file error. Fields can sit under the
-  root or inside `<header>` and `<totals>` (1014). Line items are `<item>` elements under one
-  `<line_items>`, with `<name>` read as the item. `<vendor>` can be plain text or hold `<name>` and
-  `<address>`. Namespaces are ignored, and field names map as for CSV (`qty`, `line_total`, `tax`).
-  Attributes, unknown or repeated elements (including a second `<line_items>`), elements with
-  children where a single value is expected, loose text between elements, comments and processing
-  instructions all go to `unexpected_fields` (`line_items[0]@sku`, `#text`, `#comment`). With no
-  `<currency>` element, a `currency="..."` attribute is used as the invoice's currency. A file that
+- **XML.** The root must be `<invoice>`; any other document is a file error. Fields are plain
+  elements under the root or inside `<header>` and `<totals>` (1014). Line items are `<item>`
+  elements under one `<line_items>`, with `<name>` read as the item. Field names map as for CSV
+  (`qty`, `line_total`, `tax`). Anything outside that shape is kept in `unexpected_fields` and never
+  interpreted: unknown or repeated elements (including a second `<line_items>`), elements with
+  attributes or children, loose text, comments and processing instructions (`total`,
+  `line_items[0]@attributes`, `#text`, `#comment`). So `<total currency="EUR">500</total>` leaves
+  the total missing, which blocks the invoice, rather than being read as 500 dollars. A file that
   declares a DTD (`<!DOCTYPE`) is refused: vendor XML is untrusted, and invoices don't need
   entities.
 
@@ -235,7 +235,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
 | `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
-| `CURRENCY_UNSUPPORTED` | `currency`, or an XML `...@currency` attribute | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate. No stated currency is read as USD |
+| `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate. No stated currency is read as USD |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
 | `SUBTOTAL_MISMATCH` | `subtotal` | BLOCK | Σ (quantity × unit price) ≠ stated subtotal |

@@ -424,17 +424,10 @@ def from_csv(path: str | Path) -> Invoice:
     return _build(d, path.name, unexpected)
 
 
-# Elements that only group invoice-level fields (1014: <header>, <totals>); their children are read
-# as top-level fields.
+# The XML shape in the sample (1014): an <invoice> root holding plain fields, optionally grouped
+# under <header> and <totals>, and one <line_items> holding <item> elements. Anything outside that
+# shape is kept in unexpected_fields for review, never interpreted.
 _XML_GROUPS = {"header", "totals"}
-_XML_LINE_TAGS = {"item", "line_item"}
-_XML_ROOT = "invoice"
-_CURRENCY_ATTR = re.compile(r"@currency(#\d+)?$")  # a currency="EUR" attribute anywhere, as kept by _keep
-
-
-def _xml_tag(el) -> str:
-    """Return an element's tag, snake_cased and without any namespace ("{urn:x}Unit_Price" -> "unit_price")."""
-    return _snake(el.tag.rsplit("}", 1)[-1])
 
 
 def _xml_raw(el) -> str:
@@ -446,87 +439,58 @@ def _xml_raw(el) -> str:
         el.tail = tail
 
 
-def _xml_attrs(el, path: str, unexpected: dict) -> None:
-    """Keep an element's attributes for review (as "path@name"), since no field reads them.
+def _xml_children(el, path: str, unexpected: dict) -> list:
+    """Return a grouping element's children, keeping whatever else it holds for review.
+
+    A grouping element (the root, <header>, <totals>, <line_items>, an <item>) should hold only
+    child elements. Its attributes and any loose text between the children have no field to land
+    in: "PAY TO ACCT 999" sitting next to <total> must not vanish.
 
     Args:
-        el: The XML element.
-        path: The element's path.
+        el: The grouping element.
+        path: Its path ("" for the root); extras are kept as "path@attributes" and "path#text".
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        The child elements, in document order.
+    """
+    if el.attrib:
+        _keep(unexpected, f"{path}@attributes", dict(el.attrib))
+    for text in [el.text] + [child.tail for child in el]:
+        if (text or "").strip():
+            _keep(unexpected, f"{path}#text", text.strip())
+    return list(el)
+
+
+def _xml_field(el, where: str, target: dict, allowed: set, unexpected: dict) -> None:
+    """Set one field from a plain element: text only, no attributes, no children.
+
+    Anything else is kept whole in unexpected and sets nothing. So <total currency="EUR">500</total>
+    leaves the total missing (a BLOCK) rather than being read as 500 dollars. An empty element
+    claims no field, and a field is never overwritten: a repeat goes to unexpected.
+
+    Args:
+        el: The element.
+        where: Path of its parent ("" for the root, "totals", "line_items[0]").
+        target: The JSON-shaped dict being built (the invoice, or one line); updated in place.
+        allowed: The keys target accepts (_TOP_FIELDS or _JSON_LINE).
         unexpected: Collected unmapped fields; updated in place.
 
     Returns:
         None.
     """
-    for name, value in el.attrib.items():
-        _keep(unexpected, f"{path}@{name}", value)
-
-
-def _xml_children(el, path: str, unexpected: dict):
-    """Yield a container element's children, keeping any loose text around them for review.
-
-    In a container (an element whose children are fields), text between the child elements has no
-    field to land in: "PAY TO ACCT 999" sitting next to <total> must not vanish.
-
-    Args:
-        el: The container element.
-        path: Its path; loose text is kept as "path#text".
-        unexpected: Collected unmapped fields; updated in place.
-
-    Yields:
-        Each child element.
-    """
-    if (el.text or "").strip():
-        _keep(unexpected, f"{path}#text", el.text.strip())
-    for child in el:
-        yield child
-        if (child.tail or "").strip():
-            _keep(unexpected, f"{path}#text", child.tail.strip())
-
-
-def _xml_value(el, path: str, unexpected: dict) -> str | None:
-    """Read a leaf element's text. An element with children has no single value, so it is kept for review.
-
-    Args:
-        el: The XML element.
-        path: The element's path, used for unexpected entries.
-        unexpected: Collected unmapped fields; updated in place.
-
-    Returns:
-        The element's text, or None if there is nothing to set: the element is empty (so it claims no
-        field, and a later real value still lands) or has children (sent to unexpected).
-    """
-    _xml_attrs(el, path, unexpected)
-    if len(el):
+    tag = _snake(el.tag)
+    path = f"{where}.{tag}" if where else tag
+    if len(el) or el.attrib:
         _keep(unexpected, path, _xml_raw(el))
-        return None
-    return el.text if (el.text or "").strip() else None
-
-
-def _xml_line(el, i: int, unexpected: dict) -> dict:
-    """Read one <item> under <line_items> into a JSON-shaped line dict.
-
-    Args:
-        el: The line element.
-        i: The line's position, used in paths ("line_items[1].discount").
-        unexpected: Collected unmapped fields; updated in place.
-
-    Returns:
-        A JSON-shaped line dict ("name" is read as the item).
-    """
-    path = f"line_items[{i}]"
-    _xml_attrs(el, path, unexpected)
-    li = {}
-    for child in _xml_children(el, path, unexpected):
-        tag = _xml_tag(child)
-        value = _xml_value(child, f"{path}.{tag}", unexpected)
-        if value is None:
-            continue
-        key = "item" if tag == "name" else _FIELD_KEYS.get(tag)
-        if key in _JSON_LINE and key not in li:
-            li[key] = value
-        else:  # unknown, or a repeat of a field already read: first wins
-            _keep(unexpected, f"{path}.{tag}", value)
-    return li
+        return
+    if not (el.text or "").strip():
+        return
+    key = "item" if tag == "name" and allowed is _JSON_LINE else _FIELD_KEYS.get(tag)
+    if key in allowed and key not in target:
+        target[key] = {"name": el.text} if key == "vendor" else el.text
+    else:
+        _keep(unexpected, path, el.text)
 
 
 def _no_dtd(*_):
@@ -534,15 +498,14 @@ def _no_dtd(*_):
 
 
 def from_xml(path: str | Path) -> Invoice:
-    """Load an XML invoice file (the 1014 shape, or any close variant).
+    """Load an XML invoice file in the 1014 shape.
 
-    The root must be <invoice>. Fields can sit directly under it or inside <header>/<totals>; line
-    items are <item> (or <line_item>) elements under one <line_items>, with <name> read as the item.
-    <vendor> may be plain text or hold <name> and <address>. Field names map exactly as for CSV
-    (qty, line_total, tax, ...). Nothing is silently dropped: unknown elements, attributes, repeats
-    (including a second <line_items>), nested values, loose text, comments and processing
-    instructions go to unexpected_fields. With no <currency> element, a currency="..." attribute is
-    used as the invoice's currency.
+    The root must be <invoice>. Fields are plain elements directly under it or inside <header> or
+    <totals>; line items are <item> elements under one <line_items>, with <name> read as the item.
+    Field names map exactly as for CSV (qty, line_total, tax, ...). Everything else is kept in
+    unexpected_fields and raises UNEXPECTED_FIELDS: unknown or repeated elements (including a
+    second <line_items>), elements with attributes or children, loose text, comments and
+    processing instructions.
 
     Args:
         path: The .xml file. The encoding is taken from the XML declaration.
@@ -561,76 +524,36 @@ def from_xml(path: str | Path) -> Invoice:
     raw = path.read_bytes()
     unexpected = {}
     # Pre-pass with expat: stops at a DOCTYPE before its contents are processed (works in any
-    # encoding, unlike searching the bytes for "<!DOCTYPE"), and collects every comment and
-    # processing instruction, which the element tree below doesn't keep.
+    # encoding, unlike searching the bytes for "<!DOCTYPE"), and collects comments and processing
+    # instructions, which the element tree below doesn't keep.
     guard = expat.ParserCreate()
     guard.StartDoctypeDeclHandler = _no_dtd
     guard.CommentHandler = lambda text: _keep(unexpected, "#comment", text.strip())
     guard.ProcessingInstructionHandler = lambda target, data: _keep(unexpected, "#pi", f"{target} {data}".strip())
     guard.Parse(raw, True)
     root = ET.fromstring(raw)
-    if _xml_tag(root) != _XML_ROOT:
-        raise ValueError(f"root element is <{_xml_tag(root)}>, not <{_XML_ROOT}>: not an invoice")
+    if _snake(root.tag) != "invoice":
+        raise ValueError(f"root element is <{root.tag}>, not <invoice>: not an invoice")
 
     d = {"line_items": []}
     lines_read = False
-    _xml_attrs(root, "", unexpected)
-
-    def read_top(el, prefix: str):
-        nonlocal lines_read
-        tag = _xml_tag(el)
-        path = f"{prefix}{tag}"
-        if tag in _XML_GROUPS and not prefix:
-            _xml_attrs(el, path, unexpected)
-            for child in _xml_children(el, path, unexpected):
-                read_top(child, f"{path}.")
-        elif tag == "line_items" and not prefix:
-            if lines_read:  # a second <line_items> block: first wins, like every other repeat
-                _keep(unexpected, path, _xml_raw(el))
-                return
-            lines_read = True
-            _xml_attrs(el, path, unexpected)
-            for child in _xml_children(el, path, unexpected):
-                if _xml_tag(child) in _XML_LINE_TAGS:
-                    d["line_items"].append(_xml_line(child, len(d["line_items"]), unexpected))
-                else:
-                    _keep(unexpected, f"{path}.{_xml_tag(child)}", _xml_raw(child))
-        elif tag == "vendor" and len(el):  # <vendor><name/><address/></vendor>
-            _xml_attrs(el, path, unexpected)
-            vendor = {}
-            for child in _xml_children(el, path, unexpected):
-                ctag = _xml_tag(child)
-                value = _xml_value(child, f"{path}.{ctag}", unexpected)
-                if value is None:
-                    continue
-                if ctag in _JSON_VENDOR and ctag not in vendor:
-                    vendor[ctag] = value
-                else:
-                    _keep(unexpected, f"{path}.{ctag}", value)
-            if not vendor:
-                return
-            if "vendor" in d:
-                _keep(unexpected, path, vendor)
-            else:
-                d["vendor"] = vendor
-        else:
-            value = _xml_value(el, path, unexpected)
-            if value is None:
-                return
-            key = _FIELD_KEYS.get(tag)
-            if key in _TOP_FIELDS and key not in d:  # never overwrite: a second <total> is for review
-                d[key] = {"name": value} if key == "vendor" else value
-            else:
-                _keep(unexpected, path, value)
-
     for child in _xml_children(root, "", unexpected):
-        read_top(child, "")
-
-    # No <currency> element but a currency="EUR" attribute (say on <total>): that is the currency.
-    if "currency" not in d:
-        attr = next((k for k in unexpected if _CURRENCY_ATTR.search(k)), None)
-        if attr is not None:
-            d["currency"] = unexpected.pop(attr)
+        tag = _snake(child.tag)
+        if tag in _XML_GROUPS:
+            for el in _xml_children(child, tag, unexpected):
+                _xml_field(el, tag, d, _TOP_FIELDS, unexpected)
+        elif tag == "line_items" and not lines_read:
+            lines_read = True
+            for item in _xml_children(child, tag, unexpected):
+                if _snake(item.tag) != "item":
+                    _keep(unexpected, f"{tag}.{_snake(item.tag)}", _xml_raw(item))
+                    continue
+                where, line = f"{tag}[{len(d['line_items'])}]", {}
+                for el in _xml_children(item, where, unexpected):
+                    _xml_field(el, where, line, _JSON_LINE, unexpected)
+                d["line_items"].append(line)
+        else:  # a plain field; or a second <line_items>, which _xml_field keeps whole (first wins)
+            _xml_field(child, "", d, _TOP_FIELDS, unexpected)
     return _build(d, path.name, unexpected)
 
 

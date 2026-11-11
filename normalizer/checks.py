@@ -3,7 +3,6 @@
 Each check adds a flag with a stable code and its evidence. Severity is graded separately
 (severity.py), so the checks only say what is wrong, not how much it matters.
 """
-import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -11,8 +10,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from .models import Invoice
-
-_CURRENCY_ATTR = re.compile(r"@currency(#\d+)?$")  # XML attribute paths, as parsing keeps them
 
 
 def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
@@ -88,13 +85,9 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         invoice_invalid("shipping", inv.shipping, "SHIPPING_NEGATIVE")
 
     # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
-    # rate. No stated currency is read as USD (the CSVs never state one). A currency attribute left in
-    # unexpected_fields (an XML <total currency="EUR"> next to a <currency> element) counts too.
-    currencies = [("currency", inv.currency)] + [
-        (path, value) for path, value in inv.unexpected_fields.items() if _CURRENCY_ATTR.search(path)]
-    for field, value in currencies:
-        if isinstance(value, str) and value.strip() and value.strip().upper() != "USD":
-            flags.append({"code": "CURRENCY_UNSUPPORTED", "field": field, "value": value})
+    # rate. No stated currency is read as USD (the CSVs never state one).
+    if inv.currency is not None and inv.currency.upper() != "USD":
+        flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency})
 
     # One flag listing every path, so an agent knows to read unexpected_fields without scanning it first.
     if inv.unexpected_fields:

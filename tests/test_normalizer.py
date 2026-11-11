@@ -473,38 +473,36 @@ def test_currency_check_reads_absent_currency_as_usd(tmp_path):
         assert any(x["code"] == "CURRENCY_UNSUPPORTED" for x in load(f).flags) == flagged, currency
 
 
-def test_xml_variants_and_oddities(tmp_path):
-    """XML variants load (fields at the root, a namespace, a structured vendor, CSV-style names like qty), and attributes, unknown or repeated elements and nested values go to unexpected_fields."""
+def test_xml_outside_the_expected_shape_is_kept_not_interpreted(tmp_path):
+    """Plain fields load (at the root too, with CSV-style names like qty); attributes, unknown, repeated or nested elements go to unexpected_fields and set nothing."""
     f = tmp_path / "v.xml"
     f.write_text('<?xml version="1.0"?>\n'
-                 '<inv:invoice xmlns:inv="urn:acme" version="2">'
+                 '<invoice version="2">'
                  '<invoice_number>INV-9</invoice_number>'
-                 '<vendor><name>Acme</name><address>1 Main St</address><bank>999</bank></vendor>'
+                 '<vendor><name>Acme</name><bank>999</bank></vendor>'
                  '<due_date>2026-02-01</due_date>'
                  '<line_items>'
-                 '<line_item sku="A-1"><name>WidgetA</name><qty>2</qty><unit_price>250</unit_price>'
-                 '<line_total>500</line_total><discount>0</discount></line_item>'
+                 '<item sku="A-1"><name>WidgetA</name><qty>2</qty><unit_price>250</unit_price>'
+                 '<line_total>500</line_total><discount>0</discount></item>'
                  '<memo>see attached</memo>'
                  '</line_items>'
                  '<po_number>PO-7</po_number>'
-                 '<total currency="EUR">500</total><total>1</total>'
-                 '<notes><p>nested</p></notes>'
-                 '</inv:invoice>')
+                 '<total>500</total><total>1</total>'
+                 '</invoice>')
     inv = load(f)
-    assert (inv.invoice_number, inv.vendor_name, inv.vendor_address, inv.total) == ("INV-9", "Acme", "1 Main St", Decimal("500"))
+    assert (inv.invoice_number, inv.total) == ("INV-9", Decimal("500"))
     assert [(li.item, li.quantity, li.amount) for li in inv.line_items] == [("WidgetA", 2, Decimal("500"))]
-    assert inv.notes is None  # nested, so not a single value
-    assert inv.currency == "EUR"  # no <currency> element, so the attribute on <total> is the currency
+    assert inv.vendor_name is None  # nested, so not a plain field: kept for review, and VENDOR_MISSING blocks
     assert inv.unexpected_fields == {
-        "@version": "2",
-        "vendor.bank": "999",
-        "line_items[0]@sku": "A-1",
+        "@attributes": {"version": "2"},
+        "vendor": "<vendor><name>Acme</name><bank>999</bank></vendor>",
+        "line_items[0]@attributes": {"sku": "A-1"},
         "line_items[0].discount": "0",
         "line_items.memo": "<memo>see attached</memo>",
         "po_number": "PO-7",
         "total": "1",  # second <total>: first wins
-        "notes": "<notes><p>nested</p></notes>",
     }
+    assert {"VENDOR_MISSING", "UNEXPECTED_FIELDS"} <= {x["code"] for x in inv.flags}
 
 
 XML_BODY = ('<invoice_number>I</invoice_number><vendor>V</vendor><due_date>2026-02-01</due_date>'
@@ -523,19 +521,14 @@ def test_xml_loose_text_comments_and_pis_are_kept(tmp_path):
     assert [x["code"] for x in inv.flags] == ["UNEXPECTED_FIELDS"]
 
 
-def test_xml_currency_attribute_is_checked(tmp_path):
-    """A currency given only as an attribute becomes the invoice's currency; one that contradicts a <currency> element is flagged too."""
+def test_xml_field_with_an_attribute_is_not_read(tmp_path):
+    """<total currency="EUR">500</total> is kept whole and leaves the total missing (BLOCK), never read as 500 dollars."""
     f = tmp_path / "c.xml"
     f.write_text(f'<invoice>{XML_BODY}<total currency="EUR">500</total></invoice>')
     inv = load(f)
-    assert inv.currency == "EUR"
-    assert [(x["code"], x["field"]) for x in inv.flags] == [("CURRENCY_UNSUPPORTED", "currency")]
-
-    f.write_text(f'<invoice>{XML_BODY}<currency>USD</currency><total currency="EUR">500</total></invoice>')
-    inv = load(f)
-    assert inv.currency == "USD"
-    assert [(x["code"], x["field"]) for x in inv.flags if x["code"] == "CURRENCY_UNSUPPORTED"] == [
-        ("CURRENCY_UNSUPPORTED", "total@currency")]
+    assert inv.total is None and inv.currency is None
+    assert inv.unexpected_fields == {"total": '<total currency="EUR">500</total>'}
+    assert [(x["severity"], x["code"]) for x in inv.flags] == [("BLOCK", "TOTAL_MISSING"), ("WARN", "UNEXPECTED_FIELDS")]
 
 
 def test_xml_empty_element_claims_no_field(tmp_path):
