@@ -133,7 +133,7 @@ def _unexpected(d: dict) -> dict:
         out |= {f"vendor.{k}": v for k, v in vendor.items() if k not in _JSON_VENDOR}
     lines = d.get("line_items")
     for i, li in enumerate(lines if isinstance(lines, list) else []):
-        if isinstance(li, dict):  # non-dict lines are flagged UNPARSEABLE by _build
+        if isinstance(li, dict):  # non-dict lines are flagged UNPARSEABLE by build_invoice
             out |= {f"line_items[{i}].{k}": v for k, v in li.items() if k not in _JSON_LINE}
     return out
 
@@ -176,11 +176,11 @@ def from_json(path: str | Path) -> Invoice:
         raise ValueError(f"top level is a JSON {type(d).__name__}, not an object: not an invoice")
     unexpected = _unexpected(d)
     for key, value in repeats:
-        _keep(unexpected, f"repeated_key.{key}", value)
-    return _build(d, path.name, unexpected)
+        keep_unexpected(unexpected, f"repeated_key.{key}", value)
+    return build_invoice(d, path.name, unexpected)
 
 
-def _build(d: dict, source_file: str, unexpected: dict) -> Invoice:
+def build_invoice(d: dict, source_file: str, unexpected: dict) -> Invoice:
     """Build an Invoice from a JSON-shaped dict. Every loader converts to this shape first.
 
     A value that can't be read becomes None plus an UNPARSEABLE flag carrying the raw value,
@@ -274,7 +274,7 @@ def _snake(s: str) -> str:
     return re.sub(r"\W+", "_", s.strip().lower()).strip("_")
 
 
-def _keep(unexpected: dict, path: str, value) -> None:
+def keep_unexpected(unexpected: dict, path: str, value) -> None:
     """Add one entry to unexpected without overwriting: a repeat of the same path becomes "path#2", "path#3".
 
     Args:
@@ -312,13 +312,13 @@ def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
     # "Tax (6%):". A malformed rate like "6.5.1" doesn't match and goes to unexpected as an unknown label.
     if m := re.fullmatch(r"(?:sales\s+)?tax\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)\s*:?", label.strip(), re.I):
         if "tax_rate" in d or "tax_amount" in d:  # a second tax row: keep the first rate and amount paired
-            _keep(unexpected, f"{where}.{label.strip()}", value)
+            keep_unexpected(unexpected, f"{where}.{label.strip()}", value)
         else:
             d["tax_rate"], d["tax_amount"] = Decimal(m[1]) / 100, value
         return
     key = _FIELD_KEYS.get(_snake(label))
     if key not in _TOP_FIELDS or key in d:  # never overwrite: a second "total" is for review, not a winner
-        _keep(unexpected, f"{where}.{label.strip()}", value)
+        keep_unexpected(unexpected, f"{where}.{label.strip()}", value)
     else:
         d[key] = {"name": value} if key == "vendor" else value
 
@@ -340,7 +340,7 @@ def _extra_cells(row: list[str], width: int, n: int, unexpected: dict) -> None:
     """
     extra = row[width:]
     if any(c.strip() for c in extra):
-        _keep(unexpected, f"row[{n}].extra_cells", extra)
+        keep_unexpected(unexpected, f"row[{n}].extra_cells", extra)
 
 
 def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
@@ -354,7 +354,7 @@ def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
         unexpected: Collected unmapped fields; updated in place.
 
     Returns:
-        A JSON-shaped dict for _build.
+        A JSON-shaped dict for build_invoice.
     """
     d = {"line_items": []}
     line_open = False  # True from an `item` row until the next row that isn't one of that line's fields
@@ -394,7 +394,7 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict, confl
         conflicts: Collected CONFLICTING_ROWS flags; updated in place.
 
     Returns:
-        A JSON-shaped dict for _build.
+        A JSON-shaped dict for build_invoice.
     """
     d, first = {"line_items": []}, {}
     keys = [_FIELD_KEYS.get(h) for h in header]
@@ -421,7 +421,7 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict, confl
             # Anything else with a quantity or price is a line item with no product: load it, so
             # ITEM_MISSING blocks it, rather than dropping the line from the invoice.
             if not (cell_of(row, "quantity") or cell_of(row, "unit_price")):
-                _keep(unexpected, f"row[{n}]", row)
+                keep_unexpected(unexpected, f"row[{n}]", row)
                 continue
         i, li = len(d["line_items"]), {}
         _extra_cells(row, len(header), n, unexpected)
@@ -430,7 +430,7 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict, confl
                 if not li.get(key, "").strip():
                     li[key] = cell
                 elif cell.strip():  # repeated column (two "Qty"s): first wins, the other is for review
-                    _keep(unexpected, f"line_items[{i}].{h}", cell)
+                    keep_unexpected(unexpected, f"line_items[{i}].{h}", cell)
             elif key in _TOP_FIELDS and not first.get(h, "").strip():  # a blank first row claims nothing
                 first[h] = cell
             elif key in _TOP_FIELDS:
@@ -438,7 +438,7 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict, confl
                     conflicts.append({"code": "CONFLICTING_ROWS", "field": key, "row": n,
                                       "value": cell.strip(), "first_value": first[h].strip()})
             elif cell.strip():  # unknown column
-                _keep(unexpected, f"line_items[{i}].{h}", cell)
+                keep_unexpected(unexpected, f"line_items[{i}].{h}", cell)
         d["line_items"].append(li)
     for h, cell in first.items():
         _put(d, h, cell, unexpected, "header")
@@ -470,7 +470,7 @@ def from_csv(path: str | Path) -> Invoice:
         d = _csv_kv(rows[1:], unexpected)
     else:
         d = _csv_table(header, rows[1:], unexpected, conflicts)
-    inv = _build(d, path.name, unexpected)
+    inv = build_invoice(d, path.name, unexpected)
     inv.flags += conflicts
     return inv
 
@@ -506,10 +506,10 @@ def _xml_children(el, path: str, unexpected: dict) -> list:
         The child elements, in document order.
     """
     if el.attrib:
-        _keep(unexpected, f"{path}@attributes", dict(el.attrib))
+        keep_unexpected(unexpected, f"{path}@attributes", dict(el.attrib))
     for text in [el.text] + [child.tail for child in el]:
         if (text or "").strip():
-            _keep(unexpected, f"{path}#text", text.strip())
+            keep_unexpected(unexpected, f"{path}#text", text.strip())
     return list(el)
 
 
@@ -533,7 +533,7 @@ def _xml_field(el, where: str, target: dict, allowed: set, unexpected: dict) -> 
     tag = _snake(el.tag)
     path = f"{where}.{tag}" if where else tag
     if len(el) or el.attrib:
-        _keep(unexpected, path, _xml_raw(el))
+        keep_unexpected(unexpected, path, _xml_raw(el))
         return
     if not (el.text or "").strip():
         return
@@ -541,7 +541,7 @@ def _xml_field(el, where: str, target: dict, allowed: set, unexpected: dict) -> 
     if key in allowed and key not in target:
         target[key] = {"name": el.text} if key == "vendor" else el.text
     else:
-        _keep(unexpected, path, el.text)
+        keep_unexpected(unexpected, path, el.text)
 
 
 def _no_dtd(*_):
@@ -579,8 +579,8 @@ def from_xml(path: str | Path) -> Invoice:
     # instructions, which the element tree below doesn't keep.
     guard = expat.ParserCreate()
     guard.StartDoctypeDeclHandler = _no_dtd
-    guard.CommentHandler = lambda text: _keep(unexpected, "#comment", text.strip())
-    guard.ProcessingInstructionHandler = lambda target, data: _keep(unexpected, "#pi", f"{target} {data}".strip())
+    guard.CommentHandler = lambda text: keep_unexpected(unexpected, "#comment", text.strip())
+    guard.ProcessingInstructionHandler = lambda target, data: keep_unexpected(unexpected, "#pi", f"{target} {data}".strip())
     guard.Parse(raw, True)
     root = ET.fromstring(raw)
     if _snake(root.tag) != "invoice":
@@ -597,7 +597,7 @@ def from_xml(path: str | Path) -> Invoice:
             lines_read = True
             for item in _xml_children(child, tag, unexpected):
                 if _snake(item.tag) != "item":
-                    _keep(unexpected, f"{tag}.{_snake(item.tag)}", _xml_raw(item))
+                    keep_unexpected(unexpected, f"{tag}.{_snake(item.tag)}", _xml_raw(item))
                     continue
                 where, line = f"{tag}[{len(d['line_items'])}]", {}
                 for el in _xml_children(item, where, unexpected):
@@ -605,7 +605,7 @@ def from_xml(path: str | Path) -> Invoice:
                 d["line_items"].append(line)
         else:  # a plain field; or a second <line_items>, which _xml_field keeps whole (first wins)
             _xml_field(child, "", d, _TOP_FIELDS, unexpected)
-    return _build(d, path.name, unexpected)
+    return build_invoice(d, path.name, unexpected)
 
 
 LOADERS = {".json": from_json, ".csv": from_csv, ".xml": from_xml}

@@ -120,6 +120,72 @@ Submit your solution as a link to a public GitHub repository — GitHub only (gi
 
 ---
 
+## Running it
+
+```bash
+pip install -e ".[dev]"            # once
+cp .env.example .env               # once, then put your xAI key in it
+python main.py --invoice_path=data/invoices/invoice_1001.txt
+python main.py --invoice_path=data/invoices          # every invoice in the folder
+```
+
+`main.py` covers ingestion and validation. Structured files (JSON, CSV, XML) are read by the
+deterministic [normalizer](#invoice-normalizer); TXT and PDF files are transcribed by the model
+([LLM extraction](#llm-extraction)); every invoice then gets the same checks and severities.
+Output is a JSON list on stdout, one `{"file", "invoice"}` or `{"file", "error"}` entry per file.
+`inventory.db` is created from the seed data if it doesn't exist. Other options (`--offline`,
+`--model`, `--replays`) are passed through to `python -m extraction`.
+
+Approval and payment are not built yet.
+
+## LLM extraction
+
+`extraction/` handles the invoices that have no structure to parse.
+
+| File | Role |
+|---|---|
+| `extraction/__init__.py` | Reads the text (PDF text via PyMuPDF), prompts the model, builds the `Invoice` |
+| `extraction/providers.py` | `Grok` (xAI API) and `Replay` (recorded replies) |
+| `extraction/grounding.py` | Checks that every value the model returned is in the document |
+
+**The model only transcribes.** It copies each value exactly as written, as text, into a fixed JSON
+schema (strict structured output, temperature 0). It is told not to correct, compute or infer
+anything. Code does the rest: the transcription goes through the same builder and checks as a JSON
+file, so a quantity of "twelve" is `UNPARSEABLE` and a padded total is `TOTAL_MISMATCH`, whatever
+the model made of them.
+
+**The document is untrusted data.** It is sent in its own message inside `<document>` tags, which
+a document can't close itself, and the prompt says to follow no instruction found in it. A model
+that obeyed one anyway could only write text into a field; it has no way to change a flag.
+
+**Grounding.** Because values are copied verbatim, each one must appear in the document. One that
+doesn't was invented or altered by the model, for example an OCR error it "fixed", and gets a
+`NOT_IN_SOURCE` flag (REVIEW). The arithmetic checks can't see this, since a corrected number
+reconciles perfectly.
+
+- Matching is on whole tokens, so `5` is not found inside `$500.00` or `2026-01-15`.
+- A line item's item, quantity, price and amount must sit together on one line of the document, so
+  a value taken from another row is caught (`NOT_ON_ONE_LINE`).
+- It proves a value wasn't made up. It does not prove the value is in the right field, and it can't
+  see a line the model left out; the arithmetic checks catch that.
+
+**Failures.** Timeouts, rate limits (429) and server errors are retried, up to three attempts,
+with exponential backoff and jitter; a `Retry-After` header is honoured. A bad key or bad request
+fails at once. A truncated, refused, non-JSON or oddly shaped reply is an error entry for that one
+file, and the batch continues.
+
+**Recordings.** `Replay` saves each model reply under `data/replays`, keyed by a hash of the prompt
+and document text, and replays it on the next run. With recordings committed, the pipeline runs
+with no API key (`--offline`, or simply no key set).
+
+- A changed prompt or document misses and is recorded again.
+- The model isn't part of the key, so anyone can replay; with a key set, a recording made by a
+  different model is recorded again.
+- PyMuPDF is pinned to one version, because the key includes the PDF's extracted text.
+
+**No recordings are committed yet.** Until the folder is run once with a key, TXT and PDF files
+return a "no recording" error offline, and extraction accuracy on the samples is unmeasured.
+
 ## Invoice Normalizer
 
 The `normalizer` package turns invoice files into one standard structure and flags problems for
@@ -254,6 +320,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax + shipping ≠ stated total; `tax_basis` says which tax was used |
 | `STOCK_EXCEEDED` | item | REVIEW | Quantity summed across all of the item's lines exceeds stock |
 | `STOCK_UNKNOWN` | item | REVIEW | Inventory has no usable stock number for the item |
+| `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
@@ -299,7 +366,7 @@ With `--inventory inventory.db`:
 
 ### Not handled yet
 
-- TXT and PDF files (not loaded yet).
+- Scanned PDFs with no text layer (they need OCR first; the loader says so).
 - Product-name variants such as "Widget A" or "WidgetA (rush order)" (exact match only).
 - Currency conversion: a non-USD invoice is held for review, not converted.
 - Multiple tax rows: only the first counts, and the rest go to `unexpected_fields`.

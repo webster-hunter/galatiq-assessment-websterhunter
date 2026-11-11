@@ -39,6 +39,8 @@ SEVERITY = {
     "CURRENCY_UNSUPPORTED": "REVIEW",  # no conversion: hold rather than compare EUR to USD
     "STOCK_EXCEEDED": "REVIEW",
     "STOCK_UNKNOWN": "REVIEW",
+    # From LLM extraction: the model returned a value the document doesn't contain.
+    "NOT_IN_SOURCE": "REVIEW",
     "INVENTORY_NOT_CHECKED": "REVIEW",  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)

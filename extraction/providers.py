@@ -4,6 +4,7 @@ Two implementations of one method, complete(messages, schema) -> dict:
 
     Grok    xAI's chat-completions API with structured outputs. The model and endpoint are
             settings; another provider is one more class with the same complete() method.
+            Temporary failures (timeouts, rate limits, server errors) are retried with backoff.
     Replay  returns recorded responses, so the repo runs and tests with no key. Given a
             live provider, it records whatever it hasn't seen.
 
@@ -12,6 +13,8 @@ Standard library only (urllib), so the normalizer's no-dependency install still 
 import hashlib
 import json
 import os
+import random
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -34,11 +37,25 @@ class Grok:
         base_url: The API root.
         api_key: Defaults to the XAI_API_KEY environment variable.
         timeout: Seconds per request.
+        attempts: Total tries for one request, counting the first. Only temporary failures are
+            retried (see RETRY_STATUS); a bad key or a malformed request fails at once.
+        base_delay: Backoff unit in seconds. The wait before retry n is a random time between zero
+            and base_delay * 2**n (capped at max_delay). The randomness ("jitter") matters when
+            many invoices hit a rate limit together: without it they would all retry at the same
+            instant and hit it again.
+        max_delay: Longest single wait, in seconds.
+        sleep: The wait function; tests pass a stub so they don't actually wait.
     """
 
+    # Worth retrying: request timeout, rate limit, and server-side errors. Anything else (400 bad
+    # request, 401 bad key, 404 unknown model) will fail the same way every time.
+    RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
     def __init__(self, model: str = "grok-4", base_url: str = "https://api.x.ai/v1",
-                 api_key: str | None = None, timeout: float = 60):
+                 api_key: str | None = None, timeout: float = 60, attempts: int = 3,
+                 base_delay: float = 1.0, max_delay: float = 20.0, sleep=time.sleep):
         self.model, self.base_url, self.timeout = model, base_url.rstrip("/"), timeout
+        self.attempts, self.base_delay, self.max_delay, self._sleep = attempts, base_delay, max_delay, sleep
         self.api_key = api_key or os.environ.get("XAI_API_KEY")
         if not self.api_key:
             raise ProviderError("no API key: set XAI_API_KEY (see .env.example) or pass api_key")
@@ -47,7 +64,8 @@ class Grok:
         """Send one request and return the model's JSON object.
 
         Raises:
-            ProviderError: HTTP failure, a truncated or refused reply, or content that isn't a JSON object.
+            ProviderError: HTTP failure (after retries, if it was temporary), a reply in an
+                unexpected shape, a truncated or refused reply, or content that isn't a JSON object.
         """
         body = {
             "model": self.model,
@@ -56,24 +74,70 @@ class Grok:
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": "invoice", "strict": True, "schema": schema}},
         }
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions", data=json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+        reply = self._post(body)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                reply = json.load(r)
-        except urllib.error.HTTPError as e:
-            raise ProviderError(f"HTTP {e.code}: {e.read()[:500]!r}") from e
-        except (urllib.error.URLError, TimeoutError) as e:
-            raise ProviderError(f"request failed: {e}") from e
-        choice = reply["choices"][0]
+            choice = reply["choices"][0]
+            msg = choice["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            # An error body, or no choices: still the provider's failure, so it costs one file, not the batch.
+            raise ProviderError(f"unexpected reply shape: {str(reply)[:200]!r}") from e
         # A cut-off reply can still be valid JSON with fields missing: refuse it rather than load half an invoice.
         if choice.get("finish_reason") != "stop":
             raise ProviderError(f"reply not complete: finish_reason={choice.get('finish_reason')!r}")
-        msg = choice["message"]
         if msg.get("refusal"):
             raise ProviderError(f"model refused: {msg['refusal']}")
         return _json_object(msg.get("content"))
+
+
+    def _post(self, body: dict):
+        """POST the request, retrying temporary failures with jittered exponential backoff.
+
+        Returns:
+            The decoded JSON reply.
+
+        Raises:
+            ProviderError: A permanent failure, or a temporary one that outlasted every attempt.
+        """
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions", data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+        for attempt in range(self.attempts):
+            retry_after = None
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                problem = f"HTTP {e.code}: {e.read()[:500]!r}"
+                if e.code not in self.RETRY_STATUS:
+                    raise ProviderError(problem) from e
+                retry_after = _seconds(e.headers.get("Retry-After") if e.headers else None)
+            except (urllib.error.URLError, TimeoutError) as e:  # no connection, or no answer in time
+                problem = f"request failed: {e}"
+            except json.JSONDecodeError as e:
+                raise ProviderError(f"reply is not JSON: {e}") from e
+            if attempt + 1 < self.attempts:
+                self._sleep(self._delay(attempt, retry_after))
+        raise ProviderError(f"{problem} (gave up after {self.attempts} attempts)")
+
+    def _delay(self, attempt: int, retry_after: float | None = None) -> float:
+        """Seconds to wait before the retry that follows `attempt` (0 for the first try).
+
+        Full jitter: a random time between zero and the backoff ceiling, which doubles each
+        attempt. When the server names a wait (Retry-After), that is honoured as a minimum, with
+        a little jitter on top.
+        """
+        ceiling = min(self.max_delay, self.base_delay * 2 ** attempt)
+        if retry_after is not None:
+            return min(self.max_delay, retry_after) + random.uniform(0, self.base_delay)
+        return random.uniform(0, ceiling)
+
+
+def _seconds(value) -> float | None:
+    """A Retry-After header as seconds, or None if absent or not a plain number (it may be a date)."""
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _json_object(content) -> dict:
@@ -90,8 +154,14 @@ class Replay:
     """Replays recorded responses from a folder, one JSON file per request.
 
     A request is keyed by a hash of its messages and schema, so a changed prompt or file misses
-    instead of replaying a stale answer. The model isn't in the key; the file records which
-    model produced it.
+    instead of replaying a stale answer. The messages hold the document's text, so for PDFs the
+    key depends on the text extractor's exact output: that is why pymupdf is pinned to one
+    version in pyproject.toml.
+
+    The model isn't in the key, so someone with no key can replay whatever was recorded. The
+    file records which model produced it, and with a live provider a recording made by a
+    different model is not replayed: it is recorded again, so switching models never serves
+    the old model's answers.
 
     Args:
         folder: Where recordings live.
@@ -105,7 +175,10 @@ class Replay:
         key = hashlib.sha256(json.dumps([messages, schema], sort_keys=True).encode()).hexdigest()[:16]
         path = self.folder / f"{key}.json"
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))["response"]
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            live_model = getattr(self.live, "model", None)
+            if live_model is None or recorded.get("model") in (None, live_model):
+                return recorded["response"]
         if self.live is None:
             raise ProviderError(f"no recording {path.name}; run once with an API key to record it")
         response = self.live.complete(messages, schema)

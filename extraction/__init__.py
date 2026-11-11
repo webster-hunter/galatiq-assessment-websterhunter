@@ -6,7 +6,8 @@ file (typing, UNPARSEABLE flags) and the same checks and severities, so "twelve"
 UNPARSEABLE and a wrong total is TOTAL_MISMATCH, whatever the model thought of it.
 
     providers.py  Grok (xAI), Replay (recorded responses, no key needed)
-    this file     read text -> prompt -> transcription -> Invoice -> checks
+    grounding.py  is every transcribed value really in the document?
+    this file     read text -> prompt -> transcription -> grounding -> Invoice -> checks
 
 Structured files (JSON, CSV, XML) still go to the normalizer; normalize() here routes both.
 """
@@ -17,8 +18,9 @@ from pathlib import Path
 
 import normalizer
 from normalizer.models import Invoice
-from normalizer.parsing import LOADERS, _build, _keep
+from normalizer.parsing import LOADERS, build_invoice, keep_unexpected
 
+from .grounding import ungrounded
 from .providers import Grok, Provider, ProviderError, Replay
 
 __all__ = ["Grok", "Provider", "ProviderError", "Replay", "SCHEMA", "TEXT_SUFFIXES", "extract",
@@ -57,6 +59,9 @@ Rules:
 - For numbers, copy just the number as written (with any sign, currency symbol, commas and
   decimal point); leave out surrounding words and markers such as "qty", "x", "@" or "each".
 - A value the document does not state is null. Never fill a field from arithmetic or context.
+- The vendor is the party that issued the invoice and is to be paid (labelled Vendor, From,
+  Seller or similar). The party being billed (Bill To, To, Attn) is never the vendor; it goes
+  in other_fields.
 - tax_rate is the percentage as written, e.g. "5%". tax_amount is the tax money amount.
 - One line_items entry per invoice line, in document order, including repeated items. note is
   any per-line remark (e.g. "Volume discount").
@@ -109,14 +114,16 @@ def extract(path: str | Path, provider: Provider) -> Invoice:
         provider: Any Provider (Grok, Replay, a test stub).
 
     Returns:
-        The Invoice with UNPARSEABLE flags for values that didn't parse, but no check flags yet.
+        The Invoice with UNPARSEABLE flags for values that didn't parse and NOT_IN_SOURCE flags
+        for values the document doesn't contain, but no check flags yet.
 
     Raises:
         ValueError, OSError: The file can't be read (see read_text).
         ProviderError: The model call failed or returned something unusable.
     """
     path = Path(path)
-    t = provider.complete(_messages(read_text(path)), SCHEMA)
+    text = read_text(path)
+    t = provider.complete(_messages(text), SCHEMA)
     # Back into the JSON-file shape, so one builder types every format.
     d = {k: t.get(k) for k in _TOP_KEYS if k not in ("vendor_name", "vendor_address")}
     d["vendor"] = {"name": t.get("vendor_name"), "address": t.get("vendor_address")}
@@ -124,8 +131,11 @@ def extract(path: str | Path, provider: Provider) -> Invoice:
     d["line_items"] = t.get("line_items")
     unexpected = {}
     for f in t.get("other_fields") or []:
-        _keep(unexpected, f"other.{f.get('label')}", f.get("value"))
-    return _build(d, path.name, unexpected)
+        keep_unexpected(unexpected, f"other.{f.get('label')}", f.get("value"))
+    inv = build_invoice(d, path.name, unexpected)
+    # On the model's own strings, before any typing: "$1,250.00" is in the document, Decimal("1250.00") isn't.
+    inv.flags += ungrounded(t, text)
+    return inv
 
 
 def load(path: str | Path, provider: Provider, inventory: dict[str, int] | None = None) -> Invoice:

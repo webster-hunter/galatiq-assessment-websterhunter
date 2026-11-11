@@ -11,7 +11,11 @@ import os
 import sqlite3
 import sys
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional: without it, set XAI_API_KEY and LLM_MODEL in the environment
+    def load_dotenv():
+        return False
 
 from normalizer import inventory_from_db
 from normalizer.__main__ import _json_default
