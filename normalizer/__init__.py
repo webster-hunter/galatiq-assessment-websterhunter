@@ -17,7 +17,7 @@ from .models import Invoice, LineItem
 from .parsing import LOADERS
 from .severity import SEVERITIES, SEVERITY, severity
 
-__all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "expand", "flag", "inventory_from_db",
+__all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "check", "expand", "flag", "inventory_from_db",
            "load", "normalize", "severity"]
 
 
@@ -44,18 +44,31 @@ def load(path: str | Path, inventory: dict[str, int] | None = None) -> Invoice:
     suffix = Path(path).suffix.lower()
     if suffix not in LOADERS:
         raise ValueError(f"No loader for {suffix} files yet: {path}")
-    inv = LOADERS[suffix](path)
+    return check(LOADERS[suffix](path), inventory)
+
+
+def check(inv: Invoice, inventory: dict[str, int] | None = None) -> Invoice:
+    """Run every check on a built Invoice and grade each flag. Shared by every loader, LLM extraction included.
+
+    Args:
+        inv: An Invoice straight from a loader (only UNPARSEABLE or CONFLICTING_ROWS flags so far).
+        inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+
+    Returns:
+        The same Invoice, with the check flags added and a severity on every flag.
+    """
     inv.flags += flag(inv, inventory)  # here, not in each loader, so every format gets the same checks
     # Severity is set once, here, so parse-time and check-time flags are graded by the same table.
     inv.flags = [{"code": f["code"], "severity": severity(f), **f} for f in inv.flags]
     return inv
 
 
-def expand(paths) -> list[Path]:
+def expand(paths, suffixes=LOADERS) -> list[Path]:
     """Turn a mix of files and folders into the list of files to load.
 
     Args:
         paths: File and folder paths, as strings or Paths.
+        suffixes: Which extensions to take from a folder (lowercase, with the dot).
 
     Returns:
         Files as given, in order; each folder replaced by its supported files, sorted by name
@@ -64,7 +77,7 @@ def expand(paths) -> list[Path]:
     out = []
     for p in map(Path, paths):
         if p.is_dir():
-            out += sorted(f for f in p.iterdir() if f.suffix.lower() in LOADERS)
+            out += sorted(f for f in p.iterdir() if f.suffix.lower() in suffixes)
         else:
             out.append(p)
     return out

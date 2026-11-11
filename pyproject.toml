@@ -6,14 +6,15 @@ requires-python = ">=3.10"  # X | None type unions in the dataclasses
 dependencies = []  # standard library only
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+llm = ["pymupdf>=1.24", "python-dotenv>=1.0"]  # PDF text, .env for the CLI; the API client is stdlib
+dev = ["pytest>=8", "pymupdf>=1.24", "python-dotenv>=1.0"]
 
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["normalizer"]  # explicit: data/, tests/ and seed_inventory.py are not part of the package
+packages = ["normalizer", "extraction"]  # explicit: data/, tests/ and seed_inventory.py are not part of the package
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

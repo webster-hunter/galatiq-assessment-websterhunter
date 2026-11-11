@@ -803,7 +803,7 @@ def test_only_plain_numbers_are_read(tmp_path):
     """Text that Decimal alone would accept (digit-group underscores, exponents, digits from other scripts) is UNPARSEABLE, not read as a number."""
     f = tmp_path / "inv.json"
     for raw in ("1_0", "1e1", "\u0661\u0660"):  # the last is "10" in Arabic-Indic digits
-        f.write_text('{%s, "line_items": [{"item": "A", "quantity": "%s", "unit_price": 250}], "total": 2500}' % (BASE, raw))
+        f.write_text('{%s, "line_items": [{"item": "A", "quantity": "%s", "unit_price": 250}], "total": 2500}' % (BASE, raw), encoding="utf-8")
         inv = load(f)
         assert inv.line_items[0].quantity is None, raw
         assert ("REVIEW", "UNPARSEABLE") in graded(inv), raw
