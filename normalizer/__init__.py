@@ -49,19 +49,21 @@ def load(path: str | Path, inventory: dict[str, int] | None = None) -> Invoice:
     return check(LOADERS[suffix](path), inventory)
 
 
-def check(inv: Invoice, inventory: dict[str, int] | None = None) -> Invoice:
+def check(inv: Invoice, inventory: dict[str, int] | None = None, self_correct: bool = True) -> Invoice:
     """Repair what the invoice proves, run every check on a built Invoice, and grade each flag. Shared by every loader, LLM extraction included.
 
     Args:
         inv: An Invoice straight from a loader (only UNPARSEABLE or CONFLICTING_ROWS flags so far).
         inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+        self_correct: False skips the repairs, to measure what they change (see extraction.report).
 
     Returns:
         The same Invoice, with the check flags added and a severity on every flag.
     """
-    repair(inv)  # before the checks, so a repaired value is checked like any other
-    if inventory is not None:
-        repair_item_names(inv, inventory)
+    if self_correct:
+        repair(inv)  # before the checks, so a repaired value is checked like any other
+        if inventory is not None:
+            repair_item_names(inv, inventory)
     inv.flags += flag(inv, inventory)  # here, not in each loader, so every format gets the same checks
     # Severity is set once, here, so parse-time and check-time flags are graded by the same table.
     inv.flags = [{"code": f["code"], "severity": severity(f), **f} for f in inv.flags]

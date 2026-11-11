@@ -147,6 +147,7 @@ Approval and payment are not built yet.
 | `extraction/__init__.py` | Reads the text (PDF text via PyMuPDF), prompts the model, builds the `Invoice` |
 | `extraction/providers.py` | `Grok` (xAI API) and `Replay` (recorded replies) |
 | `extraction/grounding.py` | Checks that every value the model returned is in the document |
+| `extraction/report.py` | Measures what self-correction changes, file by file |
 
 **The model only transcribes.** It copies each value exactly as written, as text, into a fixed JSON
 schema (strict structured output, temperature 0). It is told not to correct, compute or infer
@@ -223,6 +224,30 @@ line without an amount, fully grounded. Both replies are recorded as the model p
 
 The model's output for 1002 varied between recording runs even at temperature 0 (total missing,
 correct, total duplicated), which is why the judge is code and not a re-reading by the model.
+
+### Does self-correction help?
+
+`python -m extraction.report data/invoices` runs every file twice from the recordings, without
+self-correction (one model attempt, no repairs) and with it, and compares the flags that would
+hold the invoice (BLOCK or REVIEW):
+
+| | Without | With |
+|---|---|---|
+| Holding flags across the 20 files | 39 | 30 |
+| Model calls for the 10 TXT and PDF files | 10 | 11 |
+| Files improved / worse / unchanged | | 3 / 0 / 17 |
+
+- **1002:** one retry removed the model's own error (`NOT_IN_SOURCE`). It is still held, for
+  stock and for being over $10K, which are the invoice's real problems.
+- **1012 (txt and pdf):** two OCR values and two item names repaired; four holding flags each
+  become none.
+- **1003, 1007, 1009, 1013:** unchanged. Self-correction fixes the model's and the scanner's
+  errors and leaves the vendor's alone.
+
+Fewer holding flags is a proxy: it shows problems that weren't the vendor's were removed, not
+that the final values are right. `tests/test_recordings.py` checks those against the documents.
+Ten text files with one real retry is a small sample; the report is there to be re-run as more
+invoices are recorded.
 
 Not done yet: detecting duplicates across files (1011, 1012 and 1013 each arrive twice), and
 anything that weighs warnings together. 1012 now carries only warnings, but it is $25 under the
