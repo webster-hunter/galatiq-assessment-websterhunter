@@ -25,7 +25,8 @@ OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT"
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
     "invoice_1002.txt": ("Gadgets Co.", "15000.00",  # number is a bare "1002"
-                         ["UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
+                         # NOT_IN_SOURCE is a real model error in this recording: see the test below.
+                         ["NOT_IN_SOURCE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
     "invoice_1003.txt": ("Fraudster LLC", "100000.00",  # due "yesterday"
                          ["UNPARSEABLE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),  # terms "Immediate"
     "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]),
@@ -33,9 +34,9 @@ EXPECTED = {
     "invoice_1010.txt": ("Consolidated Materials Group", "7185.00", ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]),
     "invoice_1011.txt": ("Summit Manufacturing Co.", "3000.00", []),
     "invoice_1011.pdf": ("Summit Manufacturing Co.", "3000.00", []),
-    "invoice_1012.txt": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FIELDS"]),  # FROM, not the TO party
-    # For the PDF the model also returned the "$" from an amount as the currency: read as USD, noted as not a code.
-    "invoice_1012.pdf": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FORMAT", "UNEXPECTED_FIELDS"]),
+    # Vendor is the FROM party alone: not the TO party, and without the "(formerly FastShip Ltd.)" remark.
+    "invoice_1012.txt": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FIELDS"]),
+    "invoice_1012.pdf": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FIELDS"]),
     "invoice_1013.pdf": ("Atlas Industrial Supply", "22562.80",
                          ["OVER_APPROVAL_THRESHOLD"] + ["DUPLICATE_ITEM"] * 3 + ["STOCK_EXCEEDED"] * 3
                          + ["TOTAL_MISMATCH"]),
@@ -67,6 +68,21 @@ def test_grounding_caught_a_real_model_error():
     assert (f["code"], f["field"], f["reason"]) == ("NOT_IN_SOURCE", "line_items[0]", "NOT_ON_ONE_LINE")
 
 
+def test_the_recorded_1002_has_a_model_error_and_grounding_holds_it():
+    """In the committed recording Grok copied 1002's invoice total onto its line item as well, against the prompt. The total is right, and grounding flags the line (REVIEW): the amount isn't on that row."""
+    inv = load(INVOICES / "invoice_1002.txt", Replay(REPLAYS), INVENTORY)
+    assert inv.total == Decimal("15000.00") and inv.line_items[0].amount == Decimal("15000.00")
+    [f] = [f for f in inv.flags if f["code"] == "NOT_IN_SOURCE"]
+    assert (f["severity"], f["field"], f["reason"]) == ("REVIEW", "line_items[0]", "NOT_ON_ONE_LINE")
+
+
+def test_former_vendor_name_is_kept_apart_from_the_vendor():
+    """1012's "(formerly FastShip Ltd.)" is not part of the vendor name; it is kept for review in unexpected_fields."""
+    inv = load(INVOICES / "invoice_1012.txt", Replay(REPLAYS), INVENTORY)
+    assert inv.vendor_name == "QuickShip Distributers" and inv.currency is None
+    assert inv.unexpected_fields["other.formerly"] == "FastShip Ltd."
+
+
 def test_1002_date_without_a_comma_is_read():
     """1002's "Jan 30 2026" is a date, not an unreadable value; the invoice is held for stock and its amount, not for our parser."""
     from datetime import date
@@ -81,5 +97,4 @@ def test_unexpected_formats_on_the_samples():
     both_1012 = {(n, field, value) for n in ("invoice_1012.txt", "invoice_1012.pdf") for field, value in (
         ("invoice_number", "INV 1012"), ("line_items[0].item", "Widget A"), ("line_items[2].item", "Gadget X"))}
     assert found == both_1012 | {("invoice_1002.txt", "invoice_number", "1002"),
-                                 ("invoice_1003.txt", "payment_terms", "Immediate"),
-                                 ("invoice_1012.pdf", "currency", "$")}
+                                 ("invoice_1003.txt", "payment_terms", "Immediate")}

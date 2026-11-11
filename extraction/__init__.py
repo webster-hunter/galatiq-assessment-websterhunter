@@ -62,7 +62,11 @@ Rules:
 - The vendor is the party that issued the invoice and is to be paid (labelled Vendor, From,
   Seller or similar). The party being billed (Bill To, To, Attn) is never the vendor; it goes
   in other_fields.
+- vendor_name is the vendor's name alone. A remark about the vendor, such as a former name
+  ("formerly FastShip Ltd."), goes in other_fields.
 - tax_rate is the percentage as written, e.g. "5%". tax_amount is the tax money amount.
+- currency is a currency the document names, as a code or word (USD, EUR, "US dollars"). A
+  currency symbol on an amount, such as "$", is not one: with no named currency, currency is null.
 - total is the invoice's overall amount, however it is labelled (Total, Total Amount, Amount,
   Amt, Amount Due, Grand Total).
 - One line_items entry per invoice line, in document order, including repeated items. A line's

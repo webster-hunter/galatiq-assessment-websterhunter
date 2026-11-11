@@ -194,17 +194,20 @@ From the recorded replies, with the seed inventory:
 | Invoice | Result |
 |---|---|
 | 1001, 1011 (txt and pdf) | Clean |
-| 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002` |
+| 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002`; `NOT_IN_SOURCE` on the line item (a model error, below) |
 | 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for terms `Immediate`. The "URGENT" note is transcribed into `notes` and changes nothing |
 | 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
-| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party |
+| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party, with "formerly FastShip Ltd." kept apart in `unexpected_fields` |
 | 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 
-Every vendor and total is correct and no value is ungrounded. On the first recording run the model
-put 1002's invoice total ("Amt: $15,000.00") on the line item; the grounding check flagged it
-(`NOT_ON_ONE_LINE`), and the prompt now says how a total may be labelled. That reply is kept as a
-test case.
+Every vendor and total is correct. One recording contains a real model error, left in on purpose:
+on 1002 the model copied the invoice total ("Amt: $15,000.00") onto the line item as well, although
+the prompt says a line amount must be on the line's own row. The grounding check flags it
+(`NOT_ON_ONE_LINE`, REVIEW), so the invoice is held rather than trusted. The model's output for
+this file varied between recording runs even at temperature 0: in an earlier run it left the total
+empty, and in another it got the line right. Recordings are kept as the model produced them, not
+re-run until they look clean; a retry on a grounding failure is the planned fix.
 
 Not done yet: repairing OCR damage (1012 is held, not fixed), matching name variants such as
 "Widget A", and detecting duplicates across files (1011, 1012 and 1013 each arrive twice).
