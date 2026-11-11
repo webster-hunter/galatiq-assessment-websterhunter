@@ -129,16 +129,63 @@ python main.py --invoice_path=data/invoices/invoice_1001.txt
 python main.py --invoice_path=data/invoices          # every invoice in the folder
 ```
 
-`main.py` covers ingestion, validation and the approval policy. Structured files (JSON, CSV, XML)
-are read by the deterministic [normalizer](#invoice-normalizer); TXT and PDF files are transcribed
-by the model ([LLM extraction](#llm-extraction)); every invoice then gets the same checks and
-severities, and the [policy floor](#approval-policy) turns its flags into a decision. Output is a
-JSON list on stdout, one `{"file", "decision", "invoice"}` or `{"file", "error"}` entry per file.
-`inventory.db` is created from the seed data if it doesn't exist. Other options (`--offline`,
-`--model`, `--replays`) are passed through to `python -m extraction`.
+`main.py` runs each invoice through the [pipeline graph](#pipeline): ingestion, validation, the
+approval policy, and one of three outcomes. Output is a JSON list on stdout, one `{"file",
+"decision", "result", "trail", "invoice"}` or `{"file", "error"}` entry per file. Add `--trace`
+to print each step to stderr as it happens, one JSON line per node. `inventory.db` is created from
+the seed data if it doesn't exist. `--offline`, `--model` and `--replays` control the model.
 
 Not built yet: the reviewer agent that explains and can tighten a decision, payment, and anything
 that compares invoices with each other (duplicates, revisions).
+
+## Pipeline
+
+`pipeline/graph.py` wires the stages together as a [LangGraph](https://langchain-ai.github.io/langgraph/)
+graph. Each stage is a node; the dotted arrows are branches chosen from the invoice's state.
+
+```mermaid
+graph TD;
+    START --> ingest;
+    ingest -.-> validate;
+    ingest -.-> failed;
+    validate --> approve;
+    approve -.-> pay;
+    approve -.-> hold;
+    approve -.-> reject;
+    pay --> END;
+    hold --> END;
+    reject --> END;
+    failed --> END;
+```
+
+| Node | What it does | Calls |
+|---|---|---|
+| `ingest` | Reads the file into an `Invoice`: a parser for JSON, CSV and XML, the model for TXT and PDF | `normalizer`, `extraction` |
+| `validate` | Repairs what the invoice proves, runs every check against the inventory, grades each flag | `normalizer.check` |
+| `approve` | The policy floor: the minimum outcome the flags require | `approval.decide` |
+| `pay`, `hold`, `reject` | Records the outcome. Payment and the review queue are not built | |
+| `failed` | The file couldn't be read, so there is nothing to decide | |
+
+- **One state per invoice.** A run starts with the file path. Each node returns only what it
+  adds (the invoice, the decision, the result) and LangGraph merges it in.
+- **The nodes are thin.** Each calls one function from `normalizer`, `extraction` or `approval`,
+  and none of those packages imports LangGraph. The graph only decides what runs next.
+- **Branches read the state, they don't decide.** The outcome is set by the `approve` node; the
+  branch after it only looks at that outcome and picks a node.
+- **A trail of steps.** Every node appends one entry saying what it did. It comes back in the
+  output as `trail`, and `--trace` prints the entries live:
+
+```
+{"file": "invoice_1003.txt", "node": "ingest", "method": "llm", "model_attempts": 1}
+{"file": "invoice_1003.txt", "node": "validate", "flags": ["UNPARSEABLE", "UNEXPECTED_FORMAT", ...]}
+{"file": "invoice_1003.txt", "node": "approve", "outcome": "REJECT", "rule": "FRAUD_SIGNALS", "because": [...]}
+{"file": "invoice_1003.txt", "node": "reject", "status": "REJECTED", "reasons": [...]}
+```
+
+Why a graph for a straight line with two branches: the stages still to come need what a script
+handles badly. The reviewer and critic loop is an edge pointing backwards, and a held invoice is
+a run that pauses for a person and resumes later. Both are LangGraph features, and both arrive as
+new nodes and edges in this one file.
 
 ## Approval policy
 

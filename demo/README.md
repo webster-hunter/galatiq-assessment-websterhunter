@@ -95,6 +95,16 @@ Two to show:
 Not yet true, so don't claim it: that nothing is paid twice. 1011 is approved in both its
 copies, and 1004 alongside its revision, until the ledger exists.
 
+## Watching one invoice move through the pipeline
+
+```bash
+python main.py --invoice_path=data/invoices/invoice_1003.txt --offline --trace > /dev/null
+```
+
+Prints one line per stage as it finishes: how the file was read, the flags found, the decision
+with the rule and reasons, and the branch taken. Good for showing the four stages without
+scrolling through JSON. The pipeline diagram is in the main README.
+
 ## Other facts worth having to hand
 
 | Fact | Where it comes from |
