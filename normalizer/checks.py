@@ -90,8 +90,10 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         invoice_invalid("tax_rate", inv.tax_rate, "TAX_NEGATIVE")
 
     # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
-    # rate. No stated currency is read as USD (the CSVs never state one).
-    if inv.currency is not None and inv.currency.upper() != "USD":
+    # rate. No stated currency is read as USD (the CSVs never state one), and so is a bare "$": the
+    # model sometimes returns the symbol from "$9,975.00" as the currency, and amounts written with
+    # "$" are already read as dollars everywhere else.
+    if inv.currency is not None and inv.currency.upper() not in ("USD", "US$", "$"):
         flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency})
 
     # One flag listing every path, so an agent knows to read unexpected_fields without scanning it first.

@@ -63,8 +63,12 @@ Rules:
   Seller or similar). The party being billed (Bill To, To, Attn) is never the vendor; it goes
   in other_fields.
 - tax_rate is the percentage as written, e.g. "5%". tax_amount is the tax money amount.
-- One line_items entry per invoice line, in document order, including repeated items. note is
-  any per-line remark (e.g. "Volume discount").
+- total is the invoice's overall amount, however it is labelled (Total, Total Amount, Amount,
+  Amt, Amount Due, Grand Total).
+- One line_items entry per invoice line, in document order, including repeated items. A line's
+  amount is only a value written on that line's own row; never put an invoice-level figure there.
+  note is any per-line remark (e.g. "Volume discount"), including one in parentheses after the
+  item name: "WidgetA (rush order)" is item "WidgetA" with note "rush order".
 - notes is the document's notes or remarks text, verbatim.
 - Every other labelled value (PO number, bill-to, sender, contact, bank details) goes in
   other_fields with its label as written."""
