@@ -7,8 +7,10 @@
 
 Agents call normalize() from Python, or the CLI: python -m normalizer --help
 """
+import csv
 from dataclasses import asdict
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from .checks import flag, inventory_from_db
 from .models import Invoice, LineItem
@@ -17,6 +19,12 @@ from .severity import SEVERITIES, SEVERITY, severity
 
 __all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "expand", "flag", "inventory_from_db",
            "load", "normalize", "severity"]
+
+
+# What an unreadable or malformed file raises. ValueError covers invalid JSON, wrong encoding, an
+# unsupported extension and the loaders' own refusals. Anything else is a bug in this package and
+# is left to propagate with its traceback, not reported as if the vendor's file were bad.
+LOAD_ERRORS = (OSError, ValueError, ExpatError, csv.Error)
 
 
 def load(path: str | Path, inventory: dict[str, int] | None = None) -> Invoice:
@@ -65,7 +73,8 @@ def expand(paths) -> list[Path]:
 def normalize(paths, inventory: dict[str, int] | None = None) -> list[dict]:
     """Load every invoice in paths. This is the entry point agents call from Python.
 
-    A file that can't be loaded becomes an error entry instead of stopping the batch.
+    A file that can't be loaded (see LOAD_ERRORS) becomes an error entry instead of stopping the
+    batch. Any other exception is a bug here, and propagates.
 
     Args:
         paths: File and folder paths (see expand).
@@ -79,6 +88,6 @@ def normalize(paths, inventory: dict[str, int] | None = None) -> list[dict]:
     for p in expand(paths):
         try:
             results.append({"file": str(p), "invoice": asdict(load(p, inventory))})
-        except Exception as e:
+        except LOAD_ERRORS as e:
             results.append({"file": str(p), "error": f"{type(e).__name__}: {e}"})
     return results

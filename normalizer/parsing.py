@@ -1,7 +1,8 @@
 """Parse invoice files (JSON, both CSV shapes, XML) into the standard Invoice structure.
 
 Values are parsed and typed, never corrected. A value that can't be read becomes None plus an
-UNPARSEABLE flag; every other check lives in checks.py.
+UNPARSEABLE flag, and CSV rows that disagree on an invoice-level field get CONFLICTING_ROWS;
+every other check lives in checks.py.
 """
 import csv
 import json
@@ -72,7 +73,8 @@ def _date(v) -> date | None:
 
 
 # "$1,250.00", "-$250", "1250": an optional sign and $, then digits with correctly placed thousands commas.
-_MONEY = re.compile(r"(-?)\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?")
+# ASCII digits only: \d alone would also match digits from other scripts.
+_MONEY = re.compile(r"(-?)\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?", re.ASCII)
 
 
 def _money(v) -> Decimal | None:
@@ -87,8 +89,8 @@ def _money(v) -> Decimal | None:
         The Decimal, or None for null or blank.
 
     Raises:
-        InvalidOperation: Unreadable text, including misplaced commas ("1,25,0").
-        ValueError: NaN or Infinity.
+        ValueError: Text that isn't a plain number: misplaced commas ("1,25,0"), digit-group
+            underscores ("1_000", which Decimal alone would accept), exponents, NaN or Infinity.
         TypeError: A bool.
         The caller records any of these as UNPARSEABLE.
     """
@@ -96,11 +98,15 @@ def _money(v) -> Decimal | None:
         raise TypeError("expected a number, got bool")
     if isinstance(v, str):
         v = _text(v)  # blank CSV cell -> None, not Decimal("")
-        if v and (m := _MONEY.fullmatch(v)):
-            v = m[1] + m[2].replace(",", "") + (m[3] or "")
+        if v is None:
+            return None
+        m = _MONEY.fullmatch(v)
+        if not m:  # Decimal() is too generous for vendor text: it reads "1_0" as 10 and "1e3" as 1000
+            raise ValueError(f"not a plain number: {v!r}")
+        v = m[1] + m[2].replace(",", "") + (m[3] or "")
     if v is None:
         return None
-    d = Decimal(str(v))  # anything still unreadable raises InvalidOperation
+    d = Decimal(str(v))
     if not d.is_finite():  # "NaN"/"Infinity" parse as Decimals but break every comparison downstream
         raise ValueError(f"not a finite number: {v}")
     return d
@@ -145,14 +151,33 @@ def from_json(path: str | Path) -> Invoice:
     Raises:
         OSError: The file can't be read.
         json.JSONDecodeError: The file isn't valid JSON.
-        AttributeError: The top level isn't a JSON object.
+        ValueError: The top level isn't a JSON object.
     """
     path = Path(path)
+    repeats = []
+
+    def first_wins(pairs):
+        # json.loads alone keeps the LAST value of a repeated key and drops the others silently.
+        # Keep the first, as CSV and XML do, and hold the rest for review.
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                repeats.append((key, value))
+            else:
+                obj[key] = value
+        return obj
+
     # parse_float=Decimal keeps money exact: 1472.80 never passes through a float.
     # parse_constant=str: the non-standard NaN/Infinity literals stay text, get flagged UNPARSEABLE,
     # and never reach the output as a bare NaN that strict JSON readers reject.
-    d = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal, parse_constant=str)
-    return _build(d, path.name, _unexpected(d))
+    d = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal, parse_constant=str,
+                   object_pairs_hook=first_wins)
+    if not isinstance(d, dict):
+        raise ValueError(f"top level is a JSON {type(d).__name__}, not an object: not an invoice")
+    unexpected = _unexpected(d)
+    for key, value in repeats:
+        _keep(unexpected, f"repeated_key.{key}", value)
+    return _build(d, path.name, unexpected)
 
 
 def _build(d: dict, source_file: str, unexpected: dict) -> Invoice:
@@ -332,6 +357,7 @@ def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
         A JSON-shaped dict for _build.
     """
     d = {"line_items": []}
+    line_open = False  # True from an `item` row until the next row that isn't one of that line's fields
     for n, row in enumerate(rows, start=2):  # numbered as a spreadsheet shows them
         if not any(c.strip() for c in row):
             continue
@@ -341,45 +367,65 @@ def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
         lines = d["line_items"]
         if key == "item":
             lines.append({"item": value})
-        elif key in _JSON_LINE and lines and not lines[-1].get(key, "").strip():
+            line_open = True
+        elif key in _JSON_LINE and line_open and not lines[-1].get(key, "").strip():
             lines[-1][key] = value
         else:
+            # An invoice-level row closes the line: a `note` or `amount` after `total` is not that
+            # line's, so it goes to unexpected rather than being buried in the last line item.
+            line_open = False
             _put(d, label, value, unexpected, f"row[{n}]")
     return d
 
 
-def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict) -> dict:
+def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict, conflicts: list) -> dict:
     """Read a row-per-item CSV (the 1007 shape) into a JSON-shaped dict.
 
-    Invoice fields repeat on every row and are taken from the first; a later row that disagrees
-    goes to unexpected. A row with a blank Item cell is a footer: its first filled cell is the
-    label and its last is the value ("Subtotal:", "14750.00").
+    Invoice fields repeat on every row and are taken from the first. A later row that disagrees
+    is recorded in conflicts: rows for INV-A and INV-B in one file must not load as one invoice.
+    A row with a blank Item cell holding just a label and a value is a footer ("Subtotal:",
+    "14750.00"). Any other blank-Item row with a quantity or price is still a line item, and is
+    flagged for its missing item.
 
     Args:
         header: The header row, already snake_cased.
         rows: Data rows, without the header.
         unexpected: Collected unmapped fields; updated in place.
+        conflicts: Collected CONFLICTING_ROWS flags; updated in place.
 
     Returns:
         A JSON-shaped dict for _build.
     """
     d, first = {"line_items": []}, {}
-    item_col = header.index("item") if "item" in header else None
+    keys = [_FIELD_KEYS.get(h) for h in header]
+    if "amount" not in keys:
+        # Item, Qty, Unit Price, Total: with no other amount column, a "Total" column is each
+        # line's total. The invoice total comes from a footer row.
+        keys = ["amount" if h == "total" else k for h, k in zip(header, keys)]
+    cols = {k: i for i, k in reversed(list(enumerate(keys))) if k}  # first column for each key
+
+    def cell_of(row, key):
+        i = cols.get(key)
+        return row[i].strip() if i is not None and i < len(row) else ""
+
     for n, row in enumerate(rows, start=2):
         cells = [c for c in row if c.strip()]
         if not cells:
             continue
-        if item_col is not None and not (row[item_col:item_col + 1] or [""])[0].strip():
-            # Footer, e.g. ",,,,,,Subtotal:,14750.00": label is the first filled cell, value the last.
-            if len(cells) == 2:
+        if "item" in cols and not cell_of(row, "item"):
+            # Blank Item cell. A label and a value (",,,,,,Subtotal:,14750.00") is a footer. The label
+            # sits in whatever column the vendor put it, so it is told apart by not being a number.
+            if len(cells) == 2 and not _MONEY.fullmatch(cells[0].strip()):
                 _put(d, cells[0], cells[1], unexpected, f"row[{n}]")
-            else:
+                continue
+            # Anything else with a quantity or price is a line item with no product: load it, so
+            # ITEM_MISSING blocks it, rather than dropping the line from the invoice.
+            if not (cell_of(row, "quantity") or cell_of(row, "unit_price")):
                 _keep(unexpected, f"row[{n}]", row)
-            continue
+                continue
         i, li = len(d["line_items"]), {}
         _extra_cells(row, len(header), n, unexpected)
-        for h, cell in zip(header, row):
-            key = _FIELD_KEYS.get(h)
+        for h, key, cell in zip(header, keys, row):
             if key in _JSON_LINE:
                 if not li.get(key, "").strip():
                     li[key] = cell
@@ -387,8 +433,11 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict) -> di
                     _keep(unexpected, f"line_items[{i}].{h}", cell)
             elif key in _TOP_FIELDS and not first.get(h, "").strip():  # a blank first row claims nothing
                 first[h] = cell
-            elif cell.strip() and (key not in _TOP_FIELDS or cell.strip() != first[h].strip()):
-                # unknown column, or rows disagree on vendor etc.
+            elif key in _TOP_FIELDS:
+                if cell.strip() and cell.strip() != first[h].strip():
+                    conflicts.append({"code": "CONFLICTING_ROWS", "field": key, "row": n,
+                                      "value": cell.strip(), "first_value": first[h].strip()})
+            elif cell.strip():  # unknown column
                 _keep(unexpected, f"line_items[{i}].{h}", cell)
         d["line_items"].append(li)
     for h, cell in first.items():
@@ -403,8 +452,8 @@ def from_csv(path: str | Path) -> Invoice:
         path: The .csv file, UTF-8 (with or without a BOM).
 
     Returns:
-        The Invoice, with UNPARSEABLE flags for unreadable values but no check flags yet
-        (load() adds those).
+        The Invoice, with UNPARSEABLE flags for unreadable values and CONFLICTING_ROWS flags for
+        rows that disagree on an invoice-level field, but no check flags yet (load() adds those).
 
     Raises:
         OSError: The file can't be read.
@@ -416,12 +465,14 @@ def from_csv(path: str | Path) -> Invoice:
         rows = list(csv.reader(f))
     if not rows:
         raise ValueError(f"Empty CSV: {path}")
-    header, unexpected = [_snake(h) for h in rows[0]], {}
+    header, unexpected, conflicts = [_snake(h) for h in rows[0]], {}, []
     if header[:2] == ["field", "value"]:
         d = _csv_kv(rows[1:], unexpected)
     else:
-        d = _csv_table(header, rows[1:], unexpected)
-    return _build(d, path.name, unexpected)
+        d = _csv_table(header, rows[1:], unexpected, conflicts)
+    inv = _build(d, path.name, unexpected)
+    inv.flags += conflicts
+    return inv
 
 
 # The XML shape in the sample (1014): an <invoice> root holding plain fields, optionally grouped

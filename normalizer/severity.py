@@ -23,6 +23,8 @@ SEVERITY = {
     "TOTAL_MISSING": "BLOCK",  # no amount to pay
     "TOTAL_NEGATIVE": "BLOCK",
     "SHIPPING_NEGATIVE": "BLOCK",
+    "TAX_NEGATIVE": "BLOCK",  # negative tax would offset inflated lines
+    "CONFLICTING_ROWS": "BLOCK",  # CSV rows disagree on invoice number, vendor, ...: more than one invoice
     "LINE_AMOUNT_MISMATCH": "BLOCK",
     "SUBTOTAL_MISMATCH": "BLOCK",
     "TAX_AMOUNT_MISMATCH": "BLOCK",
@@ -37,6 +39,7 @@ SEVERITY = {
     "CURRENCY_UNSUPPORTED": "REVIEW",  # no conversion: hold rather than compare EUR to USD
     "STOCK_EXCEEDED": "REVIEW",
     "STOCK_UNKNOWN": "REVIEW",
+    "INVENTORY_NOT_CHECKED": "REVIEW",  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)

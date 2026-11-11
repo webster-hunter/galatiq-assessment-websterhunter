@@ -151,9 +151,11 @@ pytest                                             # tests live in tests/
 - **Input:** any mix of files and folders. A folder contributes every supported file in it.
   Supported today: `.json`, `.csv` (both CSV shapes in the sample data) and `.xml`.
 - **`--inventory`:** optional SQLite database, opened read-only. It turns on the unknown-product and
-  stock checks. Without it those checks are skipped, never guessed.
+  stock checks. Without it those checks can't run, and every invoice says so with an
+  `INVENTORY_NOT_CHECKED` flag (REVIEW), so an unchecked invoice never looks like one that passed.
 - **Output:** a JSON list on stdout, one entry per file: `{"file", "invoice"}` or `{"file", "error"}`.
-  One bad file never stops the batch.
+  One bad file never stops the batch. Only file problems become error entries (unreadable,
+  malformed, unsupported type); any other exception is a bug in the normalizer and is raised.
 - **Exit code:** 1 if any entry is an error, otherwise 0.
 
 ### Normalization rules
@@ -163,7 +165,8 @@ date, due date, line items (item, quantity, unit price, stated amount, note), su
 amount, shipping, total, currency, payment terms, revision, notes and source file.
 
 - **Money is exact.** Amounts are `Decimal`, never float, and appear in the JSON output as strings
-  (`"22562.80"`). `$1,250.00` and `-$250` are read as plain amounts.
+  (`"22562.80"`). `$1,250.00` and `-$250` are read as plain amounts. Only plain numbers are read:
+  `1_000`, `1e3` and digits from other scripts are `UNPARSEABLE`, not guessed.
 - **Dates** are read from an explicit list of the formats vendors use: `2026-01-24`, `01/28/2026`,
   `January 27, 2026`, `Jan 27, 2026` and `25-Feb-2026`. Slash dates are US order, so `01/02/2026` is
   2 January. Any other text (`yesterday`) is `UNPARSEABLE`, never guessed. The list doesn't depend on
@@ -178,13 +181,19 @@ amount, shipping, total, currency, payment terms, revision, notes and source fil
 - **Nothing is silently dropped.** Fields the loader doesn't recognise, repeated CSV columns or
   labels, and cells beyond a CSV's header all go to `unexpected_fields`, labelled by where they were
   found (`vendor.tax_id`, `line_items[1].qty`, `row[4].Handling:`, `row[2].extra_cells`). The first
-  value always wins; a second `Total:` row never replaces the first. A repeat of the same path is
-  kept as `path#2`, `path#3`.
+  value always wins; a second `Total:` row never replaces the first, and a JSON key given twice keeps
+  its first value (`repeated_key.total`). A repeat of the same path is kept as `path#2`, `path#3`.
 - **CSV shapes.** `field,value` files (1006) start a new line item at each `item` row, so repeated
   keys keep every item. Row-per-item files (1007, 1015) take invoice fields from the first row and
   read totals from footer rows; `Tax (6%):` gives both the rate (0.06) and the amount. Common label
   variants map to the same fields: `Sales Tax` (and `Sales Tax (5%)`), `Shipping & Handling`,
   `Grand Total` and `Total Amount`.
+- **Reading CSV rows.** In a row-per-item file, a row with no item but a quantity or price is still
+  a line item (flagged `ITEM_MISSING`); only a bare label and value is a footer. A `Total` column,
+  when there is no other amount column, is each line's total; the invoice total comes from a footer.
+  Rows that disagree on an invoice-level field get `CONFLICTING_ROWS`: a file holding INV-A and
+  INV-B is not loaded as one invoice. In a `field,value` file, a `note` or `amount` row that follows
+  an invoice-level row goes to `unexpected_fields`, not onto the last line item.
 - **XML.** The root must be `<invoice>`; any other document is a file error. Fields are plain
   elements under the root or inside `<header>` and `<totals>` (1014). Line items are `<item>`
   elements under one `<line_items>`, with `<name>` read as the item. Field names map as for CSV
@@ -230,6 +239,8 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `TOTAL_MISSING` | `total` | BLOCK | No total, so nothing to pay against |
 | `TOTAL_NEGATIVE` | `total` | BLOCK | Total below zero |
 | `SHIPPING_NEGATIVE` | `shipping` | BLOCK | Shipping below zero; it would quietly offset an inflated line sum |
+| `TAX_NEGATIVE` | `tax_amount` or `tax_rate` | BLOCK | Tax below zero; same risk as negative shipping |
+| `CONFLICTING_ROWS` | the field, with `row`, `value`, `first_value` | BLOCK | CSV rows disagree on an invoice-level field such as invoice number or vendor |
 | `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match) |
 | `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |
 | `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
@@ -243,6 +254,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax + shipping ≠ stated total; `tax_basis` says which tax was used |
 | `STOCK_EXCEEDED` | item | REVIEW | Quantity summed across all of the item's lines exceeds stock |
 | `STOCK_UNKNOWN` | item | REVIEW | Inventory has no usable stock number for the item |
+| `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 
@@ -259,7 +271,9 @@ Notes on the checks:
 - **Stock is summed per item, not checked per line.** Every line of 1013 is within stock on its own,
   but together they need 22 WidgetA against 15. Invalid quantities aren't counted toward the total.
 - **Arithmetic is recomputed, never trusted.** Recomputed values are rounded to the cent (half up)
-  before comparing. The total is checked against the line items rather than the stated subtotal, so
+  before comparing. A difference that rounding alone can explain is not flagged: one cent on a line
+  amount or the tax, and half a cent per line on a sum of lines (a vendor who rounds each line
+  before adding). 1007's $110 and 1013's $50 are far outside that. The total is checked against the line items rather than the stated subtotal, so
   one wrong number gives one flag: 1009 gets only `SUBTOTAL_MISMATCH`. When no tax amount is
   stated, the total check uses the tax rate if there is one, otherwise zero tax, and the flag's
   `tax_basis` records which (`STATED`, `FROM_RATE` or `NONE_STATED`). Shipping is added after tax

@@ -6,7 +6,7 @@ Each check adds a flag with a stable code and its evidence. Severity is graded s
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, ROUND_UP, Decimal
 from pathlib import Path
 
 from .models import Invoice
@@ -81,8 +81,13 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
                       "value": inv.due_date, "invoice_date": inv.date})
     if not inv.line_items:  # a bill for nothing must not look clean
         invoice_invalid("line_items", None, "LINE_ITEMS_MISSING")
-    if inv.shipping is not None and inv.shipping < 0:  # would quietly offset an inflated line sum
+    # A negative tax or shipping amount would quietly offset an inflated line sum.
+    if inv.shipping is not None and inv.shipping < 0:
         invoice_invalid("shipping", inv.shipping, "SHIPPING_NEGATIVE")
+    if inv.tax_amount is not None and inv.tax_amount < 0:
+        invoice_invalid("tax_amount", inv.tax_amount, "TAX_NEGATIVE")
+    if inv.tax_rate is not None and inv.tax_rate < 0:
+        invoice_invalid("tax_rate", inv.tax_rate, "TAX_NEGATIVE")
 
     # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
     # rate. No stated currency is read as USD (the CSVs never state one).
@@ -98,7 +103,11 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
             flags.append({"code": "DUPLICATE_ITEM", "item": item, "lines": lines})
 
     # Summed across lines: three WidgetA lines of 15 + 5 + 2 need 22 on hand, not 15.
-    if inventory is not None:
+    if inventory is None:
+        # Say so: an invoice whose products and stock were never checked must not look like one
+        # that passed. 1016 (WidgetC) has no other flag.
+        flags.append({"code": "INVENTORY_NOT_CHECKED", "skipped": ["UNKNOWN_PRODUCT", "STOCK_EXCEEDED"]})
+    else:
         for item, qty in requested.items():
             if item not in inventory:
                 continue  # already flagged UNKNOWN_PRODUCT
@@ -118,6 +127,21 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
 CENT = Decimal("0.01")
 
 
+def _rounding(lines: int) -> Decimal:
+    """Return how far a sum of line amounts can differ from the exact sum through rounding alone.
+
+    A vendor who rounds each line to the cent before adding is off by up to half a cent per line.
+    That is rounding, not a mismatch; anything beyond it is flagged.
+
+    Args:
+        lines: Number of line items summed.
+
+    Returns:
+        Half a cent per line, rounded up to a whole cent (never less than one cent).
+    """
+    return max(CENT, (Decimal("0.005") * lines).quantize(CENT, ROUND_UP))
+
+
 def _arithmetic_flags(inv: Invoice) -> list[dict]:
     """Recompute subtotal, tax and total, and flag any stated value that disagrees.
 
@@ -126,7 +150,9 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
     is flagged. Tax uses the stated subtotal, since that is what the vendor applied the rate to.
     With no tax amount stated, the total check uses the rate if there is one, else zero tax, and
     records which in tax_basis. Shipping, if stated, is added after tax and is not taxed.
-    Recomputed values are rounded to the cent (half up). A check whose inputs are missing is skipped.
+    Recomputed values are rounded to the cent (half up), and a difference that rounding alone
+    can explain is not flagged: one cent on a line amount or the tax, half a cent per line on a
+    sum of lines (see _rounding). A check whose inputs are missing is skipped.
 
     Args:
         inv: A loaded Invoice.
@@ -138,9 +164,9 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
     """
     flags = []
 
-    def check(field, stated, computed, **evidence):
+    def check(field, stated, computed, allowed=CENT, **evidence):
         computed = computed.quantize(CENT, ROUND_HALF_UP)
-        if stated is not None and stated != computed:
+        if stated is not None and abs(stated - computed) > allowed:
             flags.append({"code": f"{field.upper()}_MISMATCH", "field": field,
                           "stated": stated, "computed": computed, **evidence})
 
@@ -149,14 +175,14 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
     for i, li in enumerate(lines):
         if li.amount is not None and li.quantity is not None and li.unit_price is not None:
             computed = (li.quantity * li.unit_price).quantize(CENT, ROUND_HALF_UP)
-            if li.amount != computed:
+            if abs(li.amount - computed) > CENT:
                 flags.append({"code": "LINE_AMOUNT_MISMATCH", "field": f"line_items[{i}].amount",
                               "stated": li.amount, "computed": computed})
     line_sum = None
     if lines and all(li.quantity is not None and li.unit_price is not None for li in lines):
         # Lines count as stated, negatives included: 1009's -5 WidgetA is why its subtotal is wrong.
         line_sum = sum((li.quantity * li.unit_price for li in lines), Decimal(0))
-        check("subtotal", inv.subtotal, line_sum)
+        check("subtotal", inv.subtotal, line_sum, allowed=_rounding(len(lines)))
     if inv.subtotal is not None and inv.tax_rate is not None:
         check("tax_amount", inv.tax_amount, inv.subtotal * inv.tax_rate)
     base = line_sum if line_sum is not None else inv.subtotal  # stated subtotal only when lines can't be summed
@@ -175,7 +201,9 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
             tax, basis = Decimal(0), "NONE_STATED"
         # Shipping is added after tax, untaxed: on 1010 the 5% tax is on the 6,700 subtotal alone.
         shipping = inv.shipping or Decimal(0)
-        check("total", inv.total, base + tax + shipping, tax_basis=basis, shipping=inv.shipping)
+        # Rounding allowance: the lines' (when the base is their sum) plus a cent for the tax.
+        allowed = (_rounding(len(lines)) if line_sum is not None else Decimal(0)) + CENT
+        check("total", inv.total, base + tax + shipping, allowed=allowed, tax_basis=basis, shipping=inv.shipping)
     return flags
 
 
