@@ -182,7 +182,9 @@ amount, shipping, total, currency, payment terms, revision, notes and source fil
   kept as `path#2`, `path#3`.
 - **CSV shapes.** `field,value` files (1006) start a new line item at each `item` row, so repeated
   keys keep every item. Row-per-item files (1007, 1015) take invoice fields from the first row and
-  read totals from footer rows; `Tax (6%):` gives both the rate (0.06) and the amount.
+  read totals from footer rows; `Tax (6%):` gives both the rate (0.06) and the amount. Common label
+  variants map to the same fields: `Sales Tax` (and `Sales Tax (5%)`), `Shipping & Handling`,
+  `Grand Total` and `Total Amount`.
 - **XML.** The root must be `<invoice>`; any other document is a file error. Fields can sit under the
   root or inside `<header>` and `<totals>` (1014). Line items are `<item>` elements under one
   `<line_items>`, with `<name>` read as the item. `<vendor>` can be plain text or hold `<name>` and
@@ -225,13 +227,17 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `ITEM_MISSING` | `line_items[i].item` | BLOCK | Line with no product name |
 | `LINE_ITEMS_MISSING` | `line_items` | BLOCK | Invoice has no line items |
 | `VENDOR_MISSING` | `vendor.name` | BLOCK | No vendor to pay |
+| `TOTAL_MISSING` | `total` | BLOCK | No total, so nothing to pay against |
 | `TOTAL_NEGATIVE` | `total` | BLOCK | Total below zero |
 | `SHIPPING_NEGATIVE` | `shipping` | BLOCK | Shipping below zero; it would quietly offset an inflated line sum |
 | `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match) |
 | `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |
 | `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
+| `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
+| `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
 | `CURRENCY_UNSUPPORTED` | `currency`, or an XML `...@currency` attribute | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate. No stated currency is read as USD |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
+| `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
 | `SUBTOTAL_MISMATCH` | `subtotal` | BLOCK | Σ (quantity × unit price) ≠ stated subtotal |
 | `TAX_AMOUNT_MISMATCH` | `tax_amount` | BLOCK | Stated subtotal × tax rate ≠ stated tax |
 | `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax + shipping ≠ stated total; `tax_basis` says which tax was used |
@@ -280,7 +286,6 @@ With `--inventory inventory.db`:
 ### Not handled yet
 
 - TXT and PDF files (not loaded yet).
-- A line's stated `amount` against quantity × price.
 - Product-name variants such as "Widget A" or "WidgetA (rush order)" (exact match only).
 - Currency conversion: a non-USD invoice is held for review, not converted.
 - Multiple tax rows: only the first counts, and the rest go to `unexpected_fields`.

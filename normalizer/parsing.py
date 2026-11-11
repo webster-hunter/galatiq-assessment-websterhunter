@@ -228,8 +228,10 @@ _FIELD_KEYS = {
     "item": "item", "qty": "quantity", "quantity": "quantity", "unit_price": "unit_price",
     "line_total": "amount", "amount": "amount", "note": "note",
     "subtotal": "subtotal", "tax": "tax_amount", "tax_amount": "tax_amount", "tax_rate": "tax_rate",
-    "shipping": "shipping",
-    "total": "total", "currency": "currency", "payment_terms": "payment_terms",
+    "sales_tax": "tax_amount",  # 1010
+    "shipping": "shipping", "shipping_handling": "shipping", "shipping_and_handling": "shipping",
+    "total": "total", "total_amount": "total", "grand_total": "total",  # 1003, 1013 PDF
+    "currency": "currency", "payment_terms": "payment_terms",
     "revision": "revision", "notes": "notes",
 }
 _TOP_FIELDS = _JSON_TOP - {"line_items"}
@@ -283,7 +285,7 @@ def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
     if not value.strip():  # blank claims no field, so a later row with a real value still lands
         return
     # "Tax (6%):". A malformed rate like "6.5.1" doesn't match and goes to unexpected as an unknown label.
-    if m := re.fullmatch(r"tax\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)\s*:?", label.strip(), re.I):
+    if m := re.fullmatch(r"(?:sales\s+)?tax\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)\s*:?", label.strip(), re.I):
         if "tax_rate" in d or "tax_amount" in d:  # a second tax row: keep the first rate and amount paired
             _keep(unexpected, f"{where}.{label.strip()}", value)
         else:

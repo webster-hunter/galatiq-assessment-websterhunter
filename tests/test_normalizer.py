@@ -106,8 +106,8 @@ def test_every_flag_has_a_known_severity():
 def test_negative_price_and_missing_item(tmp_path):
     """A zero quantity, a negative price, a missing price and a missing item name each get their own flag."""
     f = tmp_path / "inv.json"
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01",'
-                 ' "line_items": [{"item": "WidgetA", "quantity": 0, "unit_price": -1}, {"quantity": 1}]}')
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 0, "unit_price": -1}, {"quantity": 1}], "total": 1}')
     assert codes(load(f)) == [("QTY_NON_POSITIVE", "line_items[0].quantity"),
                               ("PRICE_NEGATIVE", "line_items[0].unit_price"),
                               ("PRICE_MISSING", "line_items[1].unit_price"),
@@ -153,7 +153,7 @@ def test_formatting_variants_are_normalized_not_flagged(tmp_path):
 def test_wrong_structure_is_flagged_not_fatal(tmp_path):
     """Structurally wrong JSON (vendor as a list, a line item that isn't an object, line_items not a list) is flagged per field instead of failing the file."""
     f = tmp_path / "inv.json"
-    f.write_text('{"vendor": ["Acme"], "due_date": "2026-02-01",'
+    f.write_text('{"invoice_number": "I", "vendor": ["Acme"], "due_date": "2026-02-01", "total": 1,'
                  ' "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 1}, "junk"]}')
     inv = load(f, README_INVENTORY)
     assert unparseable(inv) == [("vendor", ["Acme"]), ("line_items[1]", "junk")]
@@ -307,7 +307,7 @@ def test_shipping_is_a_field_and_counts_toward_the_total(tmp_path):
     assert (m["computed"], m["shipping"]) == (Decimal("7185.00"), Decimal("150"))
 
     j = tmp_path / "s.json"
-    j.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 500}],'
+    j.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 500}],'
                  ' "shipping": 25, "total": 525}')
     assert mismatches(load(j)) == []
 
@@ -315,20 +315,20 @@ def test_shipping_is_a_field_and_counts_toward_the_total(tmp_path):
 def test_invoice_with_no_line_items_is_blocked(tmp_path):
     """An invoice with no line items gets a BLOCK flag instead of loading clean; unreadable line_items isn't flagged twice."""
     f = tmp_path / "inv.json"
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [], "total": 100}')
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "line_items": [], "total": 100}')
     assert [(x["severity"], x["code"], x["field"]) for x in load(f).flags] == [("BLOCK", "LINE_ITEMS_MISSING", "line_items")]
 
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "total": 100}')  # key absent entirely
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "total": 100}')  # key absent entirely
     assert [x["field"] for x in load(f).flags] == ["line_items"]
 
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": "junk", "total": 100}')
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "line_items": "junk", "total": 100}')
     assert [(x["field"], x["code"]) for x in load(f).flags] == [("line_items", "UNPARSEABLE")]
 
 
 def test_fractional_quantity_needs_review(tmp_path):
     """A non-whole quantity is flagged QTY_NOT_WHOLE at REVIEW, since stock is counted in whole units; whole decimals like 2.0 are fine."""
     f = tmp_path / "inv.json"
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01",'
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01",'
                  ' "line_items": [{"item": "WidgetA", "quantity": 1.5, "unit_price": 100},'
                  '                {"item": "WidgetB", "quantity": 2.0, "unit_price": 100}],'
                  ' "subtotal": 350, "tax_amount": 0, "total": 350}')
@@ -468,7 +468,7 @@ def test_currency_check_reads_absent_currency_as_usd(tmp_path):
     """Only a stated non-USD currency is flagged: USD in any case and an absent currency (as in the CSVs) are not."""
     f = tmp_path / "inv.json"
     for currency, flagged in (('"usd"', False), ("null", False), ('"GBP"', True)):
-        f.write_text('{"vendor": "V", "due_date": "2026-02-01", "currency": %s,'
+        f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "currency": %s,'
                      ' "line_items": [{"item": "A", "quantity": 1, "unit_price": 1}], "total": 1}' % currency)
         assert any(x["code"] == "CURRENCY_UNSUPPORTED" for x in load(f).flags) == flagged, currency
 
@@ -507,7 +507,7 @@ def test_xml_variants_and_oddities(tmp_path):
     }
 
 
-XML_BODY = ('<vendor>V</vendor><due_date>2026-02-01</due_date>'
+XML_BODY = ('<invoice_number>I</invoice_number><vendor>V</vendor><due_date>2026-02-01</due_date>'
             '<line_items><item><name>WidgetA</name><quantity>1</quantity><unit_price>500</unit_price></item></line_items>')
 
 
@@ -573,11 +573,11 @@ def test_xml_second_line_items_block_is_kept_not_merged(tmp_path):
 def test_negative_or_unreadable_shipping(tmp_path):
     """Negative shipping is blocked even when it makes the total reconcile; unreadable shipping skips the total check instead of guessing zero."""
     f = tmp_path / "s.json"
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 7000}],'
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 7000}],'
                  ' "tax_amount": 350, "shipping": -300, "total": 7050}')
     assert [(x["severity"], x["code"]) for x in load(f).flags] == [("BLOCK", "SHIPPING_NEGATIVE")]
 
-    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 100}],'
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 100}],'
                  ' "tax_amount": 0, "shipping": "TBD", "total": 115}')
     assert [x["code"] for x in load(f).flags] == ["UNPARSEABLE"]
 
@@ -622,3 +622,55 @@ def test_malformed_xml_is_a_file_error(tmp_path):
     f.write_text("<invoice><total>5</invoice>")
     [r] = normalize([f])
     assert r["error"].startswith("ExpatError: mismatched tag")
+
+
+def test_missing_total_and_invoice_number_are_flagged(tmp_path):
+    """An invoice with no total is blocked (nothing to pay against), and one with no invoice number goes to review (duplicates can't be caught)."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 250}]}')
+    assert [(x["severity"], x["code"]) for x in load(f).flags] == [
+        ("REVIEW", "INVOICE_NUMBER_MISSING"), ("BLOCK", "TOTAL_MISSING")]
+
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01", "total": "about 500",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 250}]}')
+    assert [x["code"] for x in load(f).flags] == ["UNPARSEABLE"]  # unreadable total isn't also "missing"
+
+
+def test_common_total_tax_and_shipping_labels_load(tmp_path):
+    """Sales Tax, Sales Tax (x%), Shipping & Handling, Grand Total and Total Amount load into their fields instead of unexpected_fields."""
+    f = tmp_path / "labels.csv"
+    f.write_text("Invoice Number,Vendor,Due Date,Item,Qty,Unit Price\nI,V,2026-02-01,WidgetA,2,250\n"
+                 ",,,,Subtotal:,500\n,,,,Sales Tax:,25\n,,,,Shipping & Handling:,10\n,,,,Grand Total:,535\n")
+    inv = load(f)
+    assert (inv.tax_amount, inv.shipping, inv.total) == (Decimal("25"), Decimal("10"), Decimal("535"))
+    assert inv.unexpected_fields == {} and inv.flags == []
+
+    f.write_text("Invoice Number,Vendor,Due Date,Item,Qty,Unit Price\nI,V,2026-02-01,WidgetA,2,250\n"
+                 ",,,,Sales Tax (5%):,25\n,,,,Total Amount:,525\n")
+    inv = load(f)
+    assert (inv.tax_rate, inv.tax_amount, inv.total) == (Decimal("0.05"), Decimal("25"), Decimal("525"))
+    assert inv.flags == []
+
+
+def test_line_amount_checked_against_quantity_times_price(tmp_path):
+    """A line's stated amount that isn't quantity x unit price is blocked, even when the subtotal and total agree with each other."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"invoice_number": "I", "vendor": "V", "due_date": "2026-02-01",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 2, "unit_price": 250, "amount": 5000},'
+                 '                {"item": "WidgetB", "quantity": 1, "unit_price": 500, "amount": 500}],'
+                 ' "subtotal": 1000, "tax_amount": 0, "total": 1000}')
+    assert [(x["severity"], x["code"], x["field"], x["stated"], x["computed"]) for x in load(f).flags] == [
+        ("BLOCK", "LINE_AMOUNT_MISMATCH", "line_items[0].amount", Decimal("5000"), Decimal("500.00"))]
+
+
+def test_due_date_before_invoice_date_is_flagged(tmp_path):
+    """A due date earlier than the invoice date goes to review; the same day is fine."""
+    f = tmp_path / "inv.json"
+    body = ('{"invoice_number": "I", "vendor": "V", "date": "2026-02-01", "due_date": "%s",'
+            ' "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 250}], "total": 250}')
+    f.write_text(body % "2026-01-01")
+    [flag] = load(f).flags
+    assert (flag["severity"], flag["code"], flag["value"], flag["invoice_date"]) == (
+        "REVIEW", "DUE_DATE_BEFORE_INVOICE_DATE", date(2026, 1, 1), date(2026, 2, 1))
+    f.write_text(body % "2026-02-01")
+    assert load(f).flags == []

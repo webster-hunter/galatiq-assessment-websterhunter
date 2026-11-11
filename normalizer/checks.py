@@ -18,7 +18,8 @@ _CURRENCY_ATTR = re.compile(r"@currency(#\d+)?$")  # XML attribute paths, as par
 def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
-    Covers invalid line values, missing vendor and due date, negative total and shipping, non-USD currency,
+    Covers invalid line values, missing invoice number, vendor, due date and total, a due date
+    before the invoice date, negative total and shipping, non-USD currency,
     unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
     already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
 
@@ -68,12 +69,19 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         if field not in unparseable and field.split(".")[0] not in unparseable:
             flags.append({"code": code, "field": field, "value": value})
 
+    if inv.invoice_number is None:  # duplicate detection keys on it
+        invoice_invalid("invoice_number", None, "INVOICE_NUMBER_MISSING")
     if inv.vendor_name is None:
         invoice_invalid("vendor.name", None, "VENDOR_MISSING")
     if inv.due_date is None:
         invoice_invalid("due_date", None, "DUE_DATE_MISSING")
-    if inv.total is not None and inv.total < 0:
+    if inv.total is None:  # nothing to pay against, and nothing to reconcile
+        invoice_invalid("total", None, "TOTAL_MISSING")
+    elif inv.total < 0:
         invoice_invalid("total", inv.total, "TOTAL_NEGATIVE")
+    if inv.date is not None and inv.due_date is not None and inv.due_date < inv.date:
+        flags.append({"code": "DUE_DATE_BEFORE_INVOICE_DATE", "field": "due_date",
+                      "value": inv.due_date, "invoice_date": inv.date})
     if not inv.line_items:  # a bill for nothing must not look clean
         invoice_invalid("line_items", None, "LINE_ITEMS_MISSING")
     if inv.shipping is not None and inv.shipping < 0:  # would quietly offset an inflated line sum
@@ -131,7 +139,7 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
         inv: A loaded Invoice.
 
     Returns:
-        SUBTOTAL_MISMATCH, TAX_AMOUNT_MISMATCH and TOTAL_MISMATCH flags, each with the stated
+        LINE_AMOUNT_MISMATCH, SUBTOTAL_MISMATCH, TAX_AMOUNT_MISMATCH and TOTAL_MISMATCH flags, each with the stated
         and computed values (TOTAL_MISMATCH also carries tax_basis and shipping). Empty if
         everything reconciles.
     """
@@ -144,6 +152,13 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
                           "stated": stated, "computed": computed, **evidence})
 
     lines = inv.line_items
+    # A line's stated amount against quantity x price: the same padding as a total, one line down.
+    for i, li in enumerate(lines):
+        if li.amount is not None and li.quantity is not None and li.unit_price is not None:
+            computed = (li.quantity * li.unit_price).quantize(CENT, ROUND_HALF_UP)
+            if li.amount != computed:
+                flags.append({"code": "LINE_AMOUNT_MISMATCH", "field": f"line_items[{i}].amount",
+                              "stated": li.amount, "computed": computed})
     line_sum = None
     if lines and all(li.quantity is not None and li.unit_price is not None for li in lines):
         # Lines count as stated, negatives included: 1009's -5 WidgetA is why its subtotal is wrong.
