@@ -49,6 +49,7 @@ SEVERITY = {
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
     # For the record only.
     "CURRENCY_ASSUMED": "INFO",  # no currency named, so read as USD
+    "EXTRACTION_RETRIED": "INFO",  # LLM extraction needed more than one attempt; the flag says how it ended
 }
 
 

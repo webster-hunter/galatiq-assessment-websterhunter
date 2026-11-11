@@ -337,3 +337,95 @@ def test_main_lists_the_available_files_for_a_missing_path(capsys):
     assert main.main(["--invoice_path=data/invoices/invoice1.txt"]) == 2
     err = capsys.readouterr().err
     assert "invoice1.txt" in err and "invoice_1001.txt" in err
+
+
+# --- Self-correction: retry on grounding failures only --------------------------------------------
+
+class Sequence:
+    """A model that gives its replies in turn (repeating the last) and remembers each request."""
+
+    def __init__(self, *replies):
+        self.replies, self.sent = list(replies), []
+
+    def complete(self, messages, schema):
+        self.sent.append(messages)
+        return self.replies[min(len(self.sent), len(self.replies)) - 1]
+
+
+BAD_1002 = edited(T1002, line=0, amount="$15,000.00")  # what Grok really did: the invoice total on the line item
+F1002 = INVOICES / "invoice_1002.txt"
+
+
+def test_an_ungrounded_value_is_sent_back_and_the_corrected_attempt_is_used():
+    """A grounding failure triggers one retry carrying the model's own reply and the specific complaint; the grounded second attempt is what gets built."""
+    model = Sequence(BAD_1002, T1002)
+    inv = load(F1002, model, INVENTORY)
+    assert len(model.sent) == 2
+    assert inv.line_items[0].amount is None and not any(f["code"] == "NOT_IN_SOURCE" for f in inv.flags)
+    assert [(a["attempt"], a["outcome"], len(a["ungrounded"])) for a in inv.extraction_attempts] == [
+        (1, "RETRY", 1), (2, "GROUNDED", 0)]
+    [note] = [f for f in inv.flags if f["code"] == "EXTRACTION_RETRIED"]
+    assert (note["severity"], note["attempts"], note["outcome"]) == ("INFO", 2, "RESOLVED")
+
+    # The retry request: the first two messages unchanged, then the model's reply and the feedback.
+    first, retry = model.sent
+    assert retry[:2] == first and [m["role"] for m in retry[2:]] == ["assistant", "user"]
+    assert json.loads(retry[2]["content"]) == BAD_1002
+    feedback = retry[3]["content"]
+    assert "line_items[0]" in feedback and "'$15,000.00'" in feedback and "null" in feedback
+
+
+def test_a_grounded_first_attempt_is_not_retried():
+    """A clean transcription costs one call and leaves no retry note."""
+    model = Sequence(T1002)
+    inv = load(F1002, model, INVENTORY)
+    assert len(model.sent) == 1 and [a["outcome"] for a in inv.extraction_attempts] == ["GROUNDED"]
+    assert not any(f["code"] == "EXTRACTION_RETRIED" for f in inv.flags)
+
+
+def test_the_vendors_errors_are_never_retried():
+    """A wrong total (1013) and OCR damage copied as written (1012) are grounded: the document says that. One call each, and the flags stand."""
+    for name, t, code in (("invoice_1013.pdf", T1013, "TOTAL_MISMATCH"), ("invoice_1012.txt", T1012, "UNPARSEABLE")):
+        model = Sequence(t, transcription())
+        inv = load(INVOICES / name, model, INVENTORY)
+        assert len(model.sent) == 1, name
+        assert code in [f["code"] for f in inv.flags], name
+
+
+def test_the_loop_stops_when_the_model_repeats_itself():
+    """The same transcription twice running ends the loop early: the flag stays, and the invoice is held."""
+    model = Sequence(BAD_1002)
+    inv = load(F1002, model, INVENTORY)
+    assert len(model.sent) == 2 and [a["outcome"] for a in inv.extraction_attempts] == ["RETRY", "REPEATED"]
+    assert ("REVIEW", "NOT_IN_SOURCE") in [(f["severity"], f["code"]) for f in inv.flags]
+    [note] = [f for f in inv.flags if f["code"] == "EXTRACTION_RETRIED"]
+    assert (note["outcome"], note["stopped"]) == ("UNRESOLVED", "REPEATED")
+
+
+def test_the_loop_stops_at_the_limit_and_keeps_the_best_attempt():
+    """Three different ungrounded attempts: no fourth call, and the attempt with the fewest ungrounded values is the one built."""
+    two_wrong = edited(BAD_1002, due_date="2026-03-01")
+    other_one = edited(T1002, vendor_name="Gadgets Company")
+    model = Sequence(two_wrong, BAD_1002, other_one)
+    inv = load(F1002, model, INVENTORY)
+    assert len(model.sent) == 3
+    assert [(a["outcome"], len(a["ungrounded"])) for a in inv.extraction_attempts] == [
+        ("RETRY", 2), ("RETRY", 1), ("LIMIT_REACHED", 1)]
+    # Attempts 2 and 3 tie on one ungrounded value; the earlier one is kept.
+    assert [f["field"] for f in inv.flags if f["code"] == "NOT_IN_SOURCE"] == ["line_items[0]"]
+    assert inv.vendor_name == "Gadgets Co."
+    assert len(model.sent[2]) == 6  # the conversation grows: both earlier replies and both complaints
+
+
+def test_retries_can_be_turned_off():
+    """max_attempts=1 is a single call: the ungrounded value is flagged and nothing is sent back."""
+    model = Sequence(BAD_1002, T1002)
+    inv = extract(F1002, model, max_attempts=1)
+    assert len(model.sent) == 1 and inv.extraction_attempts[0]["outcome"] == "LIMIT_REACHED"
+    assert any(f["code"] == "NOT_IN_SOURCE" for f in inv.flags)
+
+
+def test_feedback_never_suggests_a_value():
+    """The complaint names the field and the value that failed, but offers no replacement: the model must return to the document."""
+    text = extraction._feedback([{"code": "NOT_IN_SOURCE", "field": "due_date", "value": "2026-03-01"}])
+    assert "due_date" in text and "'2026-03-01'" in text and "2026-01-30" not in text

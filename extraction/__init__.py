@@ -8,9 +8,16 @@ UNPARSEABLE and a wrong total is TOTAL_MISMATCH, whatever the model thought of i
     providers.py  Grok (xAI), Replay (recorded responses, no key needed)
     grounding.py  is every transcribed value really in the document?
     this file     read text -> prompt -> transcription -> grounding -> Invoice -> checks
+                                  ^------- feedback, if not grounded ---'
+
+Self-correction: when grounding finds a value that isn't in the document, the model is told which
+field and why, and tries again (three attempts at most). Only grounding failures are retried,
+because only they are the model's mistakes. A total that doesn't add up, or an OCR-damaged value
+copied as written, is the vendor's document: retrying would only push the model to change it.
 
 Structured files (JSON, CSV, XML) still go to the normalizer; normalize() here routes both.
 """
+import json
 import re
 from dataclasses import asdict
 from decimal import Decimal
@@ -107,6 +114,31 @@ def _messages(text: str) -> list[dict]:
             {"role": "user", "content": f"<document>\n{text}\n</document>"}]
 
 
+MAX_ATTEMPTS = 3  # the first try plus two retries: a model that hasn't fixed it by then won't
+
+
+def _feedback(ungrounded_flags: list[dict]) -> str:
+    """The retry message: exactly which values failed grounding, and the rule each one broke.
+
+    Specific on purpose. "Please check your work" gives the model nothing to act on; naming the
+    field and the value does. It never suggests a replacement value: the model must go back to
+    the document, and "null" is always an allowed answer.
+    """
+    lines = []
+    for f in ungrounded_flags:
+        if f.get("reason") == "NOT_ON_ONE_LINE":
+            values = ", ".join(f"{k} {v!r}" for k, v in f["value"].items())
+            lines.append(f"- {f['field']}: {values} are not written together on one line of the document. "
+                         "A line item's item, quantity, unit_price and amount must all come from that line's own row. "
+                         "A value that is not on the row is null, and an invoice-level figure belongs in its own field.")
+        else:
+            lines.append(f"- {f['field']}: {f['value']!r} does not appear in the document as written.")
+    return ("Some values in your transcription are not in the document:\n" + "\n".join(lines) + "\n\n"
+            "Return the complete transcription again with only these corrected. Copy each value exactly as the "
+            "document writes it, or use null if the document does not state it where it belongs. "
+            "Do not invent, correct or compute anything, and change nothing else.")
+
+
 def _rate(v):
     # "5%" -> "0.05", the fraction the JSON invoices use. Anything else passes through to be parsed or flagged.
     if isinstance(v, str) and (m := re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", v)):
@@ -114,16 +146,24 @@ def _rate(v):
     return v
 
 
-def extract(path: str | Path, provider: Provider) -> Invoice:
+def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMPTS) -> Invoice:
     """Transcribe one TXT or PDF invoice with the model and build it like a JSON file.
+
+    If the transcription has values that aren't in the document, the model is shown them and
+    asked again, up to max_attempts in all. The loop stops when an attempt is fully grounded,
+    when the model returns the same transcription twice running (it isn't going to change), or
+    at the limit. The attempt with the fewest ungrounded values is the one built; any that
+    remain stay on the invoice as NOT_IN_SOURCE flags, so it is held, not trusted.
 
     Args:
         path: The .txt or .pdf file.
         provider: Any Provider (Grok, Replay, a test stub).
+        max_attempts: Model calls allowed for this file, counting the first. 1 turns retries off.
 
     Returns:
         The Invoice with UNPARSEABLE flags for values that didn't parse and NOT_IN_SOURCE flags
-        for values the document doesn't contain, but no check flags yet.
+        for values the document doesn't contain, but no check flags yet. extraction_attempts
+        records each attempt, and a file that needed more than one carries EXTRACTION_RETRIED.
 
     Raises:
         ValueError, OSError: The file can't be read (see read_text).
@@ -131,7 +171,32 @@ def extract(path: str | Path, provider: Provider) -> Invoice:
     """
     path = Path(path)
     text = read_text(path)
-    t = provider.complete(_messages(text), SCHEMA)
+    messages = _messages(text)
+    attempts, best, previous = [], None, None
+    while True:
+        t = provider.complete(messages, SCHEMA)
+        # Judged on the model's own strings, before any typing: "$1,250.00" is in the document, Decimal("1250.00") isn't.
+        problems = ungrounded(t, text)
+        attempts.append({"attempt": len(attempts) + 1, "ungrounded": problems})
+        if best is None or len(problems) < len(best[1]):
+            best = (t, problems)  # fewest ungrounded values; the earlier attempt on a tie
+        if not problems:
+            outcome = "GROUNDED"
+        elif t == previous:
+            outcome = "REPEATED"  # same answer to the feedback: asking again won't help
+        elif len(attempts) >= max_attempts:
+            outcome = "LIMIT_REACHED"
+        else:
+            # The model sees its own reply and the specific complaint, then tries again. The reply holds
+            # text copied from the vendor's document, so it stays inside the conversation as data.
+            messages = messages + [{"role": "assistant", "content": json.dumps(t)},
+                                   {"role": "user", "content": _feedback(problems)}]
+            previous = t
+            attempts[-1]["outcome"] = "RETRY"
+            continue
+        attempts[-1]["outcome"] = outcome
+        break
+    t, problems = best
     # Back into the JSON-file shape, so one builder types every format.
     d = {k: t.get(k) for k in _TOP_KEYS if k not in ("vendor_name", "vendor_address")}
     d["vendor"] = {"name": t.get("vendor_name"), "address": t.get("vendor_address")}
@@ -141,8 +206,11 @@ def extract(path: str | Path, provider: Provider) -> Invoice:
     for f in t.get("other_fields") or []:
         keep_unexpected(unexpected, f"other.{f.get('label')}", f.get("value"))
     inv = build_invoice(d, path.name, unexpected)
-    # On the model's own strings, before any typing: "$1,250.00" is in the document, Decimal("1250.00") isn't.
-    inv.flags += ungrounded(t, text)
+    inv.flags += problems
+    inv.extraction_attempts = attempts
+    if len(attempts) > 1:
+        inv.flags.append({"code": "EXTRACTION_RETRIED", "attempts": len(attempts),
+                          "outcome": "RESOLVED" if not problems else "UNRESOLVED", "stopped": outcome})
     return inv
 
 

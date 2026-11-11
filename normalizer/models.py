@@ -39,3 +39,6 @@ class Invoice:
     # Issues for validation to judge, each with a severity, e.g.
     # {"code": "DUPLICATE_ITEM", "severity": "WARN", "item": "WidgetA", "lines": [0, 3]}.
     flags: list[dict] = field(default_factory=list)
+    # LLM extraction only: one entry per model attempt, {"attempt", "ungrounded", "outcome"}, so a
+    # retry is visible afterwards. Empty for files a parser read.
+    extraction_attempts: list[dict] = field(default_factory=list)

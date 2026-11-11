@@ -169,6 +169,19 @@ reconciles perfectly.
 - It proves a value wasn't made up. It does not prove the value is in the right field, and it can't
   see a line the model left out; the arithmetic checks catch that.
 
+**Self-correction.** When grounding finds a value that isn't in the document, the model is sent
+its own reply and the specific complaint (which field, which value, which rule) and tries again,
+up to three attempts in all. The complaint never suggests a replacement, and null is always allowed.
+
+- Only grounding failures are retried, because only they are the model's mistakes. A total that
+  doesn't add up (1013) or OCR damage copied as written (1012) is what the document says;
+  retrying would push the model to change it.
+- The loop stops when an attempt is fully grounded, when the model returns the same transcription
+  twice running, or at the limit. The attempt with the fewest ungrounded values is used, and any
+  that remain stay on the invoice as `NOT_IN_SOURCE`, so it is held.
+- Every attempt is kept on the invoice in `extraction_attempts` (what failed, and why the loop
+  stopped), and a file that needed more than one attempt carries an `EXTRACTION_RETRIED` note.
+
 **Failures.** Timeouts, rate limits (429) and server errors are retried, up to three attempts,
 with exponential backoff and jitter; a `Retry-After` header is honoured. A bad key or bad request
 fails at once. A truncated, refused, non-JSON or oddly shaped reply is an error entry for that one
@@ -195,20 +208,21 @@ also carries the `CURRENCY_ASSUMED` note (INFO), left out below:
 | Invoice | Result |
 |---|---|
 | 1001, 1011 (txt and pdf) | Clean |
-| 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002`; `NOT_IN_SOURCE` on the line item (a model error, below) |
+| 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002`. Took two attempts (below) |
 | 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for terms `Immediate`. The "URGENT" note is transcribed into `notes` and changes nothing |
 | 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
 | 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party, with "formerly FastShip Ltd." kept apart in `unexpected_fields` |
 | 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 
-Every vendor and total is correct. One recording contains a real model error, left in on purpose:
-on 1002 the model copied the invoice total ("Amt: $15,000.00") onto the line item as well, although
-the prompt says a line amount must be on the line's own row. The grounding check flags it
-(`NOT_ON_ONE_LINE`, REVIEW), so the invoice is held rather than trusted. The model's output for
-this file varied between recording runs even at temperature 0: in an earlier run it left the total
-empty, and in another it got the line right. Recordings are kept as the model produced them, not
-re-run until they look clean; a retry on a grounding failure is the planned fix.
+Every vendor and total is correct, and nine of the ten files were grounded on the first attempt.
+1002 needed the retry: the model first copied the invoice total ("Amt: $15,000.00") onto the line
+item as well, although the prompt says a line amount must be on the line's own row. Grounding
+flagged it (`NOT_ON_ONE_LINE`), the complaint was sent back, and the second attempt returned the
+line without an amount, fully grounded. Both replies are recorded as the model produced them.
+
+The model's output for 1002 varied between recording runs even at temperature 0 (total missing,
+correct, total duplicated), which is why the judge is code and not a re-reading by the model.
 
 Not done yet: repairing OCR damage (1012 is held, not fixed), matching name variants such as
 "Widget A", and detecting duplicates across files (1011, 1012 and 1013 each arrive twice).
@@ -341,6 +355,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
 | `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
 | `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate |
+| `EXTRACTION_RETRIED` | `attempts`, `outcome` (`RESOLVED` or `UNRESOLVED`), `stopped` | INFO | LLM extraction only: the file needed more than one model attempt |
 | `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |

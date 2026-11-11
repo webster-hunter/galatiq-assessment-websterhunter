@@ -25,8 +25,8 @@ OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT"
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
     "invoice_1002.txt": ("Gadgets Co.", "15000.00",  # number is a bare "1002"
-                         # NOT_IN_SOURCE is a real model error in this recording: see the test below.
-                         ["NOT_IN_SOURCE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
+                         # Needed a second attempt (see the test below); the result is clean of model errors.
+                         ["UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
     "invoice_1003.txt": ("Fraudster LLC", "100000.00",  # due "yesterday"
                          ["UNPARSEABLE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),  # terms "Immediate"
     "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]),
@@ -50,7 +50,8 @@ def test_recorded_extraction_of_each_sample(name):
     inv = load(INVOICES / name, Replay(REPLAYS), INVENTORY)
     assert (inv.vendor_name, inv.total) == (vendor, Decimal(total))
     assert [f["code"] for f in inv.flags if f["severity"] != "INFO"] == codes
-    assert [f["code"] for f in inv.flags if f["severity"] == "INFO"] == ["CURRENCY_ASSUMED"]
+    notes = ["EXTRACTION_RETRIED", "CURRENCY_ASSUMED"] if name == "invoice_1002.txt" else ["CURRENCY_ASSUMED"]
+    assert [f["code"] for f in inv.flags if f["severity"] == "INFO"] == notes
 
 
 def test_ocr_errors_are_copied_not_corrected():
@@ -69,12 +70,19 @@ def test_grounding_caught_a_real_model_error():
     assert (f["code"], f["field"], f["reason"]) == ("NOT_IN_SOURCE", "line_items[0]", "NOT_ON_ONE_LINE")
 
 
-def test_the_recorded_1002_has_a_model_error_and_grounding_holds_it():
-    """In the committed recording Grok copied 1002's invoice total onto its line item as well, against the prompt. The total is right, and grounding flags the line (REVIEW): the amount isn't on that row."""
+def test_the_recorded_1002_was_corrected_on_its_second_attempt():
+    """Real model output: Grok first copied 1002's invoice total onto the line item; told so, it returned the line without an amount, fully grounded."""
     inv = load(INVOICES / "invoice_1002.txt", Replay(REPLAYS), INVENTORY)
-    assert inv.total == Decimal("15000.00") and inv.line_items[0].amount == Decimal("15000.00")
-    [f] = [f for f in inv.flags if f["code"] == "NOT_IN_SOURCE"]
-    assert (f["severity"], f["field"], f["reason"]) == ("REVIEW", "line_items[0]", "NOT_ON_ONE_LINE")
+    assert [(a["outcome"], [(f["field"], f["reason"]) for f in a["ungrounded"]]) for a in inv.extraction_attempts] == [
+        ("RETRY", [("line_items[0]", "NOT_ON_ONE_LINE")]), ("GROUNDED", [])]
+    assert inv.total == Decimal("15000.00") and inv.line_items[0].amount is None
+    assert not any(f["code"] == "NOT_IN_SOURCE" for f in inv.flags)
+
+
+def test_only_1002_needed_a_retry():
+    """Across the ten recorded samples, nine were grounded on the first attempt."""
+    attempts = {name: len(load(INVOICES / name, Replay(REPLAYS), INVENTORY).extraction_attempts) for name in EXPECTED}
+    assert {n for n, count in attempts.items() if count > 1} == {"invoice_1002.txt"} and attempts["invoice_1002.txt"] == 2
 
 
 def test_former_vendor_name_is_kept_apart_from_the_vendor():
