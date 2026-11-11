@@ -289,6 +289,29 @@ def test_total_checked_when_no_tax_is_stated(tmp_path):
     assert (m["computed"], m["tax_basis"]) == (Decimal("106.00"), "FROM_RATE")
 
 
+def test_shipping_is_a_field_and_counts_toward_the_total(tmp_path):
+    """Shipping loads as its own field (not unexpected_fields) and is added after tax, untaxed, in the total check, as on 1010."""
+    f = tmp_path / "s.csv"
+    # 1010's numbers: lines 6,700; 5% tax on the lines only = 335; shipping 150; total 7,185.
+    f.write_text("Invoice Number,Vendor,Due Date,Item,Qty,Unit Price\n"
+                 "I,V,2026-02-26,WidgetA,8,250\nI,V,2026-02-26,WidgetB,4,500\n"
+                 "I,V,2026-02-26,GadgetX,2,750\nI,V,2026-02-26,WidgetC,4,300\n"
+                 ",,,,Subtotal:,6700\n,,,,Tax (5%):,335\n,,,,Shipping:,150\n,,,,Total:,7185\n")
+    inv = load(f)
+    assert inv.shipping == Decimal("150") and inv.unexpected_fields == {}
+    assert mismatches(inv) == [] and inv.flags == []
+
+    # A wrong total still flags, and the evidence shows the shipping that was included.
+    f.write_text(f.read_text().replace("Total:,7185", "Total:,7035"))
+    [m] = [x for x in load(f).flags if x["code"] == "TOTAL_MISMATCH"]
+    assert (m["computed"], m["shipping"]) == (Decimal("7185.00"), Decimal("150"))
+
+    j = tmp_path / "s.json"
+    j.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 500}],'
+                 ' "shipping": 25, "total": 525}')
+    assert mismatches(load(j)) == []
+
+
 def test_invoice_with_no_line_items_is_blocked(tmp_path):
     """An invoice with no line items gets a BLOCK flag instead of loading clean; unreadable line_items isn't flagged twice."""
     f = tmp_path / "inv.json"
@@ -394,12 +417,12 @@ def test_csv_oddities_go_to_unexpected_fields(tmp_path):
     table.write_text("Invoice Number,Vendor,Item,Qty,Unit Price,PO\n"
                      "INV-1,Acme,WidgetA,1,250.00,PO-7\n"
                      "INV-1,Other Co,WidgetB,1,500.00,\n"     # vendor disagrees with row 1
-                     ",,,,Shipping:,40.00\n"                  # footer label we don't map
+                     ",,,,Handling:,40.00\n"                  # footer label we don't map
                      ",,,,Total:,790.00\n,,,,Total:,1.00\n")  # second total must not win
     t = load(table)
     assert t.vendor_name == "Acme" and t.total == Decimal("790.00")
     assert t.unexpected_fields == {"line_items[0].po": "PO-7", "line_items[1].vendor": "Other Co",
-                                   "row[4].Shipping:": "40.00", "row[6].Total:": "1.00"}
+                                   "row[4].Handling:": "40.00", "row[6].Total:": "1.00"}
 
     kv = tmp_path / "kv.csv"
     kv.write_text("field,value\nquantity,3\nitem,WidgetA\nquantity,1\nquantity,2\npo_number,PO-9\n")
@@ -422,7 +445,180 @@ def test_unexpected_fields_raise_one_warn_flag(tmp_path):
 
 def test_directory_skips_unsupported_and_bad_file_is_reported():
     """A folder loads only supported file types, and an unsupported file named directly becomes an error entry without stopping the batch."""
-    results = normalize([INVOICES, INVOICES / "invoice_1014.xml"])
+    results = normalize([INVOICES, INVOICES / "invoice_1001.txt"])
     ok = [r for r in results if "invoice" in r]
-    assert len(ok) == 9  # every JSON and CSV file in the folder; .txt/.xml/.pdf skipped
+    assert len(ok) == 10  # every JSON, CSV and XML file in the folder; .txt/.pdf skipped
     assert "error" in results[-1]  # explicitly named unsupported file -> error entry, batch continues
+
+
+def test_xml_1014_loads_and_is_held_for_currency():
+    """The XML invoice (1014) loads every field from its header, line items and totals, reconciles, and is flagged only for its EUR currency."""
+    inv = load(INVOICES / "invoice_1014.xml", README_INVENTORY)
+    assert (inv.invoice_number, inv.vendor_name, inv.date, inv.due_date, inv.currency, inv.payment_terms) == (
+        "INV-1014", "TechParts International", date(2026, 1, 26), date(2026, 2, 26), "EUR", "Net 30")
+    assert [(li.item, li.quantity, li.unit_price) for li in inv.line_items] == [
+        ("WidgetA", 4, Decimal("225.00")), ("WidgetB", 6, Decimal("475.00"))]
+    assert (inv.subtotal, inv.tax_rate, inv.tax_amount, inv.total) == (
+        Decimal("3750.00"), Decimal("0.10"), Decimal("375.00"), Decimal("4125.00"))
+    assert inv.unexpected_fields == {}
+    assert [(f["severity"], f["code"], f["value"]) for f in inv.flags] == [("REVIEW", "CURRENCY_UNSUPPORTED", "EUR")]
+
+
+def test_currency_check_reads_absent_currency_as_usd(tmp_path):
+    """Only a stated non-USD currency is flagged: USD in any case and an absent currency (as in the CSVs) are not."""
+    f = tmp_path / "inv.json"
+    for currency, flagged in (('"usd"', False), ("null", False), ('"GBP"', True)):
+        f.write_text('{"vendor": "V", "due_date": "2026-02-01", "currency": %s,'
+                     ' "line_items": [{"item": "A", "quantity": 1, "unit_price": 1}], "total": 1}' % currency)
+        assert any(x["code"] == "CURRENCY_UNSUPPORTED" for x in load(f).flags) == flagged, currency
+
+
+def test_xml_variants_and_oddities(tmp_path):
+    """XML variants load (fields at the root, a namespace, a structured vendor, CSV-style names like qty), and attributes, unknown or repeated elements and nested values go to unexpected_fields."""
+    f = tmp_path / "v.xml"
+    f.write_text('<?xml version="1.0"?>\n'
+                 '<inv:invoice xmlns:inv="urn:acme" version="2">'
+                 '<invoice_number>INV-9</invoice_number>'
+                 '<vendor><name>Acme</name><address>1 Main St</address><bank>999</bank></vendor>'
+                 '<due_date>2026-02-01</due_date>'
+                 '<line_items>'
+                 '<line_item sku="A-1"><name>WidgetA</name><qty>2</qty><unit_price>250</unit_price>'
+                 '<line_total>500</line_total><discount>0</discount></line_item>'
+                 '<memo>see attached</memo>'
+                 '</line_items>'
+                 '<po_number>PO-7</po_number>'
+                 '<total currency="EUR">500</total><total>1</total>'
+                 '<notes><p>nested</p></notes>'
+                 '</inv:invoice>')
+    inv = load(f)
+    assert (inv.invoice_number, inv.vendor_name, inv.vendor_address, inv.total) == ("INV-9", "Acme", "1 Main St", Decimal("500"))
+    assert [(li.item, li.quantity, li.amount) for li in inv.line_items] == [("WidgetA", 2, Decimal("500"))]
+    assert inv.notes is None  # nested, so not a single value
+    assert inv.currency == "EUR"  # no <currency> element, so the attribute on <total> is the currency
+    assert inv.unexpected_fields == {
+        "@version": "2",
+        "vendor.bank": "999",
+        "line_items[0]@sku": "A-1",
+        "line_items[0].discount": "0",
+        "line_items.memo": "<memo>see attached</memo>",
+        "po_number": "PO-7",
+        "total": "1",  # second <total>: first wins
+        "notes": "<notes><p>nested</p></notes>",
+    }
+
+
+XML_BODY = ('<vendor>V</vendor><due_date>2026-02-01</due_date>'
+            '<line_items><item><name>WidgetA</name><quantity>1</quantity><unit_price>500</unit_price></item></line_items>')
+
+
+def test_xml_loose_text_comments_and_pis_are_kept(tmp_path):
+    """Text outside any field, comments and processing instructions go to unexpected_fields instead of vanishing."""
+    f = tmp_path / "t.xml"
+    f.write_text(f'<?xml version="1.0"?><!-- before root --><invoice>{XML_BODY}<total>500</total>PAY TO ACCT 999'
+                 '<!-- remit to new bank --><?pay now?></invoice>')
+    inv = load(f)
+    assert inv.total == Decimal("500")
+    assert inv.unexpected_fields == {"#comment": "before root", "#comment#2": "remit to new bank",
+                                     "#pi": "pay now", "#text": "PAY TO ACCT 999"}
+    assert [x["code"] for x in inv.flags] == ["UNEXPECTED_FIELDS"]
+
+
+def test_xml_currency_attribute_is_checked(tmp_path):
+    """A currency given only as an attribute becomes the invoice's currency; one that contradicts a <currency> element is flagged too."""
+    f = tmp_path / "c.xml"
+    f.write_text(f'<invoice>{XML_BODY}<total currency="EUR">500</total></invoice>')
+    inv = load(f)
+    assert inv.currency == "EUR"
+    assert [(x["code"], x["field"]) for x in inv.flags] == [("CURRENCY_UNSUPPORTED", "currency")]
+
+    f.write_text(f'<invoice>{XML_BODY}<currency>USD</currency><total currency="EUR">500</total></invoice>')
+    inv = load(f)
+    assert inv.currency == "USD"
+    assert [(x["code"], x["field"]) for x in inv.flags if x["code"] == "CURRENCY_UNSUPPORTED"] == [
+        ("CURRENCY_UNSUPPORTED", "total@currency")]
+
+
+def test_xml_empty_element_claims_no_field(tmp_path):
+    """An empty element doesn't take the field's slot, so a later element with a real value still lands (XML and CSV)."""
+    f = tmp_path / "e.xml"
+    f.write_text(f'<invoice>{XML_BODY}<totals><total/></totals><total>500</total></invoice>')
+    inv = load(f)
+    assert inv.total == Decimal("500") and inv.unexpected_fields == {}
+
+    kv = tmp_path / "kv.csv"
+    kv.write_text("field,value\nvendor,V\ndue_date,2026-02-01\nitem,WidgetA\nquantity,\nquantity,2\n"
+                  "unit_price,250\ntotal,\ntotal,500\n")
+    k = load(kv)
+    assert (k.line_items[0].quantity, k.total) == (2, Decimal("500"))
+
+
+def test_xml_root_must_be_invoice(tmp_path):
+    """A well-formed XML document whose root isn't <invoice> is a file error, not a half-empty invoice."""
+    f = tmp_path / "po.xml"
+    f.write_text(f'<purchase_order>{XML_BODY}<total>500</total></purchase_order>')
+    [r] = normalize([f])
+    assert r["error"].startswith("ValueError") and "<purchase_order>" in r["error"]
+
+
+def test_xml_second_line_items_block_is_kept_not_merged(tmp_path):
+    """A repeated <line_items> block goes to unexpected_fields (first wins) rather than being merged into the first."""
+    f = tmp_path / "l.xml"
+    f.write_text(f'<invoice>{XML_BODY}<line_items><item><name>GadgetX</name></item></line_items><total>500</total></invoice>')
+    inv = load(f)
+    assert [li.item for li in inv.line_items] == ["WidgetA"]
+    assert list(inv.unexpected_fields) == ["line_items"] and "GadgetX" in inv.unexpected_fields["line_items"]
+    assert mismatches(inv) == []
+
+
+def test_negative_or_unreadable_shipping(tmp_path):
+    """Negative shipping is blocked even when it makes the total reconcile; unreadable shipping skips the total check instead of guessing zero."""
+    f = tmp_path / "s.json"
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 7000}],'
+                 ' "tax_amount": 350, "shipping": -300, "total": 7050}')
+    assert [(x["severity"], x["code"]) for x in load(f).flags] == [("BLOCK", "SHIPPING_NEGATIVE")]
+
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": 100}],'
+                 ' "tax_amount": 0, "shipping": "TBD", "total": 115}')
+    assert [x["code"] for x in load(f).flags] == ["UNPARSEABLE"]
+
+
+def test_repeated_unknown_csv_columns_are_all_kept(tmp_path):
+    """Two unknown columns with the same name keep both values (the second as "#2") instead of overwriting."""
+    f = tmp_path / "po.csv"
+    f.write_text("Invoice Number,Vendor,Due Date,Item,Qty,Unit Price,PO,PO\nI,V,2026-02-01,A,1,500,PO-1,PO-2\n,,,,Total:,500\n")
+    assert load(f).unexpected_fields == {"line_items[0].po": "PO-1", "line_items[0].po#2": "PO-2"}
+
+
+def test_dates_parse_from_an_explicit_format_list(tmp_path):
+    """Every date format seen in the sample invoices parses, and anything else is UNPARSEABLE on every Python version (no fromisoformat)."""
+    from normalizer.parsing import _date
+
+    for text in ("2026-01-27", "01/27/2026", "January 27, 2026", "Jan 27, 2026", "27-Jan-2026"):
+        assert _date(text) == date(2026, 1, 27), text
+    for text in ("20260124", "2026-W04-6", "yesterday", "27/01/2026"):  # 20260124 parses with fromisoformat on 3.11+
+        try:
+            _date(text)
+            raise AssertionError(f"{text!r} should not parse")
+        except ValueError:
+            pass
+
+
+def test_xml_with_a_dtd_is_rejected(tmp_path):
+    """XML that declares a DTD is refused as a file error, so entity-expansion attacks never reach the parser's entity handling."""
+    f = tmp_path / "bomb.xml"
+    f.write_text('<?xml version="1.0"?><!DOCTYPE lol [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;">]>'
+                 '<invoice><invoice_number>&lol2;</invoice_number></invoice>')
+    [r] = normalize([f])
+    assert r["error"].startswith("ValueError") and "DTD" in r["error"]
+
+    f.write_bytes('<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE x [<!ENTITY a "b">]><invoice/>'.encode("utf-16"))
+    [r] = normalize([f])  # a byte search for "<!DOCTYPE" would miss this; expat doesn't
+    assert "DTD" in r["error"]
+
+
+def test_malformed_xml_is_a_file_error(tmp_path):
+    """XML that isn't well-formed becomes an error entry, not a crash."""
+    f = tmp_path / "bad.xml"
+    f.write_text("<invoice><total>5</invoice>")
+    [r] = normalize([f])
+    assert r["error"].startswith("ExpatError: mismatched tag")

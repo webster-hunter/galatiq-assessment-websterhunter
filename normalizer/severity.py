@@ -21,6 +21,7 @@ SEVERITY = {
     "LINE_ITEMS_MISSING": "BLOCK",  # a bill for nothing
     "VENDOR_MISSING": "BLOCK",
     "TOTAL_NEGATIVE": "BLOCK",
+    "SHIPPING_NEGATIVE": "BLOCK",
     "SUBTOTAL_MISMATCH": "BLOCK",
     "TAX_AMOUNT_MISMATCH": "BLOCK",
     "TOTAL_MISMATCH": "BLOCK",
@@ -29,6 +30,7 @@ SEVERITY = {
     "UNKNOWN_PRODUCT": "REVIEW",
     "QTY_NOT_WHOLE": "REVIEW",  # stock is counted in whole units
     "DUE_DATE_MISSING": "REVIEW",  # can be looked up
+    "CURRENCY_UNSUPPORTED": "REVIEW",  # no conversion: hold rather than compare EUR to USD
     "STOCK_EXCEEDED": "REVIEW",
     "STOCK_UNKNOWN": "REVIEW",
     # Payable, but recorded.

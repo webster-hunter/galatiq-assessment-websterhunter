@@ -1,3 +1,20 @@
+[project]
+name = "acme-invoice-normalizer"
+version = "0.1.0"
+description = "Deterministic invoice normalizer: invoice files in, standard invoices with graded flags out."
+requires-python = ">=3.10"  # X | None type unions in the dataclasses
+dependencies = []  # standard library only
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["normalizer"]  # explicit: data/, tests/ and seed_inventory.py are not part of the package
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

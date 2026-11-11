@@ -1,4 +1,4 @@
-"""Parse invoice files (JSON, both CSV shapes) into the standard Invoice structure.
+"""Parse invoice files (JSON, both CSV shapes, XML) into the standard Invoice structure.
 
 Values are parsed and typed, never corrected. A value that can't be read becomes None plus an
 UNPARSEABLE flag; every other check lives in checks.py.
@@ -6,9 +6,11 @@ UNPARSEABLE flag; every other check lives in checks.py.
 import csv
 import json
 import re
+import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from xml.parsers import expat
 
 from .models import Invoice, LineItem
 
@@ -32,8 +34,20 @@ def _text(v) -> str | None:
     return (v or "").strip() or None
 
 
+# Every date format seen in vendor invoices, tried in order. An explicit list (not date.fromisoformat,
+# whose accepted formats change between Python versions) means a file parses the same on every
+# interpreter. A new vendor format is one more line here.
+_DATE_FORMATS = (
+    "%Y-%m-%d",    # 2026-01-24 (JSON, CSV, XML, most text)
+    "%m/%d/%Y",    # 01/28/2026 (1007). TODO: US order, so 01/02/2026 is Jan 2; a DD/MM vendor needs its own rule
+    "%B %d, %Y",   # January 27, 2026 (1010)
+    "%b %d, %Y",   # Jan 27, 2026
+    "%d-%b-%Y",    # 25-Feb-2026 (1012)
+)
+
+
 def _date(v) -> date | None:
-    """Parse a date written as ISO (2026-01-24) or US MM/DD/YYYY.
+    """Parse a date in any of _DATE_FORMATS.
 
     Args:
         v: A raw value from the source file.
@@ -42,19 +56,19 @@ def _date(v) -> date | None:
         The date, or None for null or blank.
 
     Raises:
-        ValueError: Any other format, such as "yesterday". The caller records it as UNPARSEABLE.
+        ValueError: No format matches, such as "yesterday". The caller records it as UNPARSEABLE
+            rather than guessing a date.
         TypeError: v isn't text (see _text).
     """
     v = _text(v)
     if not v:
         return None
-    try:
-        return date.fromisoformat(v)
-    except ValueError:
-        # TODO: US MM/DD/YYYY is the only other format in the sample (1007), so 01/02/2026 reads
-        # as Jan 2. A DD/MM vendor would be misread; add a per-vendor format when one turns up.
-        # Anything else raises, and _build records it as UNPARSEABLE rather than guessing a date.
-        return datetime.strptime(v, "%m/%d/%Y").date()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(v, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"unrecognised date: {v!r}")
 
 
 # "$1,250.00", "-$250", "1250": an optional sign and $, then digits with correctly placed thousands commas.
@@ -93,7 +107,7 @@ def _money(v) -> Decimal | None:
 
 
 _JSON_TOP = {"invoice_number", "vendor", "date", "due_date", "line_items", "subtotal", "tax_rate",
-             "tax_amount", "total", "currency", "payment_terms", "revision", "notes"}
+             "tax_amount", "shipping", "total", "currency", "payment_terms", "revision", "notes"}
 _JSON_VENDOR = {"name", "address"}
 _JSON_LINE = {"item", "quantity", "unit_price", "amount", "note"}
 
@@ -195,7 +209,7 @@ def _build(d: dict, source_file: str, unexpected: dict) -> Invoice:
 
     top = {k: parse(fn, d.get(k), k) for k, fn in (
         ("invoice_number", _text), ("date", _date), ("due_date", _date), ("subtotal", _money),
-        ("tax_rate", _money), ("tax_amount", _money), ("total", _money), ("currency", _text),
+        ("tax_rate", _money), ("tax_amount", _money), ("shipping", _money), ("total", _money), ("currency", _text),
         ("payment_terms", _text), ("revision", _text), ("notes", _text))}
     return Invoice(
         **top,
@@ -208,16 +222,17 @@ def _build(d: dict, source_file: str, unexpected: dict) -> Invoice:
     )
 
 
-# CSV header or key (snake_cased) -> JSON-shape key. Both CSV shapes go through this.
-_CSV_KEYS = {
+# Source field name (snake_cased) -> JSON-shape key. Both CSV shapes and XML go through this.
+_FIELD_KEYS = {
     "invoice_number": "invoice_number", "vendor": "vendor", "date": "date", "due_date": "due_date",
     "item": "item", "qty": "quantity", "quantity": "quantity", "unit_price": "unit_price",
     "line_total": "amount", "amount": "amount", "note": "note",
     "subtotal": "subtotal", "tax": "tax_amount", "tax_amount": "tax_amount", "tax_rate": "tax_rate",
+    "shipping": "shipping",
     "total": "total", "currency": "currency", "payment_terms": "payment_terms",
     "revision": "revision", "notes": "notes",
 }
-_CSV_TOP = _JSON_TOP - {"line_items"}
+_TOP_FIELDS = _JSON_TOP - {"line_items"}
 
 
 def _snake(s: str) -> str:
@@ -230,6 +245,23 @@ def _snake(s: str) -> str:
         Lowercase words joined by underscores, with punctuation removed.
     """
     return re.sub(r"\W+", "_", s.strip().lower()).strip("_")
+
+
+def _keep(unexpected: dict, path: str, value) -> None:
+    """Add one entry to unexpected without overwriting: a repeat of the same path becomes "path#2", "path#3".
+
+    Args:
+        unexpected: Collected unmapped fields; updated in place.
+        path: Where the value was found, e.g. "totals.handling".
+        value: The raw value.
+
+    Returns:
+        None.
+    """
+    key, n = path, 2
+    while key in unexpected:
+        key, n = f"{path}#{n}", n + 1
+    unexpected[key] = value
 
 
 def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
@@ -248,16 +280,18 @@ def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
     Returns:
         None.
     """
+    if not value.strip():  # blank claims no field, so a later row with a real value still lands
+        return
     # "Tax (6%):". A malformed rate like "6.5.1" doesn't match and goes to unexpected as an unknown label.
     if m := re.fullmatch(r"tax\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)\s*:?", label.strip(), re.I):
         if "tax_rate" in d or "tax_amount" in d:  # a second tax row: keep the first rate and amount paired
-            unexpected[f"{where}.{label.strip()}"] = value
+            _keep(unexpected, f"{where}.{label.strip()}", value)
         else:
             d["tax_rate"], d["tax_amount"] = Decimal(m[1]) / 100, value
         return
-    key = _CSV_KEYS.get(_snake(label))
-    if key not in _CSV_TOP or key in d:  # never overwrite: a second "total" is for review, not a winner
-        unexpected[f"{where}.{label.strip()}"] = value
+    key = _FIELD_KEYS.get(_snake(label))
+    if key not in _TOP_FIELDS or key in d:  # never overwrite: a second "total" is for review, not a winner
+        _keep(unexpected, f"{where}.{label.strip()}", value)
     else:
         d[key] = {"name": value} if key == "vendor" else value
 
@@ -279,7 +313,7 @@ def _extra_cells(row: list[str], width: int, n: int, unexpected: dict) -> None:
     """
     extra = row[width:]
     if any(c.strip() for c in extra):
-        unexpected[f"row[{n}].extra_cells"] = extra
+        _keep(unexpected, f"row[{n}].extra_cells", extra)
 
 
 def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
@@ -301,11 +335,11 @@ def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
             continue
         label, value = row[0], row[1] if len(row) > 1 else ""
         _extra_cells(row, 2, n, unexpected)
-        key = _CSV_KEYS.get(_snake(label))
+        key = _FIELD_KEYS.get(_snake(label))
         lines = d["line_items"]
         if key == "item":
             lines.append({"item": value})
-        elif key in _JSON_LINE and lines and key not in lines[-1]:
+        elif key in _JSON_LINE and lines and not lines[-1].get(key, "").strip():
             lines[-1][key] = value
         else:
             _put(d, label, value, unexpected, f"row[{n}]")
@@ -338,21 +372,22 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict) -> di
             if len(cells) == 2:
                 _put(d, cells[0], cells[1], unexpected, f"row[{n}]")
             else:
-                unexpected[f"row[{n}]"] = row
+                _keep(unexpected, f"row[{n}]", row)
             continue
         i, li = len(d["line_items"]), {}
         _extra_cells(row, len(header), n, unexpected)
         for h, cell in zip(header, row):
-            key = _CSV_KEYS.get(h)
+            key = _FIELD_KEYS.get(h)
             if key in _JSON_LINE:
-                if key not in li:
+                if not li.get(key, "").strip():
                     li[key] = cell
                 elif cell.strip():  # repeated column (two "Qty"s): first wins, the other is for review
-                    unexpected[f"line_items[{i}].{h}"] = cell
-            elif key in _CSV_TOP and h not in first:
+                    _keep(unexpected, f"line_items[{i}].{h}", cell)
+            elif key in _TOP_FIELDS and not first.get(h, "").strip():  # a blank first row claims nothing
                 first[h] = cell
-            elif cell.strip() and (key not in _CSV_TOP or cell.strip() != first[h].strip()):
-                unexpected[f"line_items[{i}].{h}"] = cell  # unknown column, or rows disagree on vendor etc.
+            elif cell.strip() and (key not in _TOP_FIELDS or cell.strip() != first[h].strip()):
+                # unknown column, or rows disagree on vendor etc.
+                _keep(unexpected, f"line_items[{i}].{h}", cell)
         d["line_items"].append(li)
     for h, cell in first.items():
         _put(d, h, cell, unexpected, "header")
@@ -387,4 +422,214 @@ def from_csv(path: str | Path) -> Invoice:
     return _build(d, path.name, unexpected)
 
 
-LOADERS = {".json": from_json, ".csv": from_csv}
+# Elements that only group invoice-level fields (1014: <header>, <totals>); their children are read
+# as top-level fields.
+_XML_GROUPS = {"header", "totals"}
+_XML_LINE_TAGS = {"item", "line_item"}
+_XML_ROOT = "invoice"
+_CURRENCY_ATTR = re.compile(r"@currency(#\d+)?$")  # a currency="EUR" attribute anywhere, as kept by _keep
+
+
+def _xml_tag(el) -> str:
+    """Return an element's tag, snake_cased and without any namespace ("{urn:x}Unit_Price" -> "unit_price")."""
+    return _snake(el.tag.rsplit("}", 1)[-1])
+
+
+def _xml_raw(el) -> str:
+    """Serialize one element for review, without the text that follows it (that belongs to its parent)."""
+    tail, el.tail = el.tail, None
+    try:
+        return ET.tostring(el, encoding="unicode").strip()
+    finally:
+        el.tail = tail
+
+
+def _xml_attrs(el, path: str, unexpected: dict) -> None:
+    """Keep an element's attributes for review (as "path@name"), since no field reads them.
+
+    Args:
+        el: The XML element.
+        path: The element's path.
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        None.
+    """
+    for name, value in el.attrib.items():
+        _keep(unexpected, f"{path}@{name}", value)
+
+
+def _xml_children(el, path: str, unexpected: dict):
+    """Yield a container element's children, keeping any loose text around them for review.
+
+    In a container (an element whose children are fields), text between the child elements has no
+    field to land in: "PAY TO ACCT 999" sitting next to <total> must not vanish.
+
+    Args:
+        el: The container element.
+        path: Its path; loose text is kept as "path#text".
+        unexpected: Collected unmapped fields; updated in place.
+
+    Yields:
+        Each child element.
+    """
+    if (el.text or "").strip():
+        _keep(unexpected, f"{path}#text", el.text.strip())
+    for child in el:
+        yield child
+        if (child.tail or "").strip():
+            _keep(unexpected, f"{path}#text", child.tail.strip())
+
+
+def _xml_value(el, path: str, unexpected: dict) -> str | None:
+    """Read a leaf element's text. An element with children has no single value, so it is kept for review.
+
+    Args:
+        el: The XML element.
+        path: The element's path, used for unexpected entries.
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        The element's text, or None if there is nothing to set: the element is empty (so it claims no
+        field, and a later real value still lands) or has children (sent to unexpected).
+    """
+    _xml_attrs(el, path, unexpected)
+    if len(el):
+        _keep(unexpected, path, _xml_raw(el))
+        return None
+    return el.text if (el.text or "").strip() else None
+
+
+def _xml_line(el, i: int, unexpected: dict) -> dict:
+    """Read one <item> under <line_items> into a JSON-shaped line dict.
+
+    Args:
+        el: The line element.
+        i: The line's position, used in paths ("line_items[1].discount").
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        A JSON-shaped line dict ("name" is read as the item).
+    """
+    path = f"line_items[{i}]"
+    _xml_attrs(el, path, unexpected)
+    li = {}
+    for child in _xml_children(el, path, unexpected):
+        tag = _xml_tag(child)
+        value = _xml_value(child, f"{path}.{tag}", unexpected)
+        if value is None:
+            continue
+        key = "item" if tag == "name" else _FIELD_KEYS.get(tag)
+        if key in _JSON_LINE and key not in li:
+            li[key] = value
+        else:  # unknown, or a repeat of a field already read: first wins
+            _keep(unexpected, f"{path}.{tag}", value)
+    return li
+
+
+def _no_dtd(*_):
+    raise ValueError("XML with a DTD (<!DOCTYPE>) is not accepted: invoices don't need one, and entities can be abused")
+
+
+def from_xml(path: str | Path) -> Invoice:
+    """Load an XML invoice file (the 1014 shape, or any close variant).
+
+    The root must be <invoice>. Fields can sit directly under it or inside <header>/<totals>; line
+    items are <item> (or <line_item>) elements under one <line_items>, with <name> read as the item.
+    <vendor> may be plain text or hold <name> and <address>. Field names map exactly as for CSV
+    (qty, line_total, tax, ...). Nothing is silently dropped: unknown elements, attributes, repeats
+    (including a second <line_items>), nested values, loose text, comments and processing
+    instructions go to unexpected_fields. With no <currency> element, a currency="..." attribute is
+    used as the invoice's currency.
+
+    Args:
+        path: The .xml file. The encoding is taken from the XML declaration.
+
+    Returns:
+        The Invoice, with UNPARSEABLE flags for unreadable values but no check flags yet
+        (load() adds those).
+
+    Raises:
+        OSError: The file can't be read.
+        ValueError: The file declares a DTD (vendor XML is untrusted; refusing DTDs rules out
+            entity-expansion attacks), or the root element isn't <invoice>.
+        xml.parsers.expat.ExpatError: The file isn't well-formed XML (caught by the pre-pass).
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    unexpected = {}
+    # Pre-pass with expat: stops at a DOCTYPE before its contents are processed (works in any
+    # encoding, unlike searching the bytes for "<!DOCTYPE"), and collects every comment and
+    # processing instruction, which the element tree below doesn't keep.
+    guard = expat.ParserCreate()
+    guard.StartDoctypeDeclHandler = _no_dtd
+    guard.CommentHandler = lambda text: _keep(unexpected, "#comment", text.strip())
+    guard.ProcessingInstructionHandler = lambda target, data: _keep(unexpected, "#pi", f"{target} {data}".strip())
+    guard.Parse(raw, True)
+    root = ET.fromstring(raw)
+    if _xml_tag(root) != _XML_ROOT:
+        raise ValueError(f"root element is <{_xml_tag(root)}>, not <{_XML_ROOT}>: not an invoice")
+
+    d = {"line_items": []}
+    lines_read = False
+    _xml_attrs(root, "", unexpected)
+
+    def read_top(el, prefix: str):
+        nonlocal lines_read
+        tag = _xml_tag(el)
+        path = f"{prefix}{tag}"
+        if tag in _XML_GROUPS and not prefix:
+            _xml_attrs(el, path, unexpected)
+            for child in _xml_children(el, path, unexpected):
+                read_top(child, f"{path}.")
+        elif tag == "line_items" and not prefix:
+            if lines_read:  # a second <line_items> block: first wins, like every other repeat
+                _keep(unexpected, path, _xml_raw(el))
+                return
+            lines_read = True
+            _xml_attrs(el, path, unexpected)
+            for child in _xml_children(el, path, unexpected):
+                if _xml_tag(child) in _XML_LINE_TAGS:
+                    d["line_items"].append(_xml_line(child, len(d["line_items"]), unexpected))
+                else:
+                    _keep(unexpected, f"{path}.{_xml_tag(child)}", _xml_raw(child))
+        elif tag == "vendor" and len(el):  # <vendor><name/><address/></vendor>
+            _xml_attrs(el, path, unexpected)
+            vendor = {}
+            for child in _xml_children(el, path, unexpected):
+                ctag = _xml_tag(child)
+                value = _xml_value(child, f"{path}.{ctag}", unexpected)
+                if value is None:
+                    continue
+                if ctag in _JSON_VENDOR and ctag not in vendor:
+                    vendor[ctag] = value
+                else:
+                    _keep(unexpected, f"{path}.{ctag}", value)
+            if not vendor:
+                return
+            if "vendor" in d:
+                _keep(unexpected, path, vendor)
+            else:
+                d["vendor"] = vendor
+        else:
+            value = _xml_value(el, path, unexpected)
+            if value is None:
+                return
+            key = _FIELD_KEYS.get(tag)
+            if key in _TOP_FIELDS and key not in d:  # never overwrite: a second <total> is for review
+                d[key] = {"name": value} if key == "vendor" else value
+            else:
+                _keep(unexpected, path, value)
+
+    for child in _xml_children(root, "", unexpected):
+        read_top(child, "")
+
+    # No <currency> element but a currency="EUR" attribute (say on <total>): that is the currency.
+    if "currency" not in d:
+        attr = next((k for k in unexpected if _CURRENCY_ATTR.search(k)), None)
+        if attr is not None:
+            d["currency"] = unexpected.pop(attr)
+    return _build(d, path.name, unexpected)
+
+
+LOADERS = {".json": from_json, ".csv": from_csv, ".xml": from_xml}

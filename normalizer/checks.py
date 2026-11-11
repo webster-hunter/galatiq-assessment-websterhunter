@@ -3,6 +3,7 @@
 Each check adds a flag with a stable code and its evidence. Severity is graded separately
 (severity.py), so the checks only say what is wrong, not how much it matters.
 """
+import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -11,13 +12,15 @@ from pathlib import Path
 
 from .models import Invoice
 
+_CURRENCY_ATTR = re.compile(r"@currency(#\d+)?$")  # XML attribute paths, as parsing keeps them
+
 
 def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
-    Covers invalid line values, missing vendor and due date, negative total, unexpected fields,
-    duplicate items, stock summed per item, and the arithmetic checks. Fields already flagged UNPARSEABLE in
-    inv.flags are not flagged again as missing.
+    Covers invalid line values, missing vendor and due date, negative total and shipping, non-USD currency,
+    unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
+    already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
 
     Args:
         inv: A loaded Invoice. Its existing flags are read, not modified.
@@ -73,6 +76,17 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         invoice_invalid("total", inv.total, "TOTAL_NEGATIVE")
     if not inv.line_items:  # a bill for nothing must not look clean
         invoice_invalid("line_items", None, "LINE_ITEMS_MISSING")
+    if inv.shipping is not None and inv.shipping < 0:  # would quietly offset an inflated line sum
+        invoice_invalid("shipping", inv.shipping, "SHIPPING_NEGATIVE")
+
+    # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
+    # rate. No stated currency is read as USD (the CSVs never state one). A currency attribute left in
+    # unexpected_fields (an XML <total currency="EUR"> next to a <currency> element) counts too.
+    currencies = [("currency", inv.currency)] + [
+        (path, value) for path, value in inv.unexpected_fields.items() if _CURRENCY_ATTR.search(path)]
+    for field, value in currencies:
+        if isinstance(value, str) and value.strip() and value.strip().upper() != "USD":
+            flags.append({"code": "CURRENCY_UNSUPPORTED", "field": field, "value": value})
 
     # One flag listing every path, so an agent knows to read unexpected_fields without scanning it first.
     if inv.unexpected_fields:
@@ -110,15 +124,16 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
     subtotal: 1009's subtotal is wrong but its total matches its lines, so only the subtotal
     is flagged. Tax uses the stated subtotal, since that is what the vendor applied the rate to.
     With no tax amount stated, the total check uses the rate if there is one, else zero tax, and
-    records which in tax_basis. Recomputed values are rounded to the cent (half up). A check
-    whose inputs are missing is skipped.
+    records which in tax_basis. Shipping, if stated, is added after tax and is not taxed.
+    Recomputed values are rounded to the cent (half up). A check whose inputs are missing is skipped.
 
     Args:
         inv: A loaded Invoice.
 
     Returns:
         SUBTOTAL_MISMATCH, TAX_AMOUNT_MISMATCH and TOTAL_MISMATCH flags, each with the stated
-        and computed values. Empty if everything reconciles.
+        and computed values (TOTAL_MISMATCH also carries tax_basis and shipping). Empty if
+        everything reconciles.
     """
     flags = []
 
@@ -137,7 +152,10 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
     if inv.subtotal is not None and inv.tax_rate is not None:
         check("tax_amount", inv.tax_amount, inv.subtotal * inv.tax_rate)
     base = line_sum if line_sum is not None else inv.subtotal  # stated subtotal only when lines can't be summed
-    if base is not None:
+    # An unreadable tax or shipping value is unknown, not zero: guessing it would raise a false
+    # TOTAL_MISMATCH on top of the UNPARSEABLE flag that already explains the problem.
+    unreadable = {f["field"] for f in inv.flags if f["code"] == "UNPARSEABLE"}
+    if base is not None and not unreadable & {"tax_amount", "tax_rate", "shipping"}:
         # Tax for the total check: as stated; else from the rate; else none was charged. 1002, 1003
         # and 1008 have no tax line and their totals equal their lines. tax_basis says which was used,
         # so a vendor who charged tax but left the line off shows up as that, not as a mystery.
@@ -147,8 +165,9 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
             tax, basis = (inv.subtotal if inv.subtotal is not None else base) * inv.tax_rate, "FROM_RATE"
         else:
             tax, basis = Decimal(0), "NONE_STATED"
-        # TODO: lines + tax only; a shipping line (txt invoice 1010) will need adding here.
-        check("total", inv.total, base + tax, tax_basis=basis)
+        # Shipping is added after tax, untaxed: on 1010 the 5% tax is on the 6,700 subtotal alone.
+        shipping = inv.shipping or Decimal(0)
+        check("total", inv.total, base + tax + shipping, tax_basis=basis, shipping=inv.shipping)
     return flags
 
 

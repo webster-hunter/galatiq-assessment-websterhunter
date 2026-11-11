@@ -26,6 +26,7 @@ class Invoice:
     subtotal: Decimal | None
     tax_rate: Decimal | None
     tax_amount: Decimal | None
+    shipping: Decimal | None  # added after tax (1010: 6,700 + 335 tax + 150 = 7,185)
     total: Decimal | None
     currency: str | None
     payment_terms: str | None
