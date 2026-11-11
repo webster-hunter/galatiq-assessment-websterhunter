@@ -45,7 +45,7 @@ SEVERITY = {
     "INVENTORY_NOT_CHECKED": "REVIEW",  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
-    "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form (invoice number "1002")
+    "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form ("1002", "Widget A", "Immediate")
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
 }
 

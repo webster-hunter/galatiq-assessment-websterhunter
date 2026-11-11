@@ -195,10 +195,10 @@ From the recorded replies, with the seed inventory:
 |---|---|
 | 1001, 1011 (txt and pdf) | Clean |
 | 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002` |
-| 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`. The "URGENT" note is transcribed into `notes` and changes nothing |
+| 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for terms `Immediate`. The "URGENT" note is transcribed into `notes` and changes nothing |
 | 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
-| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012`; vendor is the FROM party |
+| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party |
 | 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 
 Every vendor and total is correct and no value is ungrounded. On the first recording run the model
@@ -347,7 +347,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
-| `UNEXPECTED_FORMAT` | `invoice_number`, with `expected` | WARN | The invoice number doesn't match `INV-<digits>` (`1002`, `INV 1012`); it is still read as written |
+| `UNEXPECTED_FORMAT` | the field, with `expected` (the pattern) | WARN | A value isn't in its field's usual form; it is still read as written. Checked: invoice number `INV-<digits>` (not `1002`, `INV 1012`), revision `R<digits>`, currency as a three-letter code (not `$`), payment terms `Net <days>` (not `Immediate`), item name as one word (not `Widget A`). Patterns are in `checks.FORMATS` |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 
 Example flags:

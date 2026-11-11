@@ -851,3 +851,21 @@ def test_samples_over_the_threshold():
     over = [p.name for p in sorted(INVOICES.iterdir()) if p.suffix in (".json", ".csv", ".xml")
             and any(x["code"] == "OVER_APPROVAL_THRESHOLD" for x in load(p).flags)]
     assert over == ["invoice_1005.json", "invoice_1007.csv", "invoice_1013.json"]
+
+
+def test_each_formatted_field_is_checked(tmp_path):
+    """Revision, currency, payment terms and item names each have a usual form; a value outside it is kept and warned, one flag per field."""
+    f = tmp_path / "inv.json"
+    body = ('{"invoice_number": "INV-1", "vendor": "V", "due_date": "2026-02-01", "revision": "%s", "currency": "%s",'
+            ' "payment_terms": "%s", "line_items": [{"item": "%s", "quantity": 1, "unit_price": 1}], "total": 1}')
+    f.write_text(body % ("R1", "USD", "Net 30", "WidgetA"))
+    assert graded(load(f)) == []
+    f.write_text(body % ("rev 2", "US$", "Due on receipt", "Widget A"))
+    inv = load(f)
+    assert (inv.revision, inv.currency, inv.payment_terms, inv.line_items[0].item) == ("rev 2", "US$", "Due on receipt", "Widget A")
+    assert [(x["severity"], x["field"], x["value"]) for x in inv.flags] == [
+        ("WARN", "line_items[0].item", "Widget A"), ("WARN", "revision", "rev 2"), ("WARN", "currency", "US$"),
+        ("WARN", "payment_terms", "Due on receipt")]
+    # Every structured sample is in the usual form throughout.
+    assert not any(x["code"] == "UNEXPECTED_FORMAT" for p in sorted(INVOICES.iterdir())
+                   if p.suffix in (".json", ".csv", ".xml") for x in load(p).flags)

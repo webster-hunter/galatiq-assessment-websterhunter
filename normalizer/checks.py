@@ -13,10 +13,18 @@ from pathlib import Path
 from .models import Invoice
 
 
-# The numbering every sample invoice but two uses: INV-1001. A number in another form ("1002",
-# "INV 1012") is still read, but it is worth a look, and duplicate detection will need the forms
-# to compare equal. One pattern for now; per-vendor patterns belong with a vendor list.
-INVOICE_NUMBER_FORMAT = re.compile(r"INV-\d+")
+# The form each text field takes across the sample invoices. A value in another form is still
+# read as written, with an UNEXPECTED_FORMAT warning: it is worth a look, and matching (duplicate
+# invoice numbers, product names against inventory) needs one form to compare. Only fields the
+# samples write one way are listed; vendor names and addresses have no form to check. One pattern
+# per field for now; per-vendor patterns belong with a vendor list.
+FORMATS = {
+    "invoice_number": re.compile(r"INV-\d+"),          # INV-1001; not "1002" or "INV 1012"
+    "revision": re.compile(r"R\d+"),                   # R1
+    "currency": re.compile(r"[A-Z]{3}"),               # a currency code, USD or EUR; not "$"
+    "payment_terms": re.compile(r"Net \d+"),           # Net 30; not "Immediate"
+    "line_items[].item": re.compile(r"[A-Z][A-Za-z0-9]*"),  # one word, WidgetA; not "Widget A"
+}
 
 # "Invoices over $10K require additional scrutiny" (the brief). At or above it, a person reviews
 # the invoice however clean it is. Exactly $10,000 counts: the cautious reading of "over".
@@ -27,7 +35,7 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
     Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
-    number in an unexpected format, a due date before the invoice date, negative total and
+    number, revision, currency, payment terms or item name in an unexpected format, a due date before the invoice date, negative total and
     shipping, non-USD currency, a total at or over the approval threshold,
     unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
     already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
@@ -40,6 +48,11 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         New flag dicts (without severity; load() adds it), in check order.
     """
     flags = []
+
+    def unexpected_format(field, value, pattern):
+        if value is not None and not pattern.fullmatch(value):
+            flags.append({"code": "UNEXPECTED_FORMAT", "field": field, "value": value, "expected": pattern.pattern})
+
     # Already flagged UNPARSEABLE at load: don't flag the resulting None again as missing.
     unparseable = {f["field"] for f in inv.flags if f["code"] == "UNPARSEABLE"}
     lines_by_item = defaultdict(list)
@@ -72,6 +85,8 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         # TODO: exact name match; "WidgetA (rush order)"-style variants need SKU matching.
         elif inventory is not None and li.item not in inventory:
             invalid("item", "UNKNOWN_PRODUCT")
+        # Alongside UNKNOWN_PRODUCT, this says why "Widget A" wasn't found: its form, not a new product.
+        unexpected_format(f"line_items[{i}].item", li.item, FORMATS["line_items[].item"])
 
     # Invoice-level values. A field already flagged UNPARSEABLE (or whose parent was) isn't re-flagged.
     def invoice_invalid(field, value, code):
@@ -80,9 +95,8 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
 
     if inv.invoice_number is None:  # duplicate detection keys on it
         invoice_invalid("invoice_number", None, "INVOICE_NUMBER_MISSING")
-    elif not INVOICE_NUMBER_FORMAT.fullmatch(inv.invoice_number):
-        flags.append({"code": "UNEXPECTED_FORMAT", "field": "invoice_number", "value": inv.invoice_number,
-                      "expected": INVOICE_NUMBER_FORMAT.pattern})
+    for name in ("invoice_number", "revision", "currency", "payment_terms"):
+        unexpected_format(name, getattr(inv, name), FORMATS[name])
     if inv.vendor_name is None:
         invoice_invalid("vendor.name", None, "VENDOR_MISSING")
     if inv.due_date is None:

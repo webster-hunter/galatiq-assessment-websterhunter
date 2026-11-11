@@ -18,21 +18,24 @@ ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
 INVENTORY = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
 
-OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNEXPECTED_FIELDS"]
+# Two OCR-damaged values; "Widget A" and "Gadget X" each unknown and oddly formed; number "INV 1012".
+OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT",
+            "UNEXPECTED_FORMAT"]
 # file -> (vendor, total, flag codes in order)
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
     "invoice_1002.txt": ("Gadgets Co.", "15000.00",  # number is a bare "1002"
                          ["UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
     "invoice_1003.txt": ("Fraudster LLC", "100000.00",  # due "yesterday"
-                         ["UNPARSEABLE", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
+                         ["UNPARSEABLE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),  # terms "Immediate"
     "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]),
     # The bill-to (Acme Corp Manufacturing Division) is not the vendor; the rush line is WidgetA with a note.
     "invoice_1010.txt": ("Consolidated Materials Group", "7185.00", ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]),
     "invoice_1011.txt": ("Summit Manufacturing Co.", "3000.00", []),
     "invoice_1011.pdf": ("Summit Manufacturing Co.", "3000.00", []),
-    "invoice_1012.txt": ("QuickShip Distributers", "9975.00", OCR_1012),  # FROM, not the TO party
-    "invoice_1012.pdf": ("QuickShip Distributers", "9975.00", OCR_1012),
+    "invoice_1012.txt": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FIELDS"]),  # FROM, not the TO party
+    # For the PDF the model also returned the "$" from an amount as the currency: read as USD, noted as not a code.
+    "invoice_1012.pdf": ("QuickShip Distributers", "9975.00", OCR_1012 + ["UNEXPECTED_FORMAT", "UNEXPECTED_FIELDS"]),
     "invoice_1013.pdf": ("Atlas Industrial Supply", "22562.80",
                          ["OVER_APPROVAL_THRESHOLD"] + ["DUPLICATE_ITEM"] * 3 + ["STOCK_EXCEEDED"] * 3
                          + ["TOTAL_MISMATCH"]),
@@ -69,3 +72,14 @@ def test_1002_date_without_a_comma_is_read():
     from datetime import date
     inv = load(INVOICES / "invoice_1002.txt", Replay(REPLAYS), INVENTORY)
     assert inv.date == date(2026, 1, 30) and not any(f["code"] == "UNPARSEABLE" for f in inv.flags)
+
+
+def test_unexpected_formats_on_the_samples():
+    """Across all ten recorded samples, exactly these values are not in their field's usual form."""
+    found = {(name, f["field"], f["value"]) for name in EXPECTED
+             for f in load(INVOICES / name, Replay(REPLAYS), INVENTORY).flags if f["code"] == "UNEXPECTED_FORMAT"}
+    both_1012 = {(n, field, value) for n in ("invoice_1012.txt", "invoice_1012.pdf") for field, value in (
+        ("invoice_number", "INV 1012"), ("line_items[0].item", "Widget A"), ("line_items[2].item", "Gadget X"))}
+    assert found == both_1012 | {("invoice_1002.txt", "invoice_number", "1002"),
+                                 ("invoice_1003.txt", "payment_terms", "Immediate"),
+                                 ("invoice_1012.pdf", "currency", "$")}
