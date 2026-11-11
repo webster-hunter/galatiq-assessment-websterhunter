@@ -1,0 +1,5 @@
+__pycache__/
+.pytest_cache/
+
+# Rebuilt by `python data/seed_inventory.py`
+*.db
