@@ -21,7 +21,7 @@ Inferred from the JD, the README and its git history; not confirmed. Prepare for
 
 | Stage | What is tested | Modules |
 |---|---|---|
-| Take-home review (likely tool-assisted, reads the repo) | Does it work, is it legible, is it yours | 1–6, 9 |
+| Take-home review (likely tool-assisted, reads the repo) | Does it work, is it legible, is it yours | 1–4, parts of 5–7, 9 |
 | Live demo and defence (5–10 min demo, then questions) | Design judgment, trade-offs, business framing | 9, 10 |
 | Technical deep-dive or live debugging | "Debugging a 7-agent reflection loop" | 3, 4, 6 |
 | System design for a new client problem | Agent architecture, integration, failure modes | 4, 5, 7, 8 |
@@ -47,12 +47,14 @@ Inferred from the JD, the README and its git history; not confirmed. Prepare for
 
 | Tier | Modules | Why |
 |---|---|---|
-| **Must**, before submitting | 1, 2, 3, 4, 6 (core), 9 (demo) | The submission depends on them |
-| **Should**, before the live rounds | 5, 6 (full), 8, 10 | Where follow-up questions go |
-| **Could**, ongoing | 7, plus the stretch items | Nice-to-haves in the JD |
+| **Must**, while building | 1, 2, 3, 4; Module 5 labs 1, 2, 4; Module 6 labs 1–3; Module 7 labs 1–2; Module 9 labs 3–6 | The submission depends on them |
+| **Should**, before the live rounds | Rest of 5, 6 and 9; 8; 10 | Where follow-up questions go |
+| **Could**, ongoing | Rest of 7, plus the stretch items | Nice-to-haves in the JD |
 
-A workable pace is one module per one to two focused days for the Must tier. Adjust to your deadline;
-if time is short, cut stretch items, never exit tests.
+The Must tier is not extra study time on top of the build: its labs *are* the build, in the order of
+the plan's four-day budget. While building, do the labs and read only what unblocks you. Do the full
+reading, the exit tests you skipped and the Should tier in the gap between submitting and the live
+rounds.
 
 ---
 
@@ -83,7 +85,8 @@ if time is short, cut stretch items, never exit tests.
 - What does your system do with a due date of `yesterday`, and why not something else?
 
 **Read:** Pydantic documentation (models, validators); Alexis King, "Parse, don't validate"; Python
-`decimal` module documentation.
+`decimal` module documentation; `dateutil` or equivalent, and why ambiguous dates like `01/02/2026`
+need a stated convention.
 
 ---
 
@@ -96,6 +99,7 @@ if time is short, cut stretch items, never exit tests.
 - Structured outputs: JSON schema-constrained generation versus "please return JSON"
 - Function calling: how the model requests a tool and how results are returned
 - Context windows, token cost, latency; prompt caching
+- Long context: what degrades as documents grow, and when to extract page by page instead
 - Failure modes: hallucinated fields, silent truncation, schema drift, over-helpful "fixing" of values
 - Prompt injection and treating document text as data
 - Model selection: the current line-ups from xAI, Anthropic, OpenAI and Google; small versus large
@@ -138,10 +142,12 @@ tool-use guides from at least one other provider; OWASP Top 10 for LLM Applicati
 **Lab**
 1. Extraction loop: if the extracted invoice fails reconciliation, send the specific mismatch back and
    retry, at most twice. Then hold.
-2. Break it on purpose: feed an invoice whose total is genuinely wrong (1007). The loop must stop and
-   report a vendor error, not "fix" the number. This distinction is the heart of the module.
-3. Approval loop: reviewer drafts a decision; critic checks it against findings and policy; at most two
-   rounds.
+2. Break it on purpose: feed `invoice_1013.pdf`, whose total is genuinely wrong (1007 is a CSV and
+   never reaches the model). The loop must stop and report a vendor error, not "fix" the number. Build
+   the grounding check from the plan (section 3.3) to tell the two cases apart. This distinction is
+   the heart of the module.
+3. Approval loop: reviewer investigates with tools and drafts a decision; critic checks it against
+   findings and policy; code enforces the floor; at most two rounds.
 4. Log every iteration: input, output, what changed, why it stopped.
 5. Measure: on the golden set, how often does the loop change the answer? How often for the better?
 
@@ -205,13 +211,13 @@ APIs, dynamic tool discovery. **Milestones:** M2, M5.
 - Model Context Protocol as the current standard for tool discovery
 
 **Lab**
-1. Implement inventory tools: `get_stock(sku)`, `find_similar_sku(name)`, `check_invoice_lines(lines)`
-   returning aggregated results. Write the descriptions as if the model had no other context.
+1. Implement the tools: `get_stock(sku)`, `find_similar_sku(name)`, `get_vendor_history(vendor)`,
+   `check_invoice_lines(lines)` returning aggregated results. Write the descriptions as if the model had no other context.
 2. Make `mock_payment` idempotent with a key derived from invoice number and revision. Prove a second
    call pays nothing.
 3. Write a deliberately bad mock: a "legacy inventory API" that times out one call in three and
    sometimes returns stock as a string. Make the pipeline survive it.
-4. Add `vendors` and `catalog` tables; add price and vendor checks.
+4. Add a `catalog` table and the price check. Stretch: a `vendors` table and alias matching.
 5. Stretch: expose the inventory tools through a small MCP server.
 
 **Exit test**
@@ -227,7 +233,7 @@ overview of SAP procure-to-pay objects.
 ## Module 6 — Evals, observability and the improvement loop
 
 **JD:** error recovery, observability, continuous-improvement loop; systems that "continuously improve
-in the real world". **Milestone:** M5, and above-and-beyond item 2.
+in the real world". **Milestone:** M5, and above-and-beyond item 1.
 
 **Concepts**
 - Golden datasets; field-level versus decision-level accuracy
@@ -314,8 +320,9 @@ or Langfuse quick-start, enough to know what a tracing tool provides.
 - A vendor emails new bank details with an invoice. What should the system do?
 - The CFO asks what this saves. Answer in three sentences with your assumptions stated.
 
-**Read:** any accounts-payable automation primer from an ERP vendor; the ACFE "Report to the Nations"
-section on billing schemes.
+**Read:** SAP's or Oracle's own overview of procure-to-pay and invoice matching; the ACFE "Report to
+the Nations" section on billing schemes; the FBI IC3 annual report section on business email
+compromise.
 
 ---
 
@@ -350,16 +357,16 @@ be the technical face; no perfect requirements. **Milestone:** M6.
 - Explain the hold queue to a VP of Finance without the words "agent", "LLM" or "model".
 - A director says "we just want it to auto-approve everything under $10K." Respond.
 
-**Read:** Barbara Minto's pyramid principle (any summary); published accounts of forward-deployed
-engineering at Palantir for the working model.
+**Read:** Barbara Minto, "The Pyramid Principle" (the first two chapters are enough); published
+accounts of forward-deployed engineering at Palantir for the working model.
 
 ---
 
 ## Module 10 — Interview drills
 
-Run these after the submission is in. Time yourself. Do them aloud.
+All of this is for after the submission is in. Time yourself. Do them aloud.
 
-**Defending the take-home** — use section 10 of the plan. Two sentences each, then one level deeper.
+**Defending the take-home** — use section 11 of the plan. Two sentences each, then one level deeper.
 
 **System design** (35 minutes each: clarify, sketch, failure modes, rollout)
 - Insurance claims intake: emails with attachments, policy lookup in a mainframe, adjuster approval.
@@ -376,6 +383,10 @@ what is the eval set, what is live in week three.
 - Cost per invoice tripled last week.
 - One vendor's invoices are always held.
 - A payment was made twice.
+- Multi-agent trace: take the JSON logs from one of your own held invoices, add two invented agents
+  (say a vendor-risk agent and a tax agent) that disagree with the reviewer, and work out from logs
+  alone which agent's output caused the loop to exhaust its budget. The JD's "7-agent reflection
+  loop" line is about exactly this skill: reading state transitions, not prompts.
 
 **Executive conversation** (have someone play the VP)
 - "Why can't the AI just handle all of it?"
@@ -385,28 +396,3 @@ what is the eval set, what is live in week three.
 
 **Behavioural** — prepare three stories from your own experience: shipping under ambiguity, cutting
 scope and being right, a disagreement with a stakeholder you resolved. Use real examples only.
-
----
-
-## Self-assessment
-
-Rate yourself now and again before each interview stage. 1 = could not start; 3 = can do with
-references; 5 = can do live and teach it.
-
-| Skill | Now | Before submit | Before live rounds |
-|---|---|---|---|
-| Canonical modelling and normalisation of messy data | | | |
-| Structured extraction with an LLM, measured | | | |
-| Function calling and tool design | | | |
-| Self-correction loops with sound termination | | | |
-| Multi-agent orchestration in LangGraph | | | |
-| Human-in-the-loop and resumable runs | | | |
-| Evals and regression testing for LLM systems | | | |
-| Logging, tracing and cost accounting | | | |
-| Testing and packaging production Python | | | |
-| Comparing frontier models with evidence | | | |
-| Accounts-payable domain and fraud patterns | | | |
-| Discovery and scope cutting | | | |
-| Executive communication and live demo | | | |
-
-Anything below 3 in the Must tier before submitting is where the next study day goes.
