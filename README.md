@@ -194,12 +194,12 @@ From the recorded replies, with the seed inventory:
 | Invoice | Result |
 |---|---|
 | 1001, 1011 (txt and pdf) | Clean |
-| 1002 | Total $15,000.00 read from "Amt"; date `Jan 30 2026` `UNPARSEABLE`; `STOCK_EXCEEDED` GadgetX (20 / 5) |
-| 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0). The "URGENT" note is transcribed into `notes` and changes nothing |
+| 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002` |
+| 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`. The "URGENT" note is transcribed into `notes` and changes nothing |
 | 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
-| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; vendor is the FROM party |
-| 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80) |
+| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012`; vendor is the FROM party |
+| 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 
 Every vendor and total is correct and no value is ungrounded. On the first recording run the model
 put 1002's invoice total ("Amt: $15,000.00") on the line item; the grounding check flagged it
@@ -257,7 +257,7 @@ amount, shipping, total, currency, payment terms, revision, notes and source fil
   (`"22562.80"`). `$1,250.00` and `-$250` are read as plain amounts. Only plain numbers are read:
   `1_000`, `1e3` and digits from other scripts are `UNPARSEABLE`, not guessed.
 - **Dates** are read from an explicit list of the formats vendors use: `2026-01-24`, `01/28/2026`,
-  `January 27, 2026`, `Jan 27, 2026` and `25-Feb-2026`. Slash dates are US order, so `01/02/2026` is
+  `January 27, 2026`, `Jan 27, 2026` (each with or without the comma) and `25-Feb-2026`. Slash dates are US order, so `01/02/2026` is
   2 January. Any other text (`yesterday`) is `UNPARSEABLE`, never guessed. The list doesn't depend on
   the Python version, so a file parses the same everywhere; a new vendor format is one more entry in
   `_DATE_FORMATS`. Output format is ISO.
@@ -335,6 +335,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
 | `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
+| `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
 | `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate. No stated currency is read as USD |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
@@ -346,6 +347,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
+| `UNEXPECTED_FORMAT` | `invoice_number`, with `expected` | WARN | The invoice number doesn't match `INV-<digits>` (`1002`, `INV 1012`); it is still read as written |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 
 Example flags:
@@ -380,10 +382,10 @@ With `--inventory inventory.db`:
 | Invoice | Flags |
 |---|---|
 | 1004, 1004 R1, 1006, 1015 | None |
-| 1005 | `STOCK_EXCEEDED` GadgetX (8 / 5) |
-| 1007 | `STOCK_EXCEEDED` WidgetA (20 / 15) and WidgetB (15 / 10); `TOTAL_MISMATCH` (stated 15,525.00, computed 15,635.00) |
+| 1005 | `STOCK_EXCEEDED` GadgetX (8 / 5); `OVER_APPROVAL_THRESHOLD` |
+| 1007 | `STOCK_EXCEEDED` WidgetA (20 / 15) and WidgetB (15 / 10); `TOTAL_MISMATCH` (stated 15,525.00, computed 15,635.00); `OVER_APPROVAL_THRESHOLD` |
 | 1009 | `QTY_NON_POSITIVE`, `VENDOR_MISSING`, `DUE_DATE_MISSING`, `TOTAL_NEGATIVE`, `SUBTOTAL_MISMATCH` (stated 1,000.00, computed −250.00) |
-| 1013 | `DUPLICATE_ITEM` ×3; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80) |
+| 1013 | `DUPLICATE_ITEM` ×3; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 | 1014 | `CURRENCY_UNSUPPORTED` (EUR); arithmetic and stock are fine |
 | 1016 | `UNKNOWN_PRODUCT` WidgetC |
 

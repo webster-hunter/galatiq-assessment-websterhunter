@@ -43,6 +43,8 @@ _DATE_FORMATS = (
     "%m/%d/%Y",    # 01/28/2026 (1007). TODO: US order, so 01/02/2026 is Jan 2; a DD/MM vendor needs its own rule
     "%B %d, %Y",   # January 27, 2026 (1010)
     "%b %d, %Y",   # Jan 27, 2026
+    "%B %d %Y",    # January 27 2026
+    "%b %d %Y",    # Jan 30 2026 (1002)
     "%d-%b-%Y",    # 25-Feb-2026 (1012)
 )
 

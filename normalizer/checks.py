@@ -3,6 +3,7 @@
 Each check adds a flag with a stable code and its evidence. Severity is graded separately
 (severity.py), so the checks only say what is wrong, not how much it matters.
 """
+import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -12,11 +13,22 @@ from pathlib import Path
 from .models import Invoice
 
 
+# The numbering every sample invoice but two uses: INV-1001. A number in another form ("1002",
+# "INV 1012") is still read, but it is worth a look, and duplicate detection will need the forms
+# to compare equal. One pattern for now; per-vendor patterns belong with a vendor list.
+INVOICE_NUMBER_FORMAT = re.compile(r"INV-\d+")
+
+# "Invoices over $10K require additional scrutiny" (the brief). At or above it, a person reviews
+# the invoice however clean it is. Exactly $10,000 counts: the cautious reading of "over".
+APPROVAL_THRESHOLD = Decimal("10000")
+
+
 def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
-    Covers invalid line values, missing invoice number, vendor, due date and total, a due date
-    before the invoice date, negative total and shipping, non-USD currency,
+    Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
+    number in an unexpected format, a due date before the invoice date, negative total and
+    shipping, non-USD currency, a total at or over the approval threshold,
     unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
     already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
 
@@ -68,6 +80,9 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
 
     if inv.invoice_number is None:  # duplicate detection keys on it
         invoice_invalid("invoice_number", None, "INVOICE_NUMBER_MISSING")
+    elif not INVOICE_NUMBER_FORMAT.fullmatch(inv.invoice_number):
+        flags.append({"code": "UNEXPECTED_FORMAT", "field": "invoice_number", "value": inv.invoice_number,
+                      "expected": INVOICE_NUMBER_FORMAT.pattern})
     if inv.vendor_name is None:
         invoice_invalid("vendor.name", None, "VENDOR_MISSING")
     if inv.due_date is None:
@@ -95,6 +110,13 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     # "$" are already read as dollars everywhere else.
     if inv.currency is not None and inv.currency.upper() not in ("USD", "US$", "$"):
         flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency})
+
+    # Only for a dollar total: 4,125 EUR can't be compared to a dollar threshold, and that invoice
+    # is already held by CURRENCY_UNSUPPORTED.
+    in_dollars = not any(f["code"] == "CURRENCY_UNSUPPORTED" for f in flags)
+    if inv.total is not None and in_dollars and inv.total >= APPROVAL_THRESHOLD:
+        flags.append({"code": "OVER_APPROVAL_THRESHOLD", "field": "total", "value": inv.total,
+                      "threshold": APPROVAL_THRESHOLD})
 
     # One flag listing every path, so an agent knows to read unexpected_fields without scanning it first.
     if inv.unexpected_fields:

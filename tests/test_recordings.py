@@ -18,12 +18,14 @@ ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
 INVENTORY = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
 
-OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]
+OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNEXPECTED_FIELDS"]
 # file -> (vendor, total, flag codes in order)
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
-    "invoice_1002.txt": ("Gadgets Co.", "15000.00", ["UNPARSEABLE", "STOCK_EXCEEDED"]),  # date "Jan 30 2026"
-    "invoice_1003.txt": ("Fraudster LLC", "100000.00", ["UNPARSEABLE", "STOCK_EXCEEDED"]),  # due "yesterday"
+    "invoice_1002.txt": ("Gadgets Co.", "15000.00",  # number is a bare "1002"
+                         ["UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
+    "invoice_1003.txt": ("Fraudster LLC", "100000.00",  # due "yesterday"
+                         ["UNPARSEABLE", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
     "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]),
     # The bill-to (Acme Corp Manufacturing Division) is not the vendor; the rush line is WidgetA with a note.
     "invoice_1010.txt": ("Consolidated Materials Group", "7185.00", ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]),
@@ -32,7 +34,8 @@ EXPECTED = {
     "invoice_1012.txt": ("QuickShip Distributers", "9975.00", OCR_1012),  # FROM, not the TO party
     "invoice_1012.pdf": ("QuickShip Distributers", "9975.00", OCR_1012),
     "invoice_1013.pdf": ("Atlas Industrial Supply", "22562.80",
-                         ["DUPLICATE_ITEM"] * 3 + ["STOCK_EXCEEDED"] * 3 + ["TOTAL_MISMATCH"]),
+                         ["OVER_APPROVAL_THRESHOLD"] + ["DUPLICATE_ITEM"] * 3 + ["STOCK_EXCEEDED"] * 3
+                         + ["TOTAL_MISMATCH"]),
 }
 
 
@@ -59,3 +62,10 @@ def test_grounding_caught_a_real_model_error():
                    "line_items": [{"item": "GadgetX", "quantity": "20", "unit_price": "$750", "amount": "$15,000.00", "note": None}]}
     [f] = ungrounded(first_reply, read_text(INVOICES / "invoice_1002.txt"))
     assert (f["code"], f["field"], f["reason"]) == ("NOT_IN_SOURCE", "line_items[0]", "NOT_ON_ONE_LINE")
+
+
+def test_1002_date_without_a_comma_is_read():
+    """1002's "Jan 30 2026" is a date, not an unreadable value; the invoice is held for stock and its amount, not for our parser."""
+    from datetime import date
+    inv = load(INVOICES / "invoice_1002.txt", Replay(REPLAYS), INVENTORY)
+    assert inv.date == date(2026, 1, 30) and not any(f["code"] == "UNPARSEABLE" for f in inv.flags)

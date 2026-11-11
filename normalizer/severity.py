@@ -36,6 +36,7 @@ SEVERITY = {
     "DUE_DATE_MISSING": "REVIEW",  # can be looked up
     "DUE_DATE_BEFORE_INVOICE_DATE": "REVIEW",  # data error, or pressure to pay at once
     "INVOICE_NUMBER_MISSING": "REVIEW",  # payable in principle, but duplicates can't be caught
+    "OVER_APPROVAL_THRESHOLD": "REVIEW",  # the brief: over $10K needs additional scrutiny
     "CURRENCY_UNSUPPORTED": "REVIEW",  # no conversion: hold rather than compare EUR to USD
     "STOCK_EXCEEDED": "REVIEW",
     "STOCK_UNKNOWN": "REVIEW",
@@ -44,6 +45,7 @@ SEVERITY = {
     "INVENTORY_NOT_CHECKED": "REVIEW",  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
+    "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form (invoice number "1002")
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
 }
 
