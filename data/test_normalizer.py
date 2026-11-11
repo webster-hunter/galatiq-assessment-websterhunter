@@ -44,7 +44,7 @@ def codes(inv):
 def test_duplicate_items_flagged_with_their_lines():
     """An item on more than one line gets one DUPLICATE_ITEM flag listing every line it appears on."""
     inv = load(INVOICES / "invoice_1013.json", README_INVENTORY)
-    assert {"code": "DUPLICATE_ITEM", "item": "WidgetA", "lines": [0, 3, 6]} in inv.flags
+    assert {"code": "DUPLICATE_ITEM", "severity": "WARN", "item": "WidgetA", "lines": [0, 3, 6]} in inv.flags
     dupes = [c for c in codes(inv) if c[0] == "DUPLICATE_ITEM"]
     assert dupes == [("DUPLICATE_ITEM", "WidgetA"), ("DUPLICATE_ITEM", "WidgetB"),
                      ("DUPLICATE_ITEM", "GadgetX")]
@@ -77,10 +77,37 @@ def test_invalid_values_flagged():
     assert load(INVOICES / "invoice_1016.json").flags == []  # no inventory given -> product check skipped
 
 
+def test_1009_has_every_golden_set_finding_with_severity():
+    """Invoice 1009 gets each finding the plan's golden set lists (non-positive quantity, negative total, missing vendor, subtotal mismatch, missing due date) at the plan's severity."""
+    inv = load(INVOICES / "invoice_1009.json", README_INVENTORY)
+    assert [(f["severity"], f["code"], f["field"], f.get("reason")) for f in inv.flags] == [
+        ("BLOCK", "INVALID_VALUE", "line_items[0].quantity", "NOT_POSITIVE"),
+        ("BLOCK", "INVALID_VALUE", "vendor.name", "MISSING"),
+        ("REVIEW", "INVALID_VALUE", "due_date", "MISSING"),
+        ("BLOCK", "INVALID_VALUE", "total", "NEGATIVE"),
+        ("BLOCK", "SUBTOTAL_MISMATCH", "subtotal", None),
+    ]
+
+
+def test_every_flag_has_a_known_severity():
+    """Every flag on every sample invoice carries one of the four plan severities, and a flag code with no assigned severity fails loudly."""
+    from normalizer import SEVERITIES, severity
+
+    flags = [f for r in normalize([INVOICES], README_INVENTORY) for f in r["invoice"]["flags"]]
+    assert {f["code"] for f in flags} >= {"INVALID_VALUE", "DUPLICATE_ITEM", "STOCK_EXCEEDED", "TOTAL_MISMATCH"}
+    assert all(f["severity"] in SEVERITIES for f in flags)
+    try:
+        severity({"code": "SOMETHING_NEW"})
+        raise AssertionError("an unlisted code must not get a default severity")
+    except KeyError:
+        pass
+
+
 def test_negative_price_and_missing_item(tmp_path):
     """A zero quantity, a negative price, a missing price and a missing item name each get their own INVALID_VALUE flag."""
     f = tmp_path / "inv.json"
-    f.write_text('{"line_items": [{"item": "WidgetA", "quantity": 0, "unit_price": -1}, {"quantity": 1}]}')
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 0, "unit_price": -1}, {"quantity": 1}]}')
     assert codes(load(f)) == [("INVALID_VALUE", "line_items[0].quantity"),
                               ("INVALID_VALUE", "line_items[0].unit_price"),
                               ("INVALID_VALUE", "line_items[1].unit_price"),
@@ -94,7 +121,7 @@ def unparseable(inv):
 def test_unreadable_values_become_none_and_flag_without_losing_the_invoice(tmp_path):
     """A value that can't be read becomes None plus an UNPARSEABLE flag with the raw value; the rest of the invoice still loads and is still checked."""
     f = tmp_path / "inv.json"
-    f.write_text('{"invoice_number": "INV-1", "due_date": "yesterday", "total": "about 500",'
+    f.write_text('{"invoice_number": "INV-1", "vendor": "V", "due_date": "yesterday", "total": "about 500",'
                  ' "line_items": [{"item": "WidgetA", "quantity": "lots", "unit_price": 250},'
                  '                {"item": "WidgetB", "quantity": 2, "unit_price": "NaN"},'
                  '                {"item": "WidgetA", "quantity": 1, "unit_price": 250}]}')
@@ -104,7 +131,7 @@ def test_unreadable_values_become_none_and_flag_without_losing_the_invoice(tmp_p
                                 ("due_date", "yesterday"), ("total", "about 500")]
     # No second MISSING flag for the same fields, and the other checks still ran on what was readable.
     assert not [x for x in inv.flags if x.get("reason") == "MISSING"]
-    assert {"code": "DUPLICATE_ITEM", "item": "WidgetA", "lines": [0, 2]} in inv.flags
+    assert {"code": "DUPLICATE_ITEM", "severity": "WARN", "item": "WidgetA", "lines": [0, 2]} in inv.flags
 
 
 def test_formatting_variants_are_normalized_not_flagged(tmp_path):
@@ -126,11 +153,13 @@ def test_formatting_variants_are_normalized_not_flagged(tmp_path):
 def test_wrong_structure_is_flagged_not_fatal(tmp_path):
     """Structurally wrong JSON (vendor as a list, a line item that isn't an object, line_items not a list) is flagged per field instead of failing the file."""
     f = tmp_path / "inv.json"
-    f.write_text('{"vendor": ["Acme"], "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 1}, "junk"]}')
+    f.write_text('{"vendor": ["Acme"], "due_date": "2026-02-01",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 1}, "junk"]}')
     inv = load(f, README_INVENTORY)
     assert unparseable(inv) == [("vendor", ["Acme"]), ("line_items[1]", "junk")]
     assert len(inv.line_items) == 2 and inv.line_items[0].item == "WidgetA"  # index 1 kept as a placeholder
-    assert [x for x in inv.flags if x.get("reason") != "UNPARSEABLE"] == []  # placeholder adds no MISSING noise
+    # Placeholder line adds no MISSING noise, and the unreadable vendor isn't re-flagged as a missing vendor.name.
+    assert [x for x in inv.flags if x.get("reason") != "UNPARSEABLE"] == []
 
     f.write_text('{"line_items": {"item": "WidgetA"}}')
     assert unparseable(load(f)) == [("line_items", {"item": "WidgetA"})]

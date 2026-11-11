@@ -44,14 +44,58 @@ class Invoice:
     # Source fields the loader doesn't map, keyed by path ("vendor.tax_id", "line_items[2].discount").
     # Kept verbatim for the agent to review: nothing in the file is silently dropped.
     unexpected_fields: dict = field(default_factory=dict)
-    # Issues for validation to judge, e.g. {"code": "DUPLICATE_ITEM", "item": "WidgetA", "lines": [0, 3]}.
+    # Issues for validation to judge, each with a severity, e.g.
+    # {"code": "DUPLICATE_ITEM", "severity": "WARN", "item": "WidgetA", "lines": [0, 3]}.
     flags: list[dict] = field(default_factory=list)
 
 
-def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
-    """Format-agnostic checks on a loaded Invoice.
+# Severity levels from the plan, most to least serious:
+#   BLOCK  cannot be paid as submitted     REVIEW  a person must decide
+#   WARN   payable, but recorded           INFO    normalisation note
+SEVERITIES = ("BLOCK", "REVIEW", "WARN", "INFO")
+_SEVERITY = {
+    "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010); worth recording
+    "STOCK_EXCEEDED": "REVIEW",
+    "STOCK_UNKNOWN": "REVIEW",
+    "SUBTOTAL_MISMATCH": "BLOCK",
+    "TAX_AMOUNT_MISMATCH": "BLOCK",
+    "TOTAL_MISMATCH": "BLOCK",
+}
 
-    inventory maps item -> stock on hand. None skips the product and stock checks.
+
+def severity(f: dict) -> str:
+    """Grade one flag as BLOCK, REVIEW, WARN or INFO.
+
+    Args:
+        f: A flag dict with at least "code"; INVALID_VALUE flags also need "reason" and "field".
+
+    Returns:
+        One of SEVERITIES.
+
+    Raises:
+        KeyError: The code has no assigned severity. Deliberate: a new flag must choose one.
+    """
+    if f["code"] != "INVALID_VALUE":
+        return _SEVERITY[f["code"]]
+    # Unreadable or unknown is a question for a person; a missing due date can be looked up.
+    if f["reason"] in ("UNPARSEABLE", "UNKNOWN_PRODUCT") or f["field"] == "due_date":
+        return "REVIEW"
+    return "BLOCK"  # missing or invalid quantity, price or item; missing vendor; negative total
+
+
+def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
+    """Run the format-agnostic checks on a loaded invoice.
+
+    Covers invalid line values, missing vendor and due date, negative total, duplicate items,
+    stock summed per item, and the arithmetic checks. Fields already flagged UNPARSEABLE in
+    inv.flags are not flagged again as MISSING.
+
+    Args:
+        inv: A loaded Invoice. Its existing flags are read, not modified.
+        inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+
+    Returns:
+        New flag dicts (without severity; load() adds it), in check order.
     """
     flags = []
     # Already flagged UNPARSEABLE at load: don't flag the resulting None again as MISSING.
@@ -84,6 +128,18 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         elif inventory is not None and li.item not in inventory:
             invalid("item", "UNKNOWN_PRODUCT")
 
+    # Invoice-level values. A field already flagged UNPARSEABLE (or whose parent was) isn't re-flagged.
+    def invoice_invalid(field, value, reason):
+        if field not in unparseable and field.split(".")[0] not in unparseable:
+            flags.append({"code": "INVALID_VALUE", "field": field, "value": value, "reason": reason})
+
+    if inv.vendor_name is None:
+        invoice_invalid("vendor.name", None, "MISSING")
+    if inv.due_date is None:
+        invoice_invalid("due_date", None, "MISSING")
+    if inv.total is not None and inv.total < 0:
+        invoice_invalid("total", inv.total, "NEGATIVE")
+
     for item, lines in lines_by_item.items():
         if item is not None and len(lines) > 1:
             flags.append({"code": "DUPLICATE_ITEM", "item": item, "lines": lines})
@@ -110,12 +166,19 @@ CENT = Decimal("0.01")
 
 
 def _arithmetic_flags(inv: Invoice) -> list[dict]:
-    """Recompute subtotal, tax and total; flag any stated value that disagrees.
+    """Recompute subtotal, tax and total, and flag any stated value that disagrees.
 
     The total is checked against the line items themselves (plus stated tax), not the stated
     subtotal: 1009's subtotal is wrong but its total matches its lines, so only the subtotal
     is flagged. Tax uses the stated subtotal, since that is what the vendor applied the rate to.
-    A check whose inputs are missing is skipped.
+    Recomputed values are rounded to the cent (half up). A check whose inputs are missing is skipped.
+
+    Args:
+        inv: A loaded Invoice.
+
+    Returns:
+        SUBTOTAL_MISMATCH, TAX_AMOUNT_MISMATCH and TOTAL_MISMATCH flags, each with the stated
+        and computed values. Empty if everything reconciles.
     """
     flags = []
 
@@ -141,7 +204,17 @@ def _arithmetic_flags(inv: Invoice) -> list[dict]:
 
 
 def inventory_from_db(db_path: str | Path) -> dict[str, int]:
-    """item -> stock, from the README's inventory table."""
+    """Read stock levels from the README's inventory table, read-only.
+
+    Args:
+        db_path: Path to the SQLite database.
+
+    Returns:
+        Item name -> stock. Stock is whatever the DB holds, so it may be None for a NULL row.
+
+    Raises:
+        sqlite3.OperationalError: The file is missing (it is never created) or has no inventory table.
+    """
     # as_uri() percent-encodes the path: a raw "#" or "?" would cut the URI short, drop mode=ro,
     # and silently create an empty database. closing(): sqlite3's own `with` never closes.
     uri = Path(db_path).resolve().as_uri() + "?mode=ro"  # read-only; fails if missing
@@ -150,7 +223,17 @@ def inventory_from_db(db_path: str | Path) -> dict[str, int]:
 
 
 def _text(v) -> str | None:
-    """Blank strings mean 'not provided', same as null. A number (invoice_number: 1004) becomes text."""
+    """Normalize a text field.
+
+    Args:
+        v: A raw value from the source file.
+
+    Returns:
+        The stripped string; a number as text (invoice_number 1004 -> "1004"); None for null or blank.
+
+    Raises:
+        TypeError: v is another type (list, dict, bool). The caller records it as UNPARSEABLE.
+    """
     if isinstance(v, (int, Decimal)) and not isinstance(v, bool):
         return str(v)
     if v is not None and not isinstance(v, str):
@@ -159,6 +242,18 @@ def _text(v) -> str | None:
 
 
 def _date(v) -> date | None:
+    """Parse a date written as ISO (2026-01-24) or US MM/DD/YYYY.
+
+    Args:
+        v: A raw value from the source file.
+
+    Returns:
+        The date, or None for null or blank.
+
+    Raises:
+        ValueError: Any other format, such as "yesterday". The caller records it as UNPARSEABLE.
+        TypeError: v isn't text (see _text).
+    """
     v = _text(v)
     if not v:
         return None
@@ -176,6 +271,22 @@ _MONEY = re.compile(r"(-?)\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?")
 
 
 def _money(v) -> Decimal | None:
+    """Parse a money or quantity value into an exact Decimal.
+
+    Accepts numbers and strings like "1250", "1,250.00", "$1,250.00" and "-$250".
+
+    Args:
+        v: A raw value from the source file.
+
+    Returns:
+        The Decimal, or None for null or blank.
+
+    Raises:
+        InvalidOperation: Unreadable text, including misplaced commas ("1,25,0").
+        ValueError: NaN or Infinity.
+        TypeError: A bool.
+        The caller records any of these as UNPARSEABLE.
+    """
     if isinstance(v, bool):  # JSON true is an int in Python; it is not a number here
         raise TypeError("expected a number, got bool")
     if isinstance(v, str):
@@ -197,7 +308,14 @@ _JSON_LINE = {"item", "quantity", "unit_price", "amount", "note"}
 
 
 def _unexpected(d: dict) -> dict:
-    """Every key in the JSON record that from_json doesn't map, by path."""
+    """Collect the keys in a JSON invoice that the loader doesn't map.
+
+    Args:
+        d: The parsed JSON invoice.
+
+    Returns:
+        Path -> raw value, e.g. {"po_number": ..., "vendor.tax_id": ..., "line_items[2].discount": ...}.
+    """
     out = {k: v for k, v in d.items() if k not in _JSON_TOP}
     vendor = d.get("vendor")
     if isinstance(vendor, dict):
@@ -210,6 +328,20 @@ def _unexpected(d: dict) -> dict:
 
 
 def from_json(path: str | Path) -> Invoice:
+    """Load a JSON invoice file.
+
+    Args:
+        path: The .json file.
+
+    Returns:
+        The Invoice, with UNPARSEABLE flags for unreadable values but no check flags yet
+        (load() adds those).
+
+    Raises:
+        OSError: The file can't be read.
+        json.JSONDecodeError: The file isn't valid JSON.
+        AttributeError: The top level isn't a JSON object.
+    """
     path = Path(path)
     # parse_float=Decimal keeps money exact: 1472.80 never passes through a float.
     # parse_constant=str: the non-standard NaN/Infinity literals stay text, get flagged UNPARSEABLE,
@@ -219,10 +351,19 @@ def from_json(path: str | Path) -> Invoice:
 
 
 def _build(d: dict, source_file: str, unexpected: dict) -> Invoice:
-    """JSON-shaped dict -> Invoice. Every loader converts to this shape first.
+    """Build an Invoice from a JSON-shaped dict. Every loader converts to this shape first.
 
     A value that can't be read becomes None plus an UNPARSEABLE flag carrying the raw value,
-    so one bad field never costs the rest of the invoice.
+    so one bad field never costs the rest of the invoice. A vendor given as a plain string is
+    taken as its name.
+
+    Args:
+        d: Invoice data in the JSON file's shape (vendor as {"name", "address"}, line_items as a list).
+        source_file: File name to record on the invoice.
+        unexpected: Unmapped fields already collected by the loader; stored as-is.
+
+    Returns:
+        The Invoice. Its flags hold only the UNPARSEABLE flags found while building.
     """
     problems = []
 
@@ -289,11 +430,33 @@ _CSV_TOP = _JSON_TOP - {"line_items"}
 
 
 def _snake(s: str) -> str:
+    """Convert a CSV header or label to snake_case: "Unit Price" -> "unit_price", "Total:" -> "total".
+
+    Args:
+        s: The header or label text.
+
+    Returns:
+        Lowercase words joined by underscores, with punctuation removed.
+    """
     return re.sub(r"\W+", "_", s.strip().lower()).strip("_")
 
 
 def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
-    """Set one invoice-level field from a CSV label. Unknown or repeated labels go to unexpected."""
+    """Set one invoice-level field from a CSV label and value.
+
+    "Tax (6%):" sets both the tax rate and the tax amount. A field is never overwritten: a
+    repeated label, a second tax row, or an unknown label goes to unexpected instead.
+
+    Args:
+        d: The JSON-shaped dict being built; updated in place.
+        label: The CSV header or footer label, e.g. "Subtotal:".
+        value: The raw cell value.
+        unexpected: Collected unmapped fields; updated in place.
+        where: Path prefix for unexpected entries, e.g. "row[5]" or "header".
+
+    Returns:
+        None.
+    """
     # "Tax (6%):". A malformed rate like "6.5.1" doesn't match and goes to unexpected as an unknown label.
     if m := re.fullmatch(r"tax\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)\s*:?", label.strip(), re.I):
         if "tax_rate" in d or "tax_amount" in d:  # a second tax row: keep the first rate and amount paired
@@ -309,10 +472,19 @@ def _put(d: dict, label: str, value: str, unexpected: dict, where: str) -> None:
 
 
 def _extra_cells(row: list[str], width: int, n: int, unexpected: dict) -> None:
-    """Cells past the expected width have no column to land in; keep them for review.
+    """Keep CSV cells past the expected width for review, since they have no column to land in.
 
     A stray "PAY TO ACCT 999" in an unlabelled column is exactly what must not vanish.
     Trailing blank cells (common in spreadsheet exports) are ignored.
+
+    Args:
+        row: The CSV row.
+        width: Number of cells the row should have (header length, or 2 for field,value files).
+        n: Row number as a spreadsheet shows it, used in the path.
+        unexpected: Collected unmapped fields; gets "row[n].extra_cells" if any extra cell has content.
+
+    Returns:
+        None.
     """
     extra = row[width:]
     if any(c.strip() for c in extra):
@@ -320,7 +492,18 @@ def _extra_cells(row: list[str], width: int, n: int, unexpected: dict) -> None:
 
 
 def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
-    """1006 shape: field,value rows. Each `item` row starts a new line item."""
+    """Read a field,value CSV (the 1006 shape) into a JSON-shaped dict.
+
+    Each `item` row starts a new line item, and the quantity, unit_price, amount and note rows
+    after it attach to that item, so repeated keys keep every line.
+
+    Args:
+        rows: Data rows, without the field,value header.
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        A JSON-shaped dict for _build.
+    """
     d = {"line_items": []}
     for n, row in enumerate(rows, start=2):  # numbered as a spreadsheet shows them
         if not any(c.strip() for c in row):
@@ -339,7 +522,20 @@ def _csv_kv(rows: list[list[str]], unexpected: dict) -> dict:
 
 
 def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict) -> dict:
-    """1007 shape: one row per line item, invoice fields repeated on each, then label/value footer rows."""
+    """Read a row-per-item CSV (the 1007 shape) into a JSON-shaped dict.
+
+    Invoice fields repeat on every row and are taken from the first; a later row that disagrees
+    goes to unexpected. A row with a blank Item cell is a footer: its first filled cell is the
+    label and its last is the value ("Subtotal:", "14750.00").
+
+    Args:
+        header: The header row, already snake_cased.
+        rows: Data rows, without the header.
+        unexpected: Collected unmapped fields; updated in place.
+
+    Returns:
+        A JSON-shaped dict for _build.
+    """
     d, first = {"line_items": []}, {}
     item_col = header.index("item") if "item" in header else None
     for n, row in enumerate(rows, start=2):
@@ -373,6 +569,20 @@ def _csv_table(header: list[str], rows: list[list[str]], unexpected: dict) -> di
 
 
 def from_csv(path: str | Path) -> Invoice:
+    """Load a CSV invoice file in either shape, detected from the header.
+
+    Args:
+        path: The .csv file, UTF-8 (with or without a BOM).
+
+    Returns:
+        The Invoice, with UNPARSEABLE flags for unreadable values but no check flags yet
+        (load() adds those).
+
+    Raises:
+        OSError: The file can't be read.
+        UnicodeDecodeError: The file isn't UTF-8.
+        ValueError: The file is empty.
+    """
     path = Path(path)
     with path.open(newline="", encoding="utf-8-sig") as f:  # -sig: Excel exports start with a BOM
         rows = list(csv.reader(f))
@@ -390,16 +600,39 @@ LOADERS = {".json": from_json, ".csv": from_csv}
 
 
 def load(path: str | Path, inventory: dict[str, int] | None = None) -> Invoice:
+    """Load one invoice file, run every check, and grade each flag's severity.
+
+    Args:
+        path: An invoice file with a supported extension (see LOADERS).
+        inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+
+    Returns:
+        The normalized Invoice with all flags, each carrying a severity.
+
+    Raises:
+        ValueError: No loader for the file's extension.
+        Whatever the format's loader raises when the file itself can't be read.
+    """
     suffix = Path(path).suffix.lower()
     if suffix not in LOADERS:
         raise ValueError(f"No loader for {suffix} files yet: {path}")
     inv = LOADERS[suffix](path)
     inv.flags += flag(inv, inventory)  # here, not in each loader, so every format gets the same checks
+    # Severity is set once, here, so parse-time and check-time flags are graded by the same table.
+    inv.flags = [{"code": f["code"], "severity": severity(f), **f} for f in inv.flags]
     return inv
 
 
 def expand(paths) -> list[Path]:
-    """Files pass through as given; a directory contributes its supported files."""
+    """Turn a mix of files and folders into the list of files to load.
+
+    Args:
+        paths: File and folder paths, as strings or Paths.
+
+    Returns:
+        Files as given, in order; each folder replaced by its supported files, sorted by name
+        (not recursive).
+    """
     out = []
     for p in map(Path, paths):
         if p.is_dir():
@@ -410,7 +643,18 @@ def expand(paths) -> list[Path]:
 
 
 def normalize(paths, inventory: dict[str, int] | None = None) -> list[dict]:
-    """One result per file. A bad file yields an error entry, not a crashed batch."""
+    """Load every invoice in paths. This is the entry point agents call from Python.
+
+    A file that can't be loaded becomes an error entry instead of stopping the batch.
+
+    Args:
+        paths: File and folder paths (see expand).
+        inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+
+    Returns:
+        One dict per file: {"file", "invoice"} with the invoice as plain dicts, or
+        {"file", "error"} with the error type and message.
+    """
     results = []
     for p in expand(paths):
         try:
@@ -421,7 +665,17 @@ def normalize(paths, inventory: dict[str, int] | None = None) -> list[dict]:
 
 
 def _json_default(v):
-    # Decimal as a string keeps it exact for whoever reads the JSON.
+    """Serialize the types json.dumps can't handle, for the CLI output.
+
+    Args:
+        v: A value json.dumps couldn't serialize.
+
+    Returns:
+        A Decimal as a string (keeps it exact for whoever reads the JSON); a date in ISO format.
+
+    Raises:
+        TypeError: Any other type.
+    """
     if isinstance(v, Decimal):
         return str(v)
     if isinstance(v, date):

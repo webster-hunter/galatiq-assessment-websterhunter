@@ -10,6 +10,16 @@ SEED = [("WidgetA", 15), ("WidgetB", 10), ("GadgetX", 5), ("FakeItem", 0)]
 
 
 def seed(db_path: str = "inventory.db") -> None:
+    """Create or reset the inventory table with the README seed data.
+
+    Safe to re-run: seed items are reset to their seed stock, and other rows are left alone.
+
+    Args:
+        db_path: Path to the SQLite database; created if missing.
+
+    Returns:
+        None.
+    """
     with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("CREATE TABLE IF NOT EXISTS inventory (item TEXT PRIMARY KEY, stock INTEGER)")
         # OR REPLACE: the README's plain INSERT fails on a second run (primary key clash).
