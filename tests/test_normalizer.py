@@ -1,11 +1,11 @@
-"""Run: python data/test_normalizer.py (or pytest). Uses the sample invoices as fixtures."""
+"""Run from the repo root: pytest. Uses the sample invoices in data/invoices as fixtures."""
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from normalizer import load, normalize
 
-INVOICES = Path(__file__).parent / "invoices"
+INVOICES = Path(__file__).resolve().parent.parent / "data" / "invoices"
 
 
 def test_money_and_dates_are_typed():
@@ -67,25 +67,25 @@ def test_stock_checked_against_summed_quantity():
 
 
 def test_invalid_values_flagged():
-    """Non-positive quantities and unknown products get INVALID_VALUE; the product check is skipped without an inventory."""
+    """Non-positive quantities and unknown products are flagged; the product check is skipped without an inventory."""
     inv = load(INVOICES / "invoice_1009.json", README_INVENTORY)
-    assert codes(inv)[0] == ("INVALID_VALUE", "line_items[0].quantity")
+    assert codes(inv)[0] == ("QTY_NON_POSITIVE", "line_items[0].quantity")
     assert inv.flags[0]["value"] == -5
 
     widget_c = load(INVOICES / "invoice_1016.json", README_INVENTORY)
-    assert codes(widget_c) == [("INVALID_VALUE", "line_items[2].item")]
+    assert codes(widget_c) == [("UNKNOWN_PRODUCT", "line_items[2].item")]
     assert load(INVOICES / "invoice_1016.json").flags == []  # no inventory given -> product check skipped
 
 
 def test_1009_has_every_golden_set_finding_with_severity():
     """Invoice 1009 gets each finding the plan's golden set lists (non-positive quantity, negative total, missing vendor, subtotal mismatch, missing due date) at the plan's severity."""
     inv = load(INVOICES / "invoice_1009.json", README_INVENTORY)
-    assert [(f["severity"], f["code"], f["field"], f.get("reason")) for f in inv.flags] == [
-        ("BLOCK", "INVALID_VALUE", "line_items[0].quantity", "NOT_POSITIVE"),
-        ("BLOCK", "INVALID_VALUE", "vendor.name", "MISSING"),
-        ("REVIEW", "INVALID_VALUE", "due_date", "MISSING"),
-        ("BLOCK", "INVALID_VALUE", "total", "NEGATIVE"),
-        ("BLOCK", "SUBTOTAL_MISMATCH", "subtotal", None),
+    assert [(f["severity"], f["code"], f["field"]) for f in inv.flags] == [
+        ("BLOCK", "QTY_NON_POSITIVE", "line_items[0].quantity"),
+        ("BLOCK", "VENDOR_MISSING", "vendor.name"),
+        ("REVIEW", "DUE_DATE_MISSING", "due_date"),
+        ("BLOCK", "TOTAL_NEGATIVE", "total"),
+        ("BLOCK", "SUBTOTAL_MISMATCH", "subtotal"),
     ]
 
 
@@ -94,7 +94,7 @@ def test_every_flag_has_a_known_severity():
     from normalizer import SEVERITIES, severity
 
     flags = [f for r in normalize([INVOICES], README_INVENTORY) for f in r["invoice"]["flags"]]
-    assert {f["code"] for f in flags} >= {"INVALID_VALUE", "DUPLICATE_ITEM", "STOCK_EXCEEDED", "TOTAL_MISMATCH"}
+    assert {f["code"] for f in flags} >= {"QTY_NON_POSITIVE", "DUPLICATE_ITEM", "STOCK_EXCEEDED", "TOTAL_MISMATCH"}
     assert all(f["severity"] in SEVERITIES for f in flags)
     try:
         severity({"code": "SOMETHING_NEW"})
@@ -104,18 +104,18 @@ def test_every_flag_has_a_known_severity():
 
 
 def test_negative_price_and_missing_item(tmp_path):
-    """A zero quantity, a negative price, a missing price and a missing item name each get their own INVALID_VALUE flag."""
+    """A zero quantity, a negative price, a missing price and a missing item name each get their own flag."""
     f = tmp_path / "inv.json"
     f.write_text('{"vendor": "V", "due_date": "2026-02-01",'
                  ' "line_items": [{"item": "WidgetA", "quantity": 0, "unit_price": -1}, {"quantity": 1}]}')
-    assert codes(load(f)) == [("INVALID_VALUE", "line_items[0].quantity"),
-                              ("INVALID_VALUE", "line_items[0].unit_price"),
-                              ("INVALID_VALUE", "line_items[1].unit_price"),
-                              ("INVALID_VALUE", "line_items[1].item")]
+    assert codes(load(f)) == [("QTY_NON_POSITIVE", "line_items[0].quantity"),
+                              ("PRICE_NEGATIVE", "line_items[0].unit_price"),
+                              ("PRICE_MISSING", "line_items[1].unit_price"),
+                              ("ITEM_MISSING", "line_items[1].item")]
 
 
 def unparseable(inv):
-    return [(f["field"], f["value"]) for f in inv.flags if f.get("reason") == "UNPARSEABLE"]
+    return [(f["field"], f["value"]) for f in inv.flags if f["code"] == "UNPARSEABLE"]
 
 
 def test_unreadable_values_become_none_and_flag_without_losing_the_invoice(tmp_path):
@@ -130,7 +130,7 @@ def test_unreadable_values_become_none_and_flag_without_losing_the_invoice(tmp_p
     assert unparseable(inv) == [("line_items[0].quantity", "lots"), ("line_items[1].unit_price", "NaN"),
                                 ("due_date", "yesterday"), ("total", "about 500")]
     # No second MISSING flag for the same fields, and the other checks still ran on what was readable.
-    assert not [x for x in inv.flags if x.get("reason") == "MISSING"]
+    assert not [x for x in inv.flags if x["code"] in ("QTY_MISSING", "PRICE_MISSING", "DUE_DATE_MISSING")]
     assert {"code": "DUPLICATE_ITEM", "severity": "WARN", "item": "WidgetA", "lines": [0, 2]} in inv.flags
 
 
@@ -159,7 +159,7 @@ def test_wrong_structure_is_flagged_not_fatal(tmp_path):
     assert unparseable(inv) == [("vendor", ["Acme"]), ("line_items[1]", "junk")]
     assert len(inv.line_items) == 2 and inv.line_items[0].item == "WidgetA"  # index 1 kept as a placeholder
     # Placeholder line adds no MISSING noise, and the unreadable vendor isn't re-flagged as a missing vendor.name.
-    assert [x for x in inv.flags if x.get("reason") != "UNPARSEABLE"] == []
+    assert [x for x in inv.flags if x["code"] != "UNPARSEABLE"] == []
 
     f.write_text('{"line_items": {"item": "WidgetA"}}')
     assert unparseable(load(f)) == [("line_items", {"item": "WidgetA"})]
@@ -168,7 +168,7 @@ def test_wrong_structure_is_flagged_not_fatal(tmp_path):
 def test_nan_literal_is_flagged_and_output_stays_strict_json(tmp_path):
     """A non-standard NaN/Infinity literal in JSON input is flagged UNPARSEABLE, and the tool's output is still valid strict JSON."""
     import json
-    from normalizer import _json_default
+    from normalizer.__main__ import _json_default
 
     f = tmp_path / "inv.json"
     f.write_text('{"total": NaN, "subtotal": -Infinity, "line_items": []}')
@@ -218,9 +218,9 @@ def test_cli_missing_inventory_db_returns_json_error(tmp_path):
     import subprocess
     import sys
 
-    script = Path(__file__).parent / "normalizer.py"
-    r = subprocess.run([sys.executable, str(script), str(INVOICES / "invoice_1004.json"),
-                        "--inventory", str(tmp_path / "nope.db")], capture_output=True, text=True)
+    repo = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-m", "normalizer", str(INVOICES / "invoice_1004.json"),
+                        "--inventory", str(tmp_path / "nope.db")], capture_output=True, text=True, cwd=repo)
     assert r.returncode == 1
     [entry] = json.loads(r.stdout)
     assert entry["file"].endswith("nope.db") and entry["error"].startswith("OperationalError")
@@ -269,6 +269,50 @@ def test_total_checked_against_lines_not_stated_subtotal(tmp_path):
     assert mismatches(load(f)) == [("TOTAL_MISMATCH", Decimal("120"), Decimal("110.00"))]
 
 
+def test_total_checked_when_no_tax_is_stated(tmp_path):
+    """With no tax amount, the total is still checked: from the tax rate if given, else against zero tax, and tax_basis records which."""
+    f = tmp_path / "inv.json"
+    # Lines sum to 875 and nothing about tax is stated (as on 1002, 1003, 1008).
+    f.write_text('{"line_items": [{"item": "A", "quantity": 3, "unit_price": 125}, {"item": "B", "quantity": 1, "unit_price": 500}],'
+                 ' "total": 9999}')
+    [m] = [x for x in load(f).flags if x["code"] == "TOTAL_MISMATCH"]
+    assert (m["stated"], m["computed"], m["tax_basis"]) == (Decimal("9999"), Decimal("875.00"), "NONE_STATED")
+
+    f.write_text('{"line_items": [{"item": "A", "quantity": 1, "unit_price": 875}], "total": 875}')
+    assert mismatches(load(f)) == []  # no tax line and total == lines: clean
+
+    # Rate but no amount: tax comes from the rate, so 100 + 6% = 106 reconciles and 100 doesn't.
+    f.write_text('{"line_items": [{"item": "A", "quantity": 1, "unit_price": 100}], "tax_rate": 0.06, "total": 106}')
+    assert mismatches(load(f)) == []
+    f.write_text('{"line_items": [{"item": "A", "quantity": 1, "unit_price": 100}], "tax_rate": 0.06, "total": 100}')
+    [m] = [x for x in load(f).flags if x["code"] == "TOTAL_MISMATCH"]
+    assert (m["computed"], m["tax_basis"]) == (Decimal("106.00"), "FROM_RATE")
+
+
+def test_invoice_with_no_line_items_is_blocked(tmp_path):
+    """An invoice with no line items gets a BLOCK flag instead of loading clean; unreadable line_items isn't flagged twice."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": [], "total": 100}')
+    assert [(x["severity"], x["code"], x["field"]) for x in load(f).flags] == [("BLOCK", "LINE_ITEMS_MISSING", "line_items")]
+
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "total": 100}')  # key absent entirely
+    assert [x["field"] for x in load(f).flags] == ["line_items"]
+
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01", "line_items": "junk", "total": 100}')
+    assert [(x["field"], x["code"]) for x in load(f).flags] == [("line_items", "UNPARSEABLE")]
+
+
+def test_fractional_quantity_needs_review(tmp_path):
+    """A non-whole quantity is flagged QTY_NOT_WHOLE at REVIEW, since stock is counted in whole units; whole decimals like 2.0 are fine."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"vendor": "V", "due_date": "2026-02-01",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 1.5, "unit_price": 100},'
+                 '                {"item": "WidgetB", "quantity": 2.0, "unit_price": 100}],'
+                 ' "subtotal": 350, "tax_amount": 0, "total": 350}')
+    assert [(x["severity"], x["code"], x["field"]) for x in load(f).flags] == [
+        ("REVIEW", "QTY_NOT_WHOLE", "line_items[0].quantity")]
+
+
 def test_second_tax_row_does_not_overwrite_first(tmp_path):
     """A repeated "Tax (x%)" footer row goes to unexpected_fields and leaves the first rate and amount paired."""
     f = tmp_path / "t.csv"
@@ -280,16 +324,15 @@ def test_second_tax_row_does_not_overwrite_first(tmp_path):
     assert mismatches(inv) == []
 
 
-def test_flag_codes_and_reasons_are_screaming_snake_case():
-    """Every flag code and reason produced on the sample invoices is in SCREAMING_SNAKE_CASE."""
+def test_flag_codes_are_screaming_snake_case():
+    """Every flag code, in the severity table and on the sample invoices, is in SCREAMING_SNAKE_CASE."""
     import re
 
     flags = [f for r in normalize([INVOICES], README_INVENTORY) for f in r["invoice"]["flags"]]
     assert flags  # the check below means nothing on an empty list
-    for f in flags:
-        for key in ("code", "reason"):
-            if key in f:
-                assert re.fullmatch(r"[A-Z][A-Z0-9]*(_[A-Z0-9]+)*", f[key]), f
+    from normalizer import SEVERITY
+    for code in {f["code"] for f in flags} | set(SEVERITY):
+        assert re.fullmatch(r"[A-Z][A-Z0-9]*(_[A-Z0-9]+)*", code), code
 
 
 def test_inventory_db_is_read(tmp_path):
@@ -365,22 +408,21 @@ def test_csv_oddities_go_to_unexpected_fields(tmp_path):
     assert k.unexpected_fields == {"row[2].quantity": "3", "row[5].quantity": "2", "row[6].po_number": "PO-9"}
 
 
+def test_unexpected_fields_raise_one_warn_flag(tmp_path):
+    """A non-empty unexpected_fields adds one UNEXPECTED_FIELDS flag at WARN listing every path; an empty one adds none."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"vendor": {"name": "V", "bank_account": "999"}, "due_date": "2026-02-01", "po_number": "PO-9",'
+                 ' "line_items": [{"item": "WidgetA", "quantity": 1, "unit_price": 250}]}')
+    assert [x for x in load(f).flags if x["code"] == "UNEXPECTED_FIELDS"] == [
+        {"code": "UNEXPECTED_FIELDS", "severity": "WARN", "fields": ["po_number", "vendor.bank_account"]}]
+
+    assert not [x for r in normalize([INVOICES]) for x in r["invoice"]["flags"]
+                if x["code"] == "UNEXPECTED_FIELDS"]  # no sample invoice has unmapped fields
+
+
 def test_directory_skips_unsupported_and_bad_file_is_reported():
     """A folder loads only supported file types, and an unsupported file named directly becomes an error entry without stopping the batch."""
     results = normalize([INVOICES, INVOICES / "invoice_1014.xml"])
     ok = [r for r in results if "invoice" in r]
     assert len(ok) == 9  # every JSON and CSV file in the folder; .txt/.xml/.pdf skipped
     assert "error" in results[-1]  # explicitly named unsupported file -> error entry, batch continues
-
-
-if __name__ == "__main__":
-    import tempfile
-
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            if "tmp_path" in fn.__code__.co_varnames[:fn.__code__.co_argcount]:
-                with tempfile.TemporaryDirectory() as d:
-                    fn(Path(d))
-            else:
-                fn()
-    print("ok")

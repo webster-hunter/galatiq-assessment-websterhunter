@@ -1,6 +1,6 @@
 """Create inventory.db from the README seed data. Safe to re-run: it resets to the seed values.
 
-Usage: python data/seed_inventory.py [db_path]   (default: inventory.db in the current directory)
+Usage: python seed_inventory.py [db_path]   (default: inventory.db in the current directory)
 """
 import sqlite3
 import sys

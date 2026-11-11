@@ -122,17 +122,26 @@ Submit your solution as a link to a public GitHub repository — GitHub only (gi
 
 ## Invoice Normalizer
 
-`data/normalizer.py` turns invoice files into one standard structure and flags problems for later
-validation. It is deterministic: the same file always produces the same output, with no LLM involved.
-Agents call it as a command-line tool, or from Python with `normalize(paths, inventory)`.
+The `normalizer` package turns invoice files into one standard structure and flags problems for
+later validation. It is deterministic: the same file always produces the same output, with no LLM
+involved. Agents call it as a command-line tool, or from Python with
+`from normalizer import normalize` and `normalize(paths, inventory)`.
+
+| Module | Job |
+|---|---|
+| `normalizer/parsing.py` | File formats into the `Invoice` structure; only unreadable values are flagged here |
+| `normalizer/checks.py` | Format-agnostic checks, each adding a flag with its evidence |
+| `normalizer/severity.py` | One table from flag code to severity |
+| `normalizer/__init__.py` | `load`, `expand` and `normalize`: the three wired together |
+| `normalizer/__main__.py` | The command-line tool |
 
 ### Usage
 
 ```bash
-python data/seed_inventory.py                      # once: builds inventory.db from the seed data above
-python data/normalizer.py data/invoices --inventory inventory.db
-python data/normalizer.py data/invoices/invoice_1009.json data/invoices/invoice_1007.csv
-python data/test_normalizer.py                     # or: pytest data/test_normalizer.py
+python seed_inventory.py                           # once: builds inventory.db from the seed data above
+python -m normalizer data/invoices --inventory inventory.db
+python -m normalizer data/invoices/invoice_1009.json data/invoices/invoice_1007.csv
+pytest                                             # tests live in tests/
 ```
 
 - **Input:** any mix of files and folders. A folder contributes every supported file in it.
@@ -180,36 +189,42 @@ Every flag has a severity, using the four levels from the approval policy.
 | `WARN` | Payable, but recorded |
 | `INFO` | Normalization note (no flag uses it yet) |
 
-A flag code with no assigned severity raises an error, so every new flag must choose one.
+Each flag code has exactly one severity, so `normalizer/severity.py` is a plain lookup table. A flag
+code with no entry raises an error, so every new flag must choose one.
 
 ### Flags
 
-Flag codes and reasons are in `SCREAMING_SNAKE_CASE`. Line numbers count from 0, matching the
-`line_items[i]` paths.
+Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carry its `field` path and
+`value`. Line numbers count from 0, matching the `line_items[i]` paths.
 
-| Code | Field / reason | Severity | Meaning |
+| Code | Field | Severity | Meaning |
 |---|---|---|---|
-| `INVALID_VALUE` | `line_items[i].quantity` `NOT_POSITIVE` or `MISSING` | BLOCK | Zero, negative or absent quantity |
-| `INVALID_VALUE` | `line_items[i].unit_price` `NEGATIVE` or `MISSING` | BLOCK | Negative or absent price |
-| `INVALID_VALUE` | `line_items[i].item` `MISSING` | BLOCK | Line with no product name |
-| `INVALID_VALUE` | `vendor.name` `MISSING` | BLOCK | No vendor to pay |
-| `INVALID_VALUE` | `total` `NEGATIVE` | BLOCK | Total below zero |
-| `INVALID_VALUE` | `line_items[i].item` `UNKNOWN_PRODUCT` | REVIEW | Not in inventory (exact name match) |
-| `INVALID_VALUE` | `due_date` `MISSING` | REVIEW | No due date |
-| `INVALID_VALUE` | any field, `UNPARSEABLE` | REVIEW | Value couldn't be read; `value` holds the raw input |
+| `QTY_MISSING` | `line_items[i].quantity` | BLOCK | No quantity |
+| `QTY_NON_POSITIVE` | `line_items[i].quantity` | BLOCK | Zero or negative quantity |
+| `PRICE_MISSING` | `line_items[i].unit_price` | BLOCK | No unit price |
+| `PRICE_NEGATIVE` | `line_items[i].unit_price` | BLOCK | Negative unit price |
+| `ITEM_MISSING` | `line_items[i].item` | BLOCK | Line with no product name |
+| `LINE_ITEMS_MISSING` | `line_items` | BLOCK | Invoice has no line items |
+| `VENDOR_MISSING` | `vendor.name` | BLOCK | No vendor to pay |
+| `TOTAL_NEGATIVE` | `total` | BLOCK | Total below zero |
+| `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match) |
+| `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |
+| `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
+| `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
 | `SUBTOTAL_MISMATCH` | `subtotal` | BLOCK | Σ (quantity × unit price) ≠ stated subtotal |
 | `TAX_AMOUNT_MISMATCH` | `tax_amount` | BLOCK | Stated subtotal × tax rate ≠ stated tax |
-| `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax ≠ stated total |
+| `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax ≠ stated total; `tax_basis` says which tax was used |
 | `STOCK_EXCEEDED` | item | REVIEW | Quantity summed across all of the item's lines exceeds stock |
 | `STOCK_UNKNOWN` | item | REVIEW | Inventory has no usable stock number for the item |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
+| `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 
 Example flags:
 
 ```json
 {"code": "STOCK_EXCEEDED", "severity": "REVIEW", "item": "WidgetA", "requested": "22", "available": 15, "lines": [0, 3, 6]}
-{"code": "TOTAL_MISMATCH", "severity": "BLOCK", "field": "total", "stated": "15525.00", "computed": "15635.00"}
-{"code": "INVALID_VALUE", "severity": "REVIEW", "field": "due_date", "value": "yesterday", "reason": "UNPARSEABLE"}
+{"code": "TOTAL_MISMATCH", "severity": "BLOCK", "field": "total", "stated": "15525.00", "computed": "15635.00", "tax_basis": "STATED"}
+{"code": "UNPARSEABLE", "severity": "REVIEW", "field": "due_date", "value": "yesterday"}
 ```
 
 Notes on the checks:
@@ -218,8 +233,10 @@ Notes on the checks:
   but together they need 22 WidgetA against 15. Invalid quantities aren't counted toward the total.
 - **Arithmetic is recomputed, never trusted.** Recomputed values are rounded to the cent (half up)
   before comparing. The total is checked against the line items rather than the stated subtotal, so
-  one wrong number gives one flag: 1009 gets only `SUBTOTAL_MISMATCH`. A check whose inputs are
-  missing is skipped.
+  one wrong number gives one flag: 1009 gets only `SUBTOTAL_MISMATCH`. When no tax amount is
+  stated, the total check uses the tax rate if there is one, otherwise zero tax, and the flag's
+  `tax_basis` records which (`STATED`, `FROM_RATE` or `NONE_STATED`). Any other check whose inputs
+  are missing is skipped.
 - **Stock is checked per invoice and doesn't decrement** across invoices.
 
 ### Results on the sample data
@@ -231,7 +248,7 @@ With `--inventory inventory.db`:
 | 1004, 1004 R1, 1006, 1015 | None |
 | 1005 | `STOCK_EXCEEDED` GadgetX (8 / 5) |
 | 1007 | `STOCK_EXCEEDED` WidgetA (20 / 15) and WidgetB (15 / 10); `TOTAL_MISMATCH` (stated 15,525.00, computed 15,635.00) |
-| 1009 | Non-positive quantity, missing vendor, missing due date, negative total, `SUBTOTAL_MISMATCH` (stated 1,000.00, computed −250.00) |
+| 1009 | `QTY_NON_POSITIVE`, `VENDOR_MISSING`, `DUE_DATE_MISSING`, `TOTAL_NEGATIVE`, `SUBTOTAL_MISMATCH` (stated 1,000.00, computed −250.00) |
 | 1013 | `DUPLICATE_ITEM` ×3; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80) |
 | 1016 | `UNKNOWN_PRODUCT` WidgetC |
 
