@@ -130,13 +130,19 @@ python main.py --invoice_path=data/invoices          # every invoice in the fold
 ```
 
 `main.py` runs each invoice through the [pipeline graph](#pipeline): ingestion, validation, the
-approval policy, and one of three outcomes. Output is a JSON list on stdout, one `{"file",
-"decision", "result", "trail", "invoice"}` or `{"file", "error"}` entry per file. Add `--trace`
-to print each step to stderr as it happens, one JSON line per node. `inventory.db` is created from
-the seed data if it doesn't exist. `--offline`, `--model` and `--replays` control the model.
+[ledger](#ledger-and-payment), the approval policy, and payment, hold or rejection. Output is a
+JSON list on stdout, one `{"file", "result", "decision", "trail", "invoice"}` or `{"file",
+"error"}` entry per file, and a one-line summary of what was paid on stderr.
 
-Not built yet: the reviewer agent that explains and can tighten a decision, payment, and anything
-that compares invoices with each other (duplicates, revisions).
+- `--trace` prints each step to stderr as it happens, one JSON line per node.
+- `--offline`, `--model` and `--replays` control the model.
+- `--ledger` names the ledger file (default `ledger.db`); `--fresh` starts with an empty one. The
+  ledger persists, so a second run over the same files reports them as already processed and
+  pays nothing. Use `--fresh` to see a first run again.
+- `inventory.db` is created from the seed data if it doesn't exist.
+
+Not built yet: the reviewer agent that explains and can tighten a decision, and a review queue for
+held invoices.
 
 ## Pipeline
 
@@ -148,13 +154,16 @@ graph TD;
     START --> ingest;
     ingest -.-> validate;
     ingest -.-> failed;
-    validate --> approve;
+    validate --> register;
+    register -.-> approve;
+    register -.-> skip;
     approve -.-> pay;
     approve -.-> hold;
     approve -.-> reject;
     pay --> END;
     hold --> END;
     reject --> END;
+    skip --> END;
     failed --> END;
 ```
 
@@ -162,14 +171,20 @@ graph TD;
 |---|---|---|
 | `ingest` | Reads the file into an `Invoice`: a parser for JSON, CSV and XML, the model for TXT and PDF | `normalizer`, `extraction` |
 | `validate` | Repairs what the invoice proves, runs every check against the inventory, grades each flag | `normalizer.check` |
+| `register` | Asks the ledger whether this invoice was seen before, and records it if new | `ledger.Ledger` |
+| `skip` | The invoice was already handled, as this file or another copy: nothing is decided or paid | |
 | `approve` | The policy floor: the minimum outcome the flags require | `approval.decide` |
-| `pay`, `hold`, `reject` | Records the outcome. Payment and the review queue are not built | |
+| `pay` | Pays through the ledger, which pays any one invoice once | `ledger.Ledger.pay` |
+| `hold`, `reject` | Records the outcome in the ledger. The review queue is not built | |
 | `failed` | The file couldn't be read, so there is nothing to decide | |
 
 - **One state per invoice.** A run starts with the file path. Each node returns only what it
   adds (the invoice, the decision, the result) and LangGraph merges it in.
-- **The nodes are thin.** Each calls one function from `normalizer`, `extraction` or `approval`,
-  and none of those packages imports LangGraph. The graph only decides what runs next.
+- **The nodes are thin.** Each calls one function from `normalizer`, `extraction`, `approval` or
+  `ledger`, and none of those packages imports LangGraph. The graph only decides what runs next.
+- **Nodes that change the world are safe to repeat.** LangGraph may run a node again after a
+  crash or a resume, so `register` and `pay` rely on the ledger: recording is an upsert, and a
+  payment carries a key the ledger accepts once.
 - **Branches read the state, they don't decide.** The outcome is set by the `approve` node; the
   branch after it only looks at that outcome and picks a node.
 - **A trail of steps.** Every node appends one entry saying what it did. It comes back in the
@@ -233,9 +248,57 @@ Each decision records the rule that fired and the flags that caused it:
 | REJECT | 1007, 1013 (json and pdf) | The stated total doesn't match the lines |
 | REJECT | 1009 | Negative quantity and total, no vendor, wrong subtotal |
 
-Each file is decided on its own. So 1011, which arrives as both TXT and PDF, is approved twice,
-and 1004 is approved alongside its own revision. Catching that needs a ledger of what has
-already been seen, which comes with payment.
+The policy decides each invoice on its flags alone. What happens across files (a second copy, a
+revision) is the ledger's job, below.
+
+## Ledger and payment
+
+`ledger/` is the only part that compares an invoice with others. It is one SQLite file holding
+every invoice processed and every payment made.
+
+**Identity.** An invoice is known by its vendor, number and revision, each stripped of formatting:
+`INV-1012`, `INV 1012` and `1012` are one number, and `R1` is revision 1. Two vendors can both
+issue a 1001, so the vendor is part of it.
+
+**Same invoice, different file.** Sameness is judged on content: a fingerprint of the vendor,
+number, revision, total and each line's item, quantity and price. A PDF and a TXT of one invoice
+match although the PDF omits the subtotal line.
+
+| The ledger finds | What happens |
+|---|---|
+| Never seen | Recorded; goes on to approval |
+| This same file, processed before | Skipped as `ALREADY_PROCESSED`, with the earlier outcome |
+| Another file with the same invoice and content | Skipped as `SKIPPED_DUPLICATE`, pointing at the first |
+| Same vendor, number and revision, different content | `DUPLICATE_CONFLICT` (REVIEW): held. The first record is untouched |
+| A revision of an invoice already paid | `REVISION_OF_PAID` (REVIEW), with the amount paid and the difference: held |
+| A revision of an invoice not paid | The earlier one is marked superseded; the revision is judged on its own (`SUPERSEDES_UNPAID`, INFO) |
+| An older revision than one on record | Skipped as `SKIPPED_SUPERSEDED` |
+
+**Paying once.** `mock_payment` is the brief's function. Each payment has a key built from the
+invoice's identity, and the ledger holds at most one payment per key. The payment row is written
+as PENDING before the payment function is called and marked PAID after it returns, so a crash in
+between leaves a PENDING row that stops a blind retry: the first call may have gone through.
+
+### The sample folder, in file order
+
+```bash
+python main.py --invoice_path=data/invoices --offline --fresh
+```
+
+| Result | Invoices |
+|---|---|
+| PAID, 6 invoices, $26,325.00 | 1001, 1004, 1006, 1010, 1011 (pdf), 1015 |
+| HELD, 7 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016, and 1004 revised (the original was already paid; $4,050.00 difference) |
+| REJECTED, 4 | 1003, 1007, 1009, 1013 (json) |
+| SKIPPED_DUPLICATE, 3 | 1011 (txt), 1012 (txt), 1013 (pdf) |
+
+Run it again without `--fresh` and nothing is paid: 17 files are `ALREADY_PROCESSED` and the 3
+second copies are still duplicates.
+
+Files are processed one at a time in name order, so what an invoice is compared with depends on
+what came before it. 1004 is paid before its revision is read, which is why the revision is held
+for the difference. Reading the whole folder first and paying only the latest revision is a
+possible refinement; holding the revision is the safe behaviour either way.
 
 ## LLM extraction
 
@@ -498,6 +561,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
 | `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate |
 | `EXTRACTION_RETRIED` | `attempts`, `outcome` (`RESOLVED` or `UNRESOLVED`), `stopped` | INFO | LLM extraction only: the file needed more than one model attempt |
+| `SUPERSEDES_UNPAID` | `earlier_file`, `earlier_status` | INFO | From the ledger: this revision replaces an earlier one that had not been paid |
 | `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input. `suggested` is there when OCR damage has one plausible reading that nothing on the invoice confirms |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
@@ -506,6 +570,8 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `TOTAL_MISMATCH` | `total` | BLOCK | Line sum + tax + shipping ≠ stated total; `tax_basis` says which tax was used |
 | `STOCK_EXCEEDED` | item | REVIEW | Quantity summed across all of the item's lines exceeds stock |
 | `STOCK_UNKNOWN` | item | REVIEW | Inventory has no usable stock number for the item |
+| `REVISION_OF_PAID` | `earlier_file`, `already_paid`, `difference` | REVIEW | From the ledger: this revises an invoice that was already paid |
+| `DUPLICATE_CONFLICT` | `earlier_file`, `earlier_total` | REVIEW | From the ledger: same vendor, number and revision as an earlier invoice, with different content |
 | `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |

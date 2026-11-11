@@ -42,7 +42,10 @@ SEVERITY = {
     "STOCK_UNKNOWN": "REVIEW",
     # From LLM extraction: the model returned a value the document doesn't contain.
     "NOT_IN_SOURCE": "REVIEW",
-    "INVENTORY_NOT_CHECKED": "REVIEW",  # no inventory given, so products and stock are unverified
+    "INVENTORY_NOT_CHECKED": "REVIEW",
+    # From the ledger, which compares an invoice with those already processed.
+    "REVISION_OF_PAID": "REVIEW",  # revises an invoice that was already paid: a person settles the difference
+    "DUPLICATE_CONFLICT": "REVIEW",  # same vendor, number and revision as an earlier invoice, different content  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
     # A value damaged by OCR, read and confirmed by an independent value on the invoice. Change to
@@ -56,6 +59,7 @@ SEVERITY = {
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
     # For the record only.
     "CURRENCY_ASSUMED": "INFO",  # no currency named, so read as USD
+    "SUPERSEDES_UNPAID": "INFO",  # replaces an earlier revision that had not been paid
     "EXTRACTION_RETRIED": "INFO",  # LLM extraction needed more than one attempt; the flag says how it ended
 }
 

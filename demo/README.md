@@ -69,31 +69,39 @@ python main.py --invoice_path=data/invoices/invoice_1013.pdf --offline
 - The stated total is $22,562.80; lines plus tax come to $22,512.80. The $50 is not in any line.
 - Self-correction left it alone. The model copied the document faithfully, and the document is wrong.
 
-## Decisions on the 20 samples
+## The whole folder: what gets paid, and that it is paid once
 
 ```bash
-python main.py --invoice_path=data/invoices --offline
+python main.py --invoice_path=data/invoices --offline --fresh > /dev/null    # first run
+python main.py --invoice_path=data/invoices --offline > /dev/null            # second run
 ```
 
-Each entry starts with its `decision`: the outcome, the policy rule that fired, and the flags
-behind it. From the policy floor alone, with no model involved in the decision:
+Each run prints a one-line summary on stderr (and the brief's "Paid ... to ..." line per payment).
 
-| Outcome | Files | Which |
+| | First run | Second run |
 |---|---|---|
-| APPROVE | 8 | 1001, 1004, 1004 revised, 1006, 1010, 1011 (both copies), 1015 |
-| HOLD | 7 | 1002, 1005, 1008, 1012 (both copies), 1014, 1016 |
-| REJECT | 5 | 1003, 1007, 1009, 1013 (both copies) |
+| Paid | 6 invoices, $26,325.00 | 0 |
+| Held | 7 | |
+| Rejected | 4 | |
+| Skipped as a duplicate | 3 | 3 |
+| Already processed | | 17 |
 
-Two to show:
-
+- **Paid:** 1001, 1004, 1006, 1010, 1011, 1015.
+- **Duplicates caught:** 1011, 1012 and 1013 each arrive in two formats. The second copy is
+  recognised by content, not file name, and skipped. Without that, 1011 would be paid twice
+  ($3,000.00), and 1012 would be in the review queue twice.
+- **1004's revision is held.** The original ($1,890.00) is paid first; the revision ($5,940.00)
+  then arrives and is held with the $4,050.00 difference for a person to settle.
 - **1003 is rejected on four fraud signals**, each from a check in code: FakeItem has no stock,
-  the due date is "yesterday", the notes say "URGENT... penalties", and they ask for a wire. One
-  signal alone would not reject it.
+  the due date is "yesterday", the notes say "URGENT... penalties", and they ask for a wire.
 - **1012 is held although nothing on it is wrong any more.** It is $25 under the $10K limit and
-  carries repairs and other warnings; the policy holds that combination for a person.
+  carries repairs and other warnings.
 
-Not yet true, so don't claim it: that nothing is paid twice. 1011 is approved in both its
-copies, and 1004 alongside its revision, until the ledger exists.
+How to say it: nothing is paid twice, whether the same invoice arrives as a second file or the
+whole folder is run again.
+
+What not to claim: that payments are real or retried. `mock_payment` always succeeds; what is
+tested is that a payment which never confirmed is not blindly sent again.
 
 ## Watching one invoice move through the pipeline
 

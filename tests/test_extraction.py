@@ -325,7 +325,7 @@ def test_main_runs_the_documented_command(tmp_path, capsys, monkeypatch):
     """python main.py --invoice_path=<file> processes the file, creating the inventory DB if it is missing."""
     import main
     db = tmp_path / "inventory.db"
-    code = main.main([f"--invoice_path={INVOICES / 'invoice_1016.json'}", "--inventory", str(db), "--offline",
+    code = main.main([f"--invoice_path={INVOICES / 'invoice_1016.json'}", "--inventory", str(db), "--offline", "--ledger", str(tmp_path / "ledger.db"),
                       "--replays", str(tmp_path / "replays")])
     [result] = json.loads(capsys.readouterr().out)
     assert code == 0 and db.exists()
