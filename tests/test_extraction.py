@@ -82,12 +82,12 @@ FAITHFUL = [("invoice_1002.txt", T1002), ("invoice_1008.txt", T1008), ("invoice_
 
 
 def test_transcription_is_typed_and_checked_like_a_json_file():
-    """The model's strings go through the JSON builder and the full checks: rate "5%" is 0.05, OCR errors are UNPARSEABLE, other_fields are kept."""
+    """The model's strings go through the JSON builder, repair and the full checks: rate "5%" is 0.05, the copied OCR errors are read by code where the invoice proves them, other_fields are kept."""
     inv = load(INVOICES / "invoice_1012.txt", Stub(T1012), INVENTORY)
-    assert (inv.tax_rate, inv.total, inv.date) == (Decimal("0.05"), Decimal("9975.00"), None)
+    assert (inv.tax_rate, inv.total) == (Decimal("0.05"), Decimal("9975.00"))
     assert inv.unexpected_fields == {"other.TO": "ACME Corp", "other.formerly": "FastShip Ltd."}
-    unparseable = {f["field"] for f in inv.flags if f["code"] == "UNPARSEABLE"}
-    assert unparseable == {"date", "line_items[1].amount"}
+    assert {(f["field"], f["value"]) for f in inv.flags if f["code"] == "OCR_REPAIRED"} == {
+        ("date", "26-Jan-2O26"), ("line_items[1].amount", "$3,500.O0")}
     assert {f["code"] for f in inv.flags} >= {"UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"}
     assert all("severity" in f for f in inv.flags)
 
@@ -385,7 +385,7 @@ def test_a_grounded_first_attempt_is_not_retried():
 
 def test_the_vendors_errors_are_never_retried():
     """A wrong total (1013) and OCR damage copied as written (1012) are grounded: the document says that. One call each, and the flags stand."""
-    for name, t, code in (("invoice_1013.pdf", T1013, "TOTAL_MISMATCH"), ("invoice_1012.txt", T1012, "UNPARSEABLE")):
+    for name, t, code in (("invoice_1013.pdf", T1013, "TOTAL_MISMATCH"), ("invoice_1012.txt", T1012, "OCR_REPAIRED")):
         model = Sequence(t, transcription())
         inv = load(INVOICES / name, model, INVENTORY)
         assert len(model.sent) == 1, name

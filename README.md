@@ -212,7 +212,7 @@ also carries the `CURRENCY_ASSUMED` note (INFO), left out below:
 | 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for terms `Immediate`. The "URGENT" note is transcribed into `notes` and changes nothing |
 | 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
-| 1012 (txt and pdf) | OCR damage copied as written, so `2O26` and `$3,500.O0` are `UNPARSEABLE`; "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party, with "formerly FastShip Ltd." kept apart in `unexpected_fields` |
+| 1012 (txt and pdf) | OCR damage copied as written by the model, then read by code: `$3,500.O0` is confirmed by 7 × $500 and `26-Jan-2O26` by Net 30 to the due date (`OCR_REPAIRED` ×2); "Widget A" and "Gadget X" are `UNKNOWN_PRODUCT`; `UNEXPECTED_FORMAT` for `INV 1012` and both item names; vendor is the FROM party, with "formerly FastShip Ltd." kept apart in `unexpected_fields` |
 | 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
 
 Every vendor and total is correct, and nine of the ten files were grounded on the first attempt.
@@ -224,7 +224,7 @@ line without an amount, fully grounded. Both replies are recorded as the model p
 The model's output for 1002 varied between recording runs even at temperature 0 (total missing,
 correct, total duplicated), which is why the judge is code and not a re-reading by the model.
 
-Not done yet: repairing OCR damage (1012 is held, not fixed), matching name variants such as
+Not done yet: matching name variants such as
 "Widget A", and detecting duplicates across files (1011, 1012 and 1013 each arrive twice).
 
 ## Invoice Normalizer
@@ -237,6 +237,7 @@ involved. Agents call it as a command-line tool, or from Python with
 | Module | Job |
 |---|---|
 | `normalizer/parsing.py` | File formats into the `Invoice` structure; only unreadable values are flagged here |
+| `normalizer/repair.py` | Reads OCR-damaged values, only where the invoice proves the reading |
 | `normalizer/checks.py` | Format-agnostic checks, each adding a flag with its evidence |
 | `normalizer/severity.py` | One table from flag code to severity |
 | `normalizer/__init__.py` | `load`, `expand` and `normalize`: the three wired together |
@@ -285,6 +286,15 @@ amount, shipping, total, currency, payment terms, revision, notes and source fil
 - **An unreadable value never costs the invoice.** It becomes `null` plus an `UNPARSEABLE` flag that
   carries the raw value, and the rest of the invoice still loads and is still checked. Only a file that
   can't be read at all (not found, invalid JSON, wrong encoding) becomes an error entry.
+- **OCR damage is repaired only with proof.** OCR writes look-alike letters for digits (`O` for
+  `0`, `l` or `I` for `1`), so `$3,500.O0` and `26-Jan-2O26` arrive unreadable. Code tries the
+  look-alike readings and applies one only if another value on the invoice confirms it: a line
+  amount by quantity × unit price, a quantity or price by the line amount, a subtotal or total
+  by the lines, a date by the payment terms and the other date. A proven repair sets the value
+  and replaces `UNPARSEABLE` with `OCR_REPAIRED` (WARN), keeping the original text and the proof.
+  An unproven reading is never applied: the field stays empty and `UNPARSEABLE` (REVIEW), with
+  the reading attached as `suggested`. A readable wrong number is not damage and is never changed.
+  To send every repaired invoice to a person, set `OCR_REPAIRED` to `REVIEW` in `severity.py`.
 - **Nothing is silently dropped.** Fields the loader doesn't recognise, repeated CSV columns or
   labels, and cells beyond a CSV's header all go to `unexpected_fields`, labelled by where they were
   found (`vendor.tax_id`, `line_items[1].qty`, `row[4].Handling:`, `row[2].extra_cells`). The first
@@ -357,7 +367,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate |
 | `EXTRACTION_RETRIED` | `attempts`, `outcome` (`RESOLVED` or `UNRESOLVED`), `stopped` | INFO | LLM extraction only: the file needed more than one model attempt |
 | `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |
-| `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
+| `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input. `suggested` is there when OCR damage has one plausible reading that nothing on the invoice confirms |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
 | `SUBTOTAL_MISMATCH` | `subtotal` | BLOCK | Σ (quantity × unit price) ≠ stated subtotal |
 | `TAX_AMOUNT_MISMATCH` | `tax_amount` | BLOCK | Stated subtotal × tax rate ≠ stated tax |
@@ -367,6 +377,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
+| `OCR_REPAIRED` | the field, with `value` (original text), `repaired` and `proof` | WARN | An OCR-damaged value was read and confirmed by another value on the invoice |
 | `UNEXPECTED_FORMAT` | the field, with `expected` (the pattern) | WARN | A value isn't in its field's usual form; it is still read as written. Checked: invoice number `INV-<digits>` (not `1002`, `INV 1012`), revision `R<digits>`, currency as a three-letter code (not `$`), payment terms `Net <days>` (not `Immediate`), item name as one word (not `Widget A`). Patterns are in `checks.FORMATS` |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 

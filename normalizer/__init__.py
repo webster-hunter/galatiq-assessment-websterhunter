@@ -1,6 +1,7 @@
 """Deterministic invoice normalizer: files in, standard Invoices with graded flags out.
 
     parsing.py   file formats -> Invoice (only UNPARSEABLE flags)
+    repair.py    OCR-damaged values, read only where the invoice proves the reading
     checks.py    format-agnostic checks -> flags with evidence
     severity.py  flag code -> BLOCK / REVIEW / WARN / INFO
     this file    load, expand, normalize: the three wired together
@@ -15,10 +16,11 @@ from xml.parsers.expat import ExpatError
 from .checks import flag, inventory_from_db
 from .models import Invoice, LineItem
 from .parsing import LOADERS
+from .repair import repair
 from .severity import SEVERITIES, SEVERITY, severity
 
 __all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "check", "expand", "flag", "inventory_from_db",
-           "load", "normalize", "severity"]
+           "load", "normalize", "repair", "severity"]
 
 
 # What an unreadable or malformed file raises. ValueError covers invalid JSON, wrong encoding, an
@@ -48,7 +50,7 @@ def load(path: str | Path, inventory: dict[str, int] | None = None) -> Invoice:
 
 
 def check(inv: Invoice, inventory: dict[str, int] | None = None) -> Invoice:
-    """Run every check on a built Invoice and grade each flag. Shared by every loader, LLM extraction included.
+    """Repair what the invoice proves, run every check on a built Invoice, and grade each flag. Shared by every loader, LLM extraction included.
 
     Args:
         inv: An Invoice straight from a loader (only UNPARSEABLE or CONFLICTING_ROWS flags so far).
@@ -57,6 +59,7 @@ def check(inv: Invoice, inventory: dict[str, int] | None = None) -> Invoice:
     Returns:
         The same Invoice, with the check flags added and a severity on every flag.
     """
+    repair(inv)  # before the checks, so a repaired value is checked like any other
     inv.flags += flag(inv, inventory)  # here, not in each loader, so every format gets the same checks
     # Severity is set once, here, so parse-time and check-time flags are graded by the same table.
     inv.flags = [{"code": f["code"], "severity": severity(f), **f} for f in inv.flags]

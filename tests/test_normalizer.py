@@ -892,3 +892,75 @@ def test_assumed_currency_is_recorded(tmp_path):
     assumed = [p.name for p in sorted(INVOICES.iterdir()) if p.suffix in (".json", ".csv", ".xml")
                and any(x["code"] == "CURRENCY_ASSUMED" for x in normalizer.load(p).flags)]
     assert assumed == ["invoice_1006.csv", "invoice_1007.csv", "invoice_1015.csv"]
+
+
+# --- OCR repair: applied only when the invoice proves the reading ---------------------------------
+
+LINE = '{"item": "WidgetA", "quantity": %s, "unit_price": %s, "amount": %s}'
+INV = '{"invoice_number": "INV-1", "vendor": "V", "date": %s, "due_date": "2026-02-25", "payment_terms": %s, "line_items": [%s], "total": %s}'
+
+
+def repaired(inv):
+    return [(x["severity"], x["field"], x["value"], x["repaired"]) for x in inv.flags if x["code"] == "OCR_REPAIRED"]
+
+
+def test_a_damaged_amount_is_repaired_when_quantity_times_price_confirms_it(tmp_path):
+    """"3,5OO.00" on a line of 7 x 500 is read as 3,500.00: applied, flagged WARN with the original text and the proof, and no longer UNPARSEABLE."""
+    f = tmp_path / "inv.json"
+    f.write_text(INV % ('"2026-01-26"', '"Net 30"', LINE % (7, 500, '"3,5OO.00"'), 3500))
+    inv = load(f)
+    assert inv.line_items[0].amount == Decimal("3500.00")
+    assert repaired(inv) == [("WARN", "line_items[0].amount", "3,5OO.00", Decimal("3500.00"))]
+    assert [x["proof"] for x in inv.flags] == ["quantity 7 x unit price 500 = 3500.00"]
+
+
+def test_an_unproven_reading_is_suggested_not_applied(tmp_path):
+    """The same damage on a line of 7 x 600: 3,500.00 is the only reading, but nothing confirms it. The field stays empty and UNPARSEABLE (REVIEW), with the reading attached for the reviewer."""
+    f = tmp_path / "inv.json"
+    f.write_text(INV % ('"2026-01-26"', '"Net 30"', LINE % (7, 600, '"3,5OO.00"'), 4200))
+    inv = load(f)
+    assert inv.line_items[0].amount is None and repaired(inv) == []
+    [x] = inv.flags
+    assert (x["severity"], x["code"], x["value"], x["suggested"]) == ("REVIEW", "UNPARSEABLE", "3,5OO.00", Decimal("3500.00"))
+
+
+def test_a_damaged_date_is_repaired_when_the_terms_confirm_it(tmp_path):
+    """"26-Jan-2O26" with Net 30 and a due date of 25 Feb is 26 Jan 2026. With no terms there is no proof, so it is only suggested."""
+    f = tmp_path / "inv.json"
+    f.write_text(INV % ('"26-Jan-2O26"', '"Net 30"', LINE % (1, 5, 5), 5))
+    inv = load(f)
+    assert inv.date == date(2026, 1, 26) and repaired(inv) == [("WARN", "date", "26-Jan-2O26", date(2026, 1, 26))]
+
+    f.write_text(INV % ('"26-Jan-2O26"', "null", LINE % (1, 5, 5), 5))
+    inv = load(f)
+    assert inv.date is None
+    assert [(x["code"], x["suggested"]) for x in inv.flags] == [("UNPARSEABLE", date(2026, 1, 26))]
+
+
+def test_only_the_lookalike_that_is_a_digit_is_swapped(tmp_path):
+    """In "26-Oct-2O25" the O of Oct is a letter and the O of 2O25 is a zero: each look-alike is tried both ways and only a reading that parses counts."""
+    f = tmp_path / "inv.json"
+    f.write_text('{"invoice_number": "INV-1", "vendor": "V", "date": "26-Oct-2O25", "due_date": "2025-11-25", "payment_terms": "Net 30",'
+                 ' "line_items": [%s], "total": 5}' % (LINE % (1, 5, 5)))
+    assert load(f).date == date(2025, 10, 26)
+
+
+def test_a_damaged_total_is_repaired_from_the_lines_and_one_repair_can_prove_another(tmp_path):
+    """The total is confirmed by lines + tax. Here the line's price is damaged too: it is proven first (by the line amount), and then supplies the evidence for the total."""
+    f = tmp_path / "inv.json"
+    f.write_text(INV % ('"2026-01-26"', '"Net 30"', LINE % (2, '"25O"', 500), '"5OO"'))
+    inv = load(f)
+    assert (inv.line_items[0].unit_price, inv.total) == (Decimal("250"), Decimal("500"))
+    assert {x[1] for x in repaired(inv)} == {"line_items[0].unit_price", "total"}
+    assert not any(x["severity"] in ("BLOCK", "REVIEW") for x in inv.flags)
+
+
+def test_repair_cannot_make_a_wrong_number_right(tmp_path):
+    """A readable wrong total is not damage: it is never touched. And a value with no look-alike in it ("yesterday", "twelve") has no reading at all."""
+    inv = load(INVOICES / "invoice_1013.json", README_INVENTORY)
+    assert repaired(inv) == [] and len(mismatches(inv)) == 1
+    f = tmp_path / "inv.json"
+    f.write_text('{"invoice_number": "INV-1", "vendor": "V", "due_date": "yesterday", "line_items": [%s], "total": 5}' % (LINE % ('"twelve"', 5, 60)))
+    inv = load(f)
+    assert repaired(inv) == [] and not any("suggested" in x for x in inv.flags)
+    assert [x["code"] for x in inv.flags].count("UNPARSEABLE") == 2

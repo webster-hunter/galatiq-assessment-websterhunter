@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
 INVENTORY = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
 
-# Two OCR-damaged values; "Widget A" and "Gadget X" each unknown and oddly formed; number "INV 1012".
-OCR_1012 = ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT",
+# Two OCR-damaged values, both repaired; "Widget A" and "Gadget X" each unknown and oddly formed; number "INV 1012".
+OCR_1012 = ["OCR_REPAIRED", "OCR_REPAIRED", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT", "UNKNOWN_PRODUCT", "UNEXPECTED_FORMAT",
             "UNEXPECTED_FORMAT"]
 # file -> (vendor, total, flag codes in order)
 EXPECTED = {
@@ -54,11 +54,16 @@ def test_recorded_extraction_of_each_sample(name):
     assert [f["code"] for f in inv.flags if f["severity"] == "INFO"] == notes
 
 
-def test_ocr_errors_are_copied_not_corrected():
-    """The model left 1012's OCR damage as written ("2O26", "$3,500.O0"), so code flags it instead of the model guessing."""
-    inv = load(INVOICES / "invoice_1012.txt", Replay(REPLAYS), INVENTORY)
-    assert {(f["field"], f["value"]) for f in inv.flags if f["code"] == "UNPARSEABLE"} == {
-        ("date", "26-Jan-2O26"), ("line_items[1].amount", "$3,500.O0")}
+def test_ocr_errors_are_copied_by_the_model_and_repaired_by_code():
+    """The model left 1012's OCR damage as written ("2O26", "$3,500.O0"). Code reads both, each confirmed by another value on the invoice, and keeps the original text on the flag."""
+    from datetime import date
+    for name in ("invoice_1012.txt", "invoice_1012.pdf"):
+        inv = load(INVOICES / name, Replay(REPLAYS), INVENTORY)
+        assert (inv.date, inv.line_items[1].amount) == (date(2026, 1, 26), Decimal("3500.00"))
+        assert [(f["severity"], f["field"], f["value"], f["proof"]) for f in inv.flags if f["code"] == "OCR_REPAIRED"] == [
+            ("WARN", "line_items[1].amount", "$3,500.O0", "quantity 7 x unit price 500 = 3500.00"),
+            ("WARN", "date", "26-Jan-2O26", "Net 30: 2026-01-26 to 2026-02-25 is 30 days")]
+        assert not any(f["code"].endswith("_MISMATCH") or f["code"] == "UNPARSEABLE" for f in inv.flags)
 
 
 def test_grounding_caught_a_real_model_error():
