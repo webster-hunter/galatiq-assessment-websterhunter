@@ -69,6 +69,32 @@ python main.py --invoice_path=data/invoices/invoice_1013.pdf --offline
 - The stated total is $22,562.80; lines plus tax come to $22,512.80. The $50 is not in any line.
 - Self-correction left it alone. The model copied the document faithfully, and the document is wrong.
 
+## Decisions on the 20 samples
+
+```bash
+python main.py --invoice_path=data/invoices --offline
+```
+
+Each entry starts with its `decision`: the outcome, the policy rule that fired, and the flags
+behind it. From the policy floor alone, with no model involved in the decision:
+
+| Outcome | Files | Which |
+|---|---|---|
+| APPROVE | 8 | 1001, 1004, 1004 revised, 1006, 1010, 1011 (both copies), 1015 |
+| HOLD | 7 | 1002, 1005, 1008, 1012 (both copies), 1014, 1016 |
+| REJECT | 5 | 1003, 1007, 1009, 1013 (both copies) |
+
+Two to show:
+
+- **1003 is rejected on four fraud signals**, each from a check in code: FakeItem has no stock,
+  the due date is "yesterday", the notes say "URGENT... penalties", and they ask for a wire. One
+  signal alone would not reject it.
+- **1012 is held although nothing on it is wrong any more.** It is $25 under the $10K limit and
+  carries repairs and other warnings; the policy holds that combination for a person.
+
+Not yet true, so don't claim it: that nothing is paid twice. 1011 is approved in both its
+copies, and 1004 alongside its revision, until the ledger exists.
+
 ## Other facts worth having to hand
 
 | Fact | Where it comes from |

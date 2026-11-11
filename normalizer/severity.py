@@ -49,6 +49,9 @@ SEVERITY = {
     # REVIEW to have a person look at every repaired invoice.
     "OCR_REPAIRED": "WARN",
     "ITEM_NAME_REPAIRED": "WARN",  # "Widget A" matched to the inventory's WidgetA
+    "NEAR_THRESHOLD": "WARN",  # just under the approval limit; the policy weighs it with other flags
+    "PRESSURE_LANGUAGE": "WARN",  # "URGENT", "pay immediately", "penalties"
+    "WIRE_REQUEST": "WARN",  # asks for a wire or names a changed account
     "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form ("1002", "Widget A", "Immediate")
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
     # For the record only.

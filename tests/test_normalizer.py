@@ -798,7 +798,7 @@ def test_kv_rows_after_an_invoice_field_do_not_join_the_last_line(tmp_path):
     inv = load(f)
     assert (inv.line_items[0].note, inv.line_items[0].amount) == ("rush", None)
     assert inv.unexpected_fields == {"row[10].amount": "99999.00", "row[11].note": "Wire to new account 999"}
-    assert graded(inv) == [("WARN", "UNEXPECTED_FIELDS")]
+    assert graded(inv) == [("WARN", "WIRE_REQUEST"), ("WARN", "UNEXPECTED_FIELDS")]  # and the stray note is read for what it asks
 
 
 def test_only_plain_numbers_are_read(tmp_path):
@@ -841,9 +841,10 @@ def test_total_at_or_over_the_threshold_needs_review(tmp_path):
     """A dollar total of $10,000 or more gets OVER_APPROVAL_THRESHOLD (REVIEW) even when everything else is clean; $9,999.99 doesn't."""
     f = tmp_path / "inv.json"
     body = '{"invoice_number": "INV-1", "vendor": "V", "due_date": "2026-02-01", "line_items": [{"item": "A", "quantity": 1, "unit_price": %s}], "total": %s%s}'
-    for total, flagged in (("9999.99", False), ("10000", True), ("10000.01", True)):
+    for total, expected in (("9799.99", []), ("9800", [("WARN", "NEAR_THRESHOLD")]), ("9999.99", [("WARN", "NEAR_THRESHOLD")]),
+                            ("10000", [("REVIEW", "OVER_APPROVAL_THRESHOLD")]), ("10000.01", [("REVIEW", "OVER_APPROVAL_THRESHOLD")])):
         f.write_text(body % (total, total, ""))
-        assert graded(load(f)) == ([("REVIEW", "OVER_APPROVAL_THRESHOLD")] if flagged else []), total
+        assert graded(load(f)) == expected, total  # within 2% below the limit is noted; at or over it is reviewed
     f.write_text(body % ("20000", "20000", ', "currency": "EUR"'))  # not dollars: held for currency, not compared
     assert graded(load(f)) == [("REVIEW", "CURRENCY_UNSUPPORTED")]
 

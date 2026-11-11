@@ -29,6 +29,16 @@ FORMATS = {
 # "Invoices over $10K require additional scrutiny" (the brief). At or above it, a person reviews
 # the invoice however clean it is. Exactly $10,000 counts: the cautious reading of "over".
 APPROVAL_THRESHOLD = Decimal("10000")
+# A total within this fraction below the threshold is noted: $9,900 and $9,975 on the samples.
+# Billing just under an approval limit is a known way to avoid review. On its own it is only a
+# warning (plenty of honest invoices are $9,900); the approval policy weighs it with other flags.
+NEAR_THRESHOLD_BAND = Decimal("0.02")
+
+# Wording that pushes for fast payment, and requests to pay by wire or to a changed account: the
+# two marks of payment fraud that show in an invoice's own text. Keyword checks, in code, so that
+# rejecting an invoice never depends on a model noticing something. Each is a warning on its own.
+PRESSURE_WORDS = re.compile(r"\b(urgent(ly)?|immediate(ly)?|asap|right away|final notice|penalt(y|ies)|late fees?|legal action)\b", re.I)
+WIRE_WORDS = re.compile(r"\b(wire(d| transfers?)?|bank transfers?|(new|updated|changed) (bank )?(account|details)|routing number)\b", re.I)
 
 
 def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
@@ -36,7 +46,8 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
 
     Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
     number, revision, currency, payment terms or item name in an unexpected format, a due date before the invoice date, negative total and
-    shipping, a non-USD or assumed currency, a total at or over the approval threshold,
+    shipping, a non-USD or assumed currency, a total at or just under the approval threshold,
+    pressure and wire-transfer wording,
     unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
     already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
 
@@ -135,6 +146,18 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     if inv.total is not None and in_dollars and inv.total >= APPROVAL_THRESHOLD:
         flags.append({"code": "OVER_APPROVAL_THRESHOLD", "field": "total", "value": inv.total,
                       "threshold": APPROVAL_THRESHOLD})
+
+    elif inv.total is not None and in_dollars and inv.total >= APPROVAL_THRESHOLD * (1 - NEAR_THRESHOLD_BAND):
+        flags.append({"code": "NEAR_THRESHOLD", "field": "total", "value": inv.total,
+                      "threshold": APPROVAL_THRESHOLD, "under_by": APPROVAL_THRESHOLD - inv.total})
+
+    # The vendor's own free text: notes, terms, and anything kept in unexpected_fields.
+    texts = [("notes", inv.notes), ("payment_terms", inv.payment_terms)] + [
+        (f"unexpected_fields.{k}", v) for k, v in inv.unexpected_fields.items()]
+    for code, words in (("PRESSURE_LANGUAGE", PRESSURE_WORDS), ("WIRE_REQUEST", WIRE_WORDS)):
+        for field, text in texts:
+            if isinstance(text, str) and (found := [m[0] for m in words.finditer(text)]):
+                flags.append({"code": code, "field": field, "matched": found})
 
     # One flag listing every path, so an agent knows to read unexpected_fields without scanning it first.
     if inv.unexpected_fields:

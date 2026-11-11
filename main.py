@@ -1,8 +1,10 @@
 """The entry point the brief names: python main.py --invoice_path=data/invoices/invoice_1001.txt
 
-Runs ingestion and validation for one invoice file or a folder of them: structured files (JSON,
-CSV, XML) go through the deterministic normalizer, TXT and PDF through LLM extraction, and every
-invoice gets the same checks. Prints a JSON list on stdout; exits 1 if any file is an error.
+Runs ingestion, validation and the approval policy for one invoice file or a folder of them:
+structured files (JSON, CSV, XML) go through the deterministic normalizer, TXT and PDF through
+LLM extraction, every invoice gets the same checks, and the policy floor turns its flags into a
+decision (APPROVE, HOLD or REJECT). Prints a JSON list on stdout, one {"file", "decision",
+"invoice"} entry per file; exits 1 if any file is an error.
 
 Any other option is passed on to `python -m extraction` (--offline, --model, --replays, ...).
 """
@@ -10,7 +12,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from extraction.__main__ import main as run
+from dataclasses import asdict
+
+from approval import decide
+from extraction.__main__ import emit, process
 from seed_inventory import seed
 
 
@@ -31,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not Path(args.inventory).exists():
         seed(args.inventory)
-    return run([str(path), "--inventory", args.inventory, *rest])
+    results = process([str(path), "--inventory", args.inventory, *rest])
+    # The decision goes first in each entry: it is what a reader wants before the detail.
+    return emit([r if "error" in r else {"file": r["file"], "decision": asdict(decide(r["invoice"]["flags"])),
+                                         "invoice": r["invoice"]} for r in results])
 
 
 if __name__ == "__main__":

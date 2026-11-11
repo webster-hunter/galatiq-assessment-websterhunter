@@ -129,14 +129,66 @@ python main.py --invoice_path=data/invoices/invoice_1001.txt
 python main.py --invoice_path=data/invoices          # every invoice in the folder
 ```
 
-`main.py` covers ingestion and validation. Structured files (JSON, CSV, XML) are read by the
-deterministic [normalizer](#invoice-normalizer); TXT and PDF files are transcribed by the model
-([LLM extraction](#llm-extraction)); every invoice then gets the same checks and severities.
-Output is a JSON list on stdout, one `{"file", "invoice"}` or `{"file", "error"}` entry per file.
+`main.py` covers ingestion, validation and the approval policy. Structured files (JSON, CSV, XML)
+are read by the deterministic [normalizer](#invoice-normalizer); TXT and PDF files are transcribed
+by the model ([LLM extraction](#llm-extraction)); every invoice then gets the same checks and
+severities, and the [policy floor](#approval-policy) turns its flags into a decision. Output is a
+JSON list on stdout, one `{"file", "decision", "invoice"}` or `{"file", "error"}` entry per file.
 `inventory.db` is created from the seed data if it doesn't exist. Other options (`--offline`,
 `--model`, `--replays`) are passed through to `python -m extraction`.
 
-Approval and payment are not built yet.
+Not built yet: the reviewer agent that explains and can tighten a decision, payment, and anything
+that compares invoices with each other (duplicates, revisions).
+
+## Approval policy
+
+`approval/policy.py` holds the policy floor: the minimum outcome an invoice's flags require. It is
+an ordered table of rules, in code, and the first rule that matches decides. It never calls a
+model, so the same flags always give the same decision, and it can be read and changed by the
+people who own it without touching a prompt.
+
+| Rule | Condition | Outcome |
+|---|---|---|
+| `BLOCKING_FLAG` | Any BLOCK flag | REJECT |
+| `FRAUD_SIGNALS` | Two or more fraud signals | REJECT |
+| `NEEDS_REVIEW` | Any REVIEW flag | HOLD |
+| `NEAR_THRESHOLD_WITH_WARNINGS` | Total within 2% below $10,000, plus any other warning | HOLD |
+| `NO_OBJECTION` | None of the above | APPROVE, with any warnings listed |
+
+- **Fraud signals** are four kinds of flag, each weak alone: an item with no stock at all, a due
+  date that isn't a date (`yesterday`), pressure wording (`PRESSURE_LANGUAGE`), and a request to
+  pay by wire or to a changed account (`WIRE_REQUEST`). One is weighed as an ordinary flag; two
+  different kinds reject. The wording checks are keyword matches in code, so a rejection never
+  depends on a model noticing something.
+- **INFO notes are never a reason** for any outcome.
+- **It is a floor.** Later stages may make an outcome stricter (approve, then hold, then reject),
+  never looser.
+
+Each decision records the rule that fired and the flags that caused it:
+
+```json
+{"outcome": "REJECT", "rule": "FRAUD_SIGNALS",
+ "because": ["STOCK_EXCEEDED", "UNPARSEABLE", "PRESSURE_LANGUAGE", "WIRE_REQUEST"],
+ "warnings": [], "stage": "POLICY_FLOOR"}
+```
+
+### Decisions on the samples
+
+| Outcome | Invoices | Why |
+|---|---|---|
+| APPROVE | 1001, 1004, 1004 revised, 1006, 1011 (txt and pdf), 1015 | Nothing to object to |
+| APPROVE | 1010 | Warnings only (a repeated item, a Bill To line), on record |
+| HOLD | 1002, 1005 | Over stock, and $10,000 or more |
+| HOLD | 1008, 1016 | Products not in inventory |
+| HOLD | 1014 | Billed in EUR |
+| HOLD | 1012 (txt and pdf) | $25 under the threshold, with repaired values and other warnings |
+| REJECT | 1003 | Four fraud signals: FakeItem has no stock, due date `yesterday`, "URGENT... penalties", "Wire transfer preferred" |
+| REJECT | 1007, 1013 (json and pdf) | The stated total doesn't match the lines |
+| REJECT | 1009 | Negative quantity and total, no vendor, wrong subtotal |
+
+Each file is decided on its own. So 1011, which arrives as both TXT and PDF, is approved twice,
+and 1004 is approved alongside its own revision. Catching that needs a ledger of what has
+already been seen, which comes with payment.
 
 ## LLM extraction
 
@@ -412,6 +464,9 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `DUPLICATE_ITEM` | item | WARN | Same item on more than one line (often legitimate, such as discount lines) |
 | `OCR_REPAIRED` | the field, with `value` (original text), `repaired` and `proof` | WARN | An OCR-damaged value was read and confirmed by another value on the invoice |
 | `ITEM_NAME_REPAIRED` | the line's `item`, with `value` (as written) and `repaired` | WARN | An item name was matched to the one inventory name that is the same apart from spacing, hyphens and case |
+| `NEAR_THRESHOLD` | `total`, with `threshold` and `under_by` | WARN | A dollar total within 2% below $10,000 (1008 at $9,900, 1012 at $9,975). A warning alone; the approval policy holds it when there is any other warning |
+| `PRESSURE_LANGUAGE` | the field, with `matched` (the words found) | WARN | The notes, terms or an unmapped field push for fast payment: "urgent", "immediately", "penalties" |
+| `WIRE_REQUEST` | the field, with `matched` | WARN | The same text asks for a wire or bank transfer, or names a new or changed account |
 | `UNEXPECTED_FORMAT` | the field, with `expected` (the pattern) | WARN | A value isn't in its field's usual form; it is still read as written. Checked: invoice number `INV-<digits>` (not `1002`, `INV 1012`), revision `R<digits>`, currency as a three-letter code (not `$`), payment terms `Net <days>` (not `Immediate`), item name as one word (not `Widget A`). Patterns are in `checks.FORMATS` |
 | `UNEXPECTED_FIELDS` | `fields`: every path in `unexpected_fields` | WARN | The file holds data the loader doesn't map; read `unexpected_fields` |
 

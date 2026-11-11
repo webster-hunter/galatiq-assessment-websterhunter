@@ -23,7 +23,11 @@ from normalizer.__main__ import _json_default
 from . import Grok, Replay, normalize
 
 
-def main(argv: list[str] | None = None) -> int:
+def process(argv: list[str] | None = None) -> list[dict]:
+    """Parse the command line and return the results, one entry per file (see extraction.normalize).
+
+    An unreadable inventory DB is returned as a single error entry, in the same shape.
+    """
     # Here, not in the library: only the CLI reads a .env. Variables already set win over the file.
     load_dotenv()
     ap = argparse.ArgumentParser(prog="python -m extraction",
@@ -39,14 +43,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         inventory = inventory_from_db(args.inventory) if args.inventory else None
     except sqlite3.Error as e:
-        print(json.dumps([{"file": args.inventory, "error": f"{type(e).__name__}: {e}"}], indent=2))
-        return 1
+        return [{"file": args.inventory, "error": f"{type(e).__name__}: {e}"}]
     live = None
     if not args.offline and os.environ.get("XAI_API_KEY"):
         live = Grok(args.model, args.base_url)
-    results = normalize(args.paths, Replay(args.replays, live), inventory)
+    return normalize(args.paths, Replay(args.replays, live), inventory)
+
+
+def emit(results: list[dict]) -> int:
+    """Print results as JSON on stdout; the exit code is 1 if any entry is an error."""
     print(json.dumps(results, indent=2, default=_json_default))
     return 1 if any("error" in r for r in results) else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return emit(process(argv))
 
 
 if __name__ == "__main__":

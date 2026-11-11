@@ -19,7 +19,7 @@ INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
 INVENTORY = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
 
 # Two OCR-damaged values, both repaired; "Widget A" and "Gadget X" matched to inventory names; number "INV 1012".
-OCR_1012 = ["OCR_REPAIRED", "OCR_REPAIRED", "ITEM_NAME_REPAIRED", "ITEM_NAME_REPAIRED", "UNEXPECTED_FORMAT"]
+OCR_1012 = ["OCR_REPAIRED", "OCR_REPAIRED", "ITEM_NAME_REPAIRED", "ITEM_NAME_REPAIRED", "UNEXPECTED_FORMAT", "NEAR_THRESHOLD"]
 # file -> (vendor, total, flag codes in order)
 EXPECTED = {
     "invoice_1001.txt": ("Widgets Inc.", "5000.00", []),
@@ -27,8 +27,10 @@ EXPECTED = {
                          # Needed a second attempt (see the test below); the result is clean of model errors.
                          ["UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),
     "invoice_1003.txt": ("Fraudster LLC", "100000.00",  # due "yesterday"
-                         ["UNPARSEABLE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED"]),  # terms "Immediate"
-    "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "UNEXPECTED_FIELDS"]),
+                         # terms "Immediate"; pressure wording in the notes and in the terms; "Wire transfer preferred"
+                         ["UNPARSEABLE", "UNEXPECTED_FORMAT", "OVER_APPROVAL_THRESHOLD", "PRESSURE_LANGUAGE",
+                          "PRESSURE_LANGUAGE", "WIRE_REQUEST", "STOCK_EXCEEDED"]),
+    "invoice_1008.txt": ("NoProd Industries", "9900.00", ["UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT", "NEAR_THRESHOLD", "UNEXPECTED_FIELDS"]),  # $100 under $10K
     # The bill-to (Acme Corp Manufacturing Division) is not the vendor; the rush line is WidgetA with a note.
     "invoice_1010.txt": ("Consolidated Materials Group", "7185.00", ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]),
     "invoice_1011.txt": ("Summit Manufacturing Co.", "3000.00", []),
