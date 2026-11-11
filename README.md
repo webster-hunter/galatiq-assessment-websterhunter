@@ -189,7 +189,8 @@ Recordings for all ten TXT and PDF samples are committed (made with `grok-4`), s
 
 ### Extraction results on the samples
 
-From the recorded replies, with the seed inventory:
+From the recorded replies, with the seed inventory. None of these files names a currency, so each
+also carries the `CURRENCY_ASSUMED` note (INFO), left out below:
 
 | Invoice | Result |
 |---|---|
@@ -309,7 +310,7 @@ Every flag has a severity, using the four levels from the approval policy.
 | `BLOCK` | Cannot be paid as submitted |
 | `REVIEW` | A person must decide |
 | `WARN` | Payable, but recorded |
-| `INFO` | Normalization note (no flag uses it yet) |
+| `INFO` | A note for the record; not a problem, and never a reason to hold |
 
 Each flag code has exactly one severity, so `normalizer/severity.py` is a plain lookup table. A flag
 code with no entry raises an error, so every new flag must choose one.
@@ -339,7 +340,8 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
 | `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
-| `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate. No stated currency is read as USD |
+| `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate |
+| `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |
 | `UNPARSEABLE` | any field | REVIEW | Value couldn't be read; `value` holds the raw input |
 | `LINE_AMOUNT_MISMATCH` | `line_items[i].amount` | BLOCK | A line's stated amount ≠ quantity × unit price |
 | `SUBTOTAL_MISMATCH` | `subtotal` | BLOCK | Σ (quantity × unit price) ≠ stated subtotal |
@@ -380,7 +382,8 @@ Notes on the checks:
 
 ### Results on the sample data
 
-With `--inventory inventory.db`:
+With `--inventory inventory.db`. Notes at INFO are left out: the three CSVs name no currency, so each
+also carries `CURRENCY_ASSUMED`.
 
 | Invoice | Flags |
 |---|---|
@@ -397,4 +400,7 @@ With `--inventory inventory.db`:
 - Scanned PDFs with no text layer (they need OCR first; the loader says so).
 - Product-name variants such as "Widget A" or "WidgetA (rush order)" (exact match only).
 - Currency conversion: a non-USD invoice is held for review, not converted.
+- Confirming an assumed currency. An invoice that names none is read as USD and says so
+  (`CURRENCY_ASSUMED`). A vendor who bills in another dollar and writes only `$` can't be told apart
+  from the invoice alone; that needs a vendor record giving each vendor's billing currency.
 - Multiple tax rows: only the first counts, and the rest go to `unexpected_fields`.

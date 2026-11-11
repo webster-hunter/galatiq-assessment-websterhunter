@@ -36,7 +36,7 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
 
     Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
     number, revision, currency, payment terms or item name in an unexpected format, a due date before the invoice date, negative total and
-    shipping, non-USD currency, a total at or over the approval threshold,
+    shipping, a non-USD or assumed currency, a total at or over the approval threshold,
     unexpected fields, duplicate items, stock summed per item, and the arithmetic checks. Fields
     already flagged UNPARSEABLE in inv.flags are not flagged again as missing.
 
@@ -119,10 +119,14 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
         invoice_invalid("tax_rate", inv.tax_rate, "TAX_NEGATIVE")
 
     # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
-    # rate. No stated currency is read as USD (the CSVs never state one), and so is a bare "$": the
-    # model sometimes returns the symbol from "$9,975.00" as the currency, and amounts written with
-    # "$" are already read as dollars everywhere else.
-    if inv.currency is not None and inv.currency.upper() not in ("USD", "US$", "$"):
+    # rate, so a stated non-USD currency is held. An invoice that names no currency (most do not:
+    # every CSV, TXT and PDF sample) is read as USD, and so is a bare "$", which several currencies
+    # share. That is an assumption, so it is recorded (INFO: it blocks nothing, but it is on the
+    # invoice for audit) instead of being made silently. The cases that would contradict it are
+    # held by other checks: a named non-USD currency here, and "€1,250" or "£1,250" as UNPARSEABLE.
+    if inv.currency is None or inv.currency.upper() in ("US$", "$"):
+        flags.append({"code": "CURRENCY_ASSUMED", "field": "currency", "value": inv.currency, "assumed": "USD"})
+    elif inv.currency.upper() != "USD":
         flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency})
 
     # Only for a dollar total: 4,125 EUR can't be compared to a dollar threshold, and that invoice

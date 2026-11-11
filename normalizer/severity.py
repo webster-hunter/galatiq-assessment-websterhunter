@@ -9,7 +9,7 @@ SEVERITIES = ("BLOCK", "REVIEW", "WARN", "INFO")
 #   BLOCK   cannot be paid as submitted
 #   REVIEW  a person must decide
 #   WARN    payable, but recorded
-#   INFO    normalization note (no flag uses it yet)
+#   INFO    a note for the record; not a problem and never a reason to hold
 
 SEVERITY = {
     # Can't be paid as submitted.
@@ -47,6 +47,8 @@ SEVERITY = {
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
     "UNEXPECTED_FORMAT": "WARN",  # read fine, but not in the usual form ("1002", "Widget A", "Immediate")
     "UNEXPECTED_FIELDS": "WARN",  # unmapped data could matter (a PO number, a bank change)
+    # For the record only.
+    "CURRENCY_ASSUMED": "INFO",  # no currency named, so read as USD
 }
 
 

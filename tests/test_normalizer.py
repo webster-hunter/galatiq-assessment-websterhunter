@@ -8,14 +8,16 @@ from normalizer import normalize
 
 
 def load(path, inventory=None):
-    """normalizer.load, without the INVENTORY_NOT_CHECKED flag that every call with no inventory carries.
+    """normalizer.load, without the two flags nearly every test invoice would otherwise carry.
 
-    Most tests here are about one check and load without an inventory; dropping that one flag lets
-    them assert exact flag lists. test_missing_inventory_is_flagged covers the flag itself.
+    Most tests here are about one check: they load without an inventory and name no currency. So
+    INVENTORY_NOT_CHECKED (when no inventory is given) and INFO notes (CURRENCY_ASSUMED) are
+    dropped, which lets tests assert exact flag lists. test_missing_inventory_is_flagged and
+    test_assumed_currency_is_recorded cover those flags themselves, through normalizer.load.
     """
     inv = normalizer.load(path, inventory)
-    if inventory is None:
-        inv.flags = [f for f in inv.flags if f["code"] != "INVENTORY_NOT_CHECKED"]
+    inv.flags = [f for f in inv.flags if f["severity"] != "INFO"
+                 and not (inventory is None and f["code"] == "INVENTORY_NOT_CHECKED")]
     return inv
 
 INVOICES = Path(__file__).resolve().parent.parent / "data" / "invoices"
@@ -869,3 +871,24 @@ def test_each_formatted_field_is_checked(tmp_path):
     # Every structured sample is in the usual form throughout.
     assert not any(x["code"] == "UNEXPECTED_FORMAT" for p in sorted(INVOICES.iterdir())
                    if p.suffix in (".json", ".csv", ".xml") for x in load(p).flags)
+
+
+def test_assumed_currency_is_recorded(tmp_path):
+    """An invoice that names no currency (or only "$") is read as USD and says so with an INFO note; a named USD needs none, and a named EUR is held instead."""
+    f = tmp_path / "inv.json"
+    body = ('{"invoice_number": "INV-1", "vendor": "V", "due_date": "2026-02-01", "currency": %s,'
+            ' "line_items": [{"item": "A", "quantity": 1, "unit_price": 1}], "total": 1}')
+    for currency, expected in (("null", [("INFO", "CURRENCY_ASSUMED")]), ('"USD"', []), ('"usd"', [("WARN", "UNEXPECTED_FORMAT")]),
+                               ('"$"', [("INFO", "CURRENCY_ASSUMED"), ("WARN", "UNEXPECTED_FORMAT")]),
+                               ('"EUR"', [("REVIEW", "CURRENCY_UNSUPPORTED")])):
+        f.write_text(body % currency)
+        inv = normalizer.load(f, {"A": 5})
+        assert sorted(graded(inv)) == sorted(expected), currency
+    f.write_text(body % "null")
+    [note] = normalizer.load(f, {"A": 5}).flags
+    assert (note["field"], note["value"], note["assumed"]) == ("currency", None, "USD")
+
+    # On the samples: the JSON files name USD, the XML names EUR, and the CSVs name nothing.
+    assumed = [p.name for p in sorted(INVOICES.iterdir()) if p.suffix in (".json", ".csv", ".xml")
+               and any(x["code"] == "CURRENCY_ASSUMED" for x in normalizer.load(p).flags)]
+    assert assumed == ["invoice_1006.csv", "invoice_1007.csv", "invoice_1015.csv"]

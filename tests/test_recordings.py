@@ -45,11 +45,12 @@ EXPECTED = {
 
 @pytest.mark.parametrize("name", EXPECTED)
 def test_recorded_extraction_of_each_sample(name):
-    """Each sample's real transcription gives the right vendor and total and exactly the expected flags, with nothing ungrounded."""
+    """Each sample's real transcription gives the right vendor and total and exactly the expected flags. None names a currency, so each also carries the CURRENCY_ASSUMED note."""
     vendor, total, codes = EXPECTED[name]
     inv = load(INVOICES / name, Replay(REPLAYS), INVENTORY)
     assert (inv.vendor_name, inv.total) == (vendor, Decimal(total))
-    assert [f["code"] for f in inv.flags] == codes
+    assert [f["code"] for f in inv.flags if f["severity"] != "INFO"] == codes
+    assert [f["code"] for f in inv.flags if f["severity"] == "INFO"] == ["CURRENCY_ASSUMED"]
 
 
 def test_ocr_errors_are_copied_not_corrected():
