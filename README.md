@@ -4,7 +4,11 @@ A working prototype that takes a supplier invoice in any of five formats and car
 to one of three ends: paid, held for a named person, or rejected with reasons. It is my
 submission for the Galatiq case; the brief is in [`ASSESSMENT.md`](ASSESSMENT.md).
 
-It runs end to end on all 20 sample files, in about a second, with no API key.
+It runs end to end on all 20 sample files, in about a second, with no API key. The model is
+xAI's Grok 4. Its replies to every sample were captured from the live API and are stored in the
+repository, so without a key the system replays those real replies and behaves exactly as it
+did when they were recorded. With an xAI key it calls Grok live, for any invoice
+([details below](#with-and-without-an-api-key)).
 
 ## What it does with the 20 sample invoices
 
@@ -47,8 +51,35 @@ python -m web                                                              # the
 pytest                                                                     # 341 tests, about 20 seconds
 ```
 
-`--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
-call the model live, copy `.env.example` to `.env`, add an xAI key, and drop `--offline`.
+### With and without an API key
+
+**Without a key**, every model call is answered from `data/replays`: 41 replies captured from
+Grok 4 (`grok-4`) over xAI's API, covering extraction, the reviewer agent and the critic for
+the 20 samples and the four files in `data/unfamiliar/`. Nothing is mocked or hand-written:
+what you see is what the model actually returned. `--offline` forces this mode even when a key
+is set.
+
+A recording is found by a hash of the exact request (the invoice's text, the instructions, the
+tools), so it answers only the request it was recorded for. A new or edited invoice has no
+recording, and offline it ends as an error that says so, never as a stale or invented answer.
+
+**With a key**, the system calls Grok live:
+
+```bash
+cp .env.example .env        # then set XAI_API_KEY in .env  (Windows: copy .env.example .env)
+python main.py --invoice_path=path/to/your_invoice.pdf
+```
+
+- **A new invoice is sent to the model**, and its reply is saved to `data/replays`, so the same
+  file replays offline afterwards.
+- **The samples still replay**, since their recordings match: no calls are made and nothing is
+  spent. To see them processed live, point `--replays` at an empty folder
+  (`--replays fresh-replays`).
+- **Another model** is one option: `--model NAME`, or `LLM_MODEL` in `.env`. A recording made by
+  a different model is never replayed for it; the call is made and recorded again.
+
+Model output varies between runs, even at temperature 0, so a live run of the samples can
+differ in wording from the recorded one. The decisions rest on checks in code, not on that wording.
 
 `main.py` prints one JSON entry per file on stdout (the result, the decision, the reason, the
 steps taken, and the invoice as read) and a summary on stderr:
