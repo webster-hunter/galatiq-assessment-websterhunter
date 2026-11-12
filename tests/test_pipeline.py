@@ -60,7 +60,7 @@ def test_each_outcome_takes_its_own_branch(graph, name, last, status):
 
 
 def test_the_graph_never_decides_below_the_policy_floor(graph):
-    """For every file that reaches approval, the final decision is the policy's own, or stricter. The only stricter case on the samples is the agent's hold on 1010; nothing is ever looser."""
+    """For every file that reaches approval, the final decision is the policy's own, or stricter; never looser. On the recorded samples the agent agrees with the policy every time."""
     branch = {"APPROVE": "pay", "HOLD": "hold", "REJECT": "reject"}
     strict = ["APPROVE", "HOLD", "REJECT"]
     escalated = []
@@ -74,27 +74,27 @@ def test_the_graph_never_decides_below_the_policy_floor(graph):
         assert nodes(state)[-1] == branch[final.outcome], p.name
         if final != floor:
             escalated.append((p.name, floor.outcome, final.outcome, final.stage))
-    assert escalated == [("invoice_1010.txt", "APPROVE", "HOLD", "REVIEWER_AGENT")]
+    assert escalated == []
 
 
-def test_the_sample_folder_pays_five_invoices_once(graph, ledger):
-    """All 20 files in order: 5 paid ($19,140.00), 8 held, 4 rejected, 3 second copies skipped. Run again: nothing more is paid."""
+def test_the_sample_folder_pays_six_invoices_once(graph, ledger):
+    """All 20 files in order: 6 paid ($26,325.00), 7 held, 4 rejected, 3 second copies skipped. Run again: nothing more is paid."""
     def outcomes():
         return {p.name: run(graph, p)["result"]["status"] for p in sorted(INVOICES.iterdir())}
 
     first = outcomes()
     by_status = {s: sorted(n[8:] for n, v in first.items() if v == s) for s in set(first.values())}
     assert by_status == {
-        "PAID": ["1001.txt", "1004.json", "1006.csv", "1011.pdf", "1015.csv"],
-        "HELD": ["1002.txt", "1004_revised.json", "1005.json", "1008.txt", "1010.txt", "1012.pdf", "1014.xml", "1016.json"],
+        "PAID": ["1001.txt", "1004.json", "1006.csv", "1010.txt", "1011.pdf", "1015.csv"],
+        "HELD": ["1002.txt", "1004_revised.json", "1005.json", "1008.txt", "1012.pdf", "1014.xml", "1016.json"],
         "REJECTED": ["1003.txt", "1007.csv", "1009.json", "1013.json"],
         "SKIPPED_DUPLICATE": ["1011.txt", "1012.txt", "1013.pdf"],
     }
-    assert (len(ledger.payments()), ledger.total_paid()) == (5, Decimal("19140"))
+    assert (len(ledger.payments()), ledger.total_paid()) == (6, Decimal("26325"))
 
     second = outcomes()
     assert set(second.values()) == {"ALREADY_PROCESSED", "SKIPPED_DUPLICATE"}
-    assert (len(ledger.payments()), ledger.total_paid()) == (5, Decimal("19140"))
+    assert (len(ledger.payments()), ledger.total_paid()) == (6, Decimal("26325"))
 
 
 def test_a_second_copy_is_skipped_without_a_decision(graph):
@@ -619,7 +619,7 @@ def test_a_failing_rate_service_costs_one_estimate_not_the_batch(ledger):
 
 
 def test_only_paused_runs_keep_their_saved_state(tmp_path):
-    """After the whole folder, the checkpoints file holds the eight held runs and nothing for the twelve that finished."""
+    """After the whole folder, the checkpoints file holds the seven held runs and nothing for the thirteen that finished."""
     import sqlite3
     ledger = Ledger(":memory:", pay=lambda vendor, amount: None)
     graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp.db"))
@@ -627,9 +627,9 @@ def test_only_paused_runs_keep_their_saved_state(tmp_path):
         run(graph, p)
     db = sqlite3.connect(tmp_path / "cp.db")
     threads = {row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}
-    assert threads == {e["thread_id"] for e in ledger.queue()} and len(threads) == 8
+    assert threads == {e["thread_id"] for e in ledger.queue()} and len(threads) == 7
     release(graph, ledger, ledger.queue()[0]["id"], "approve", "Dana Lee")           # a released run finishes, and is cleared too
-    assert len({row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}) == 7
+    assert len({row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}) == 6
     db.close()
 
 
@@ -674,8 +674,8 @@ def folder(tmp_path):
 AGENT_TOOLS = {   # what Grok chose to look up for each invoice it reviewed
     "invoice_1002.txt": ["get_vendor_history"],
     "invoice_1004_revised.json": [],
-    "invoice_1005.json": ["get_vendor_history"],
-    "invoice_1008.txt": ["find_similar_products", "find_similar_products", "get_vendor_history"],
+    "invoice_1005.json": [],
+    "invoice_1008.txt": ["get_vendor_history"],
     "invoice_1010.txt": [],
     "invoice_1012.pdf": ["get_vendor_history"],
     "invoice_1014.xml": [],
@@ -688,35 +688,42 @@ def test_the_agent_reviews_the_eight_held_or_warned_invoices_and_no_others(folde
     by_agent = {n: s["assessment"] for n, s in folder.items() if s.get("assessment", {}).get("by") == "reviewer_agent"}
     assert {n: [t["tool"] for t in a["tools_used"]] for n, a in by_agent.items()} == AGENT_TOOLS
     for name, a in by_agent.items():
-        assert a["recommendation"] == "HOLD" and len(a["rationale"]) > 100 and "note" not in a, name
+        assert a["recommendation"] == ("APPROVE" if name == "invoice_1010.txt" else "HOLD"), name
+        assert len(a["rationale"]) > 100 and "note" not in a, name
     others = [s["assessment"] for n, s in folder.items() if "assessment" in s and n not in AGENT_TOOLS]
     assert len(others) == 9 and all(a["by"] == "policy" and a["tools_used"] == [] for a in others)
 
 
-def test_the_agent_adds_a_hold_to_1010(folder):
-    """1010 passes the policy with warnings. The agent holds it: WidgetA is billed at two unit prices and there is an unexplained Bill To line. It is queued for a person, not paid."""
+def test_the_agent_agrees_1010_is_payable_and_says_why(folder):
+    """1010 passes the policy with two warnings. The agent reads them and agrees: the second WidgetA line's higher price carries the vendor's "rush order" note, and the Bill To line names an Acme division, which is expected. It is paid."""
     state = folder["invoice_1010.txt"]
-    assert decide(state["invoice"].flags).outcome == "APPROVE"
-    assert (state["decision"].outcome, state["decision"].stage, state["decision"].rule) == ("HOLD", "REVIEWER_AGENT", "REVIEWER_AGENT_HOLD")
-    assert state["result"]["status"] == "HELD" and state["result"]["for"] == ["REVIEWER_AGENT"]
-    assert "$250" in state["assessment"]["rationale"] and "$300" in state["assessment"]["rationale"]
-    assert len(state["assessment"]["open_questions"]) == 2
+    a = state["assessment"]
+    assert (state["decision"].outcome, state["decision"].stage, state["result"]["status"]) == ("APPROVE", "POLICY_FLOOR", "PAID")
+    assert (a["by"], a["recommendation"], a["open_questions"]) == ("reviewer_agent", "APPROVE", [])
+    assert "rush order" in a["rationale"] and "Acme" in a["rationale"] and "expected" in a["rationale"]
+
+
+def test_the_agent_is_told_who_it_works_for():
+    """The instructions name the buyer and say its name as bill-to is expected: without this the agent once held 1010 over "Bill To: Acme Corp Manufacturing Division"."""
+    from approval import reviewer
+    assert reviewer.BUYER == "Acme Corp" and "Acme Corp is the buyer" in reviewer.SYSTEM
+    assert "is not something to question" in reviewer.SYSTEM and "rush order" in reviewer.SYSTEM
 
 
 def test_the_agents_lookups_are_reflected_in_what_it_says(folder):
-    """What the tools returned shows in the rationale: WidgetC resembles stocked items and the vendor was paid before (1016); nothing resembles SuperGizmo (1008); the revision's difference is $4,050 (1004)."""
+    """What the tools returned shows in the rationale: WidgetC resembles stocked items and the vendor was paid before (1016); NoProd has no other invoices (1008); the revision's difference is $4,050 (1004)."""
     a = folder["invoice_1016.json"]["assessment"]
     assert [s["item"] for s in a["tools_used"][0]["result"]["similar"]] == ["WidgetB", "WidgetA"]
     assert a["tools_used"][1]["result"]["other_invoices"] == [{"number": "1001", "revision": 0, "total": "5000", "outcome": "PAID"}]
-    assert "one prior invoice" in a["rationale"] and "paid" in a["rationale"]
+    assert "one prior paid invoice" in a["rationale"]
     b = folder["invoice_1008.txt"]["assessment"]
-    assert all(t["result"].get("similar") == [] for t in b["tools_used"][:2]) and "no similar" in b["rationale"]
+    assert b["tools_used"][0]["result"]["other_invoices"] == [] and "no prior invoices" in b["rationale"]
     assert "4050" in folder["invoice_1004_revised.json"]["assessment"]["rationale"]
 
 
 def test_the_invoice_under_review_is_not_mistaken_for_an_earlier_one(folder):
     """Vendor history leaves out the invoice being reviewed, so no rationale reports it as already received or as a possible duplicate of itself."""
-    for name in ("invoice_1002.txt", "invoice_1005.json", "invoice_1008.txt", "invoice_1012.pdf"):
+    for name in ("invoice_1002.txt", "invoice_1008.txt", "invoice_1012.pdf"):
         a = folder[name]["assessment"]
         history = [t["result"] for t in a["tools_used"] if t["tool"] == "get_vendor_history"]
         assert history and all(h["other_invoices"] == [] for h in history), name

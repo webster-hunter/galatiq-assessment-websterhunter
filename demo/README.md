@@ -80,13 +80,13 @@ python main.py --invoice_path=data/invoices --offline --ledger demo.db > /dev/nu
 
 | | First run | Second run |
 |---|---|---|
-| Paid | 5 invoices, $19,140.00 | 0 |
-| Held | 8 | |
+| Paid | 6 invoices, $26,325.00 | 0 |
+| Held | 7 | |
 | Rejected | 4 | |
 | Skipped as a duplicate | 3 | 3 |
 | Already processed | | 17 |
 
-- **Paid:** 1001, 1004, 1006, 1011, 1015.
+- **Paid:** 1001, 1004, 1006, 1010, 1011, 1015.
 - **Duplicates caught:** 1011, 1012 and 1013 each arrive in two formats. The second copy is
   recognised by content, not file name, and skipped. Without that, 1011 would be paid twice
   ($3,000.00), and 1012 would be in the review queue twice.
@@ -109,9 +109,9 @@ After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to bo
 keep the demo's saved runs apart too):
 
 ```bash
-python review.py --ledger demo.db                                     # eight invoices waiting, with the agent's advice
+python review.py --ledger demo.db                                     # seven invoices waiting, with the agent's advice
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 7 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
+python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
 ```
 
 What to point at:
@@ -142,20 +142,25 @@ What to point at:
 - **1016.** The agent chose two lookups itself: products like WidgetC (it found WidgetA and
   WidgetB) and the vendor's history (one earlier invoice, paid). Its question to the reviewer:
   is WidgetC something we mean to order?
-- **1010.** The policy approves it. The agent held it, because WidgetA is billed at $250 on one
-  line and $300 on another. This is the one place a model changed an outcome, and it made it
-  stricter.
+- **1010.** The policy approves it with two warnings. The agent reads them and agrees: the higher
+  price on the second WidgetA line is the vendor's stated rush order, and the Bill To line is
+  Acme's own division. It is paid, with that reason on record.
 - **1003 and 1013.** Rejected by the policy with no model call at all.
 
 How to say it: the model can add a hold and advise a person. It cannot approve, reject or pay,
 and that is enforced in code, so nothing a vendor writes on an invoice can talk it into paying.
 
-A true story worth telling: its first replies suspected four invoices of being duplicates. The
-cause was my tool, which listed the invoice under review in the vendor's history. Reading real
-output, not just passing tests, is what found it.
+Two true stories worth telling, both found by reading real output and not by tests:
 
-What not to claim: that its reasoning is checked. Nothing yet verifies a rationale's claims
-against the invoice; one early reply invented a quantity change. That check is the critic, next.
+- Its first replies suspected four invoices of being duplicates. The cause was my tool, which
+  listed the invoice under review in the vendor's history.
+- It then held 1010, asking why WidgetA had two prices (the line said "rush order") and who
+  "Acme Corp Manufacturing Division" was. Its instructions had never said it works for Acme.
+
+Both are the same lesson: when an agent gets something wrong, look first at what it was given.
+
+What not to claim: that its reasoning is checked. The fixes are better tools and instructions;
+nothing in code yet verifies a rationale against the invoice. That check is the critic, next.
 
 ## Watching one invoice move through the pipeline
 

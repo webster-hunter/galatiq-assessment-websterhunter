@@ -307,26 +307,40 @@ or answers unusably, the policy's decision stands and says so.
 ### What it did on the samples
 
 From recorded replies (`grok-4`), on the folder run in order. It reviewed eight invoices: the
-seven policy holds, and 1010.
+seven policy holds, and 1010. On all eight it agreed with the policy's outcome.
 
-- **1010: it added a hold.** The policy approves 1010 with warnings. The agent held it: WidgetA is
-  billed on two lines at $250 and $300, and there is an unexplained Bill To line. It asks why the
-  prices differ. The invoice goes to the review queue.
+- **1010: it agreed the invoice is payable, and said why.** The policy approves 1010 with two
+  warnings. The agent read them: the second WidgetA line's higher price carries the vendor's
+  "rush order" note, and the Bill To line names an Acme division, which is expected. No hold.
 - **1016:** it looked for products like WidgetC (WidgetA and WidgetB) and checked the vendor's
-  history (one earlier invoice, paid), and asks whether WidgetC is something Acme means to order.
-- **1008:** it looked up both unknown items, found nothing similar, and found no history for the
-  vendor.
+  history (one earlier invoice, paid), and asks whether WidgetC is a product Acme means to buy.
+- **1008:** it found no other invoices from the vendor, and asks whether the two unknown items
+  were ordered.
 - **1004 revised:** it explains that $1,890 was already paid and $4,050 is the difference, and
-  asks whether the PO amendment the vendor cites was approved.
+  asks whether the PO amendment the vendor cites can be confirmed.
 
-Reading its first recorded replies found a bug in a tool, not in the model: vendor history listed
-the invoice under review, and the model took it for an earlier duplicate. The tool now leaves it
-out, and a test checks no rationale reports one.
+Two faults were found by reading its recorded replies, and neither was the model's:
 
-Limits: its rationale for 1010 still uses two flag codes, against the prompt. Nothing yet checks
-a rationale's claims against the invoice; that is the critic's job, not built. Recordings cover
-the folder run; an invoice run on its own, or one not in the samples, gets a different history
-from the tools, has no recording, and offline falls back to the policy's wording.
+- **A tool misled it.** Vendor history listed the invoice under review, which is in the ledger
+  by then, and the model took it for an earlier duplicate on four invoices. The tool now returns
+  the vendor's other invoices only.
+- **It didn't know who it worked for.** Its instructions never named the buyer, so it held 1010
+  over "Bill To: Acme Corp Manufacturing Division", and asked why WidgetA had two prices although
+  the line said "rush order". The instructions now name Acme Corp as the buyer and say to read a
+  line's note before asking about that line.
+
+Limits:
+
+- Nothing in code checks a rationale's claims, or that a question isn't already answered by the
+  invoice. The fixes above are instructions, which reduce a lapse without preventing it. That
+  check is the critic's job, not built.
+- Two rationales still use a flag code, against the instructions.
+- The model's choices vary between recordings: which tools it calls changed with each prompt
+  edit. The tests pin the recorded behaviour, so a change shows up as a failure to look at.
+- Recordings cover the folder run. An invoice run on its own gets a different history from the
+  tools, has no recording, and offline falls back to the policy's wording.
+- Whether a 20% rush premium should be paid without a person seeing it is a policy question the
+  agent's agreement doesn't settle. There is no price list or purchase order to check it against.
 
 ## Ledger and payment
 
@@ -371,8 +385,8 @@ python main.py --invoice_path=data/invoices --offline --fresh
 
 | Result | Invoices |
 |---|---|
-| PAID, 5 invoices, $19,140.00 | 1001, 1004, 1006, 1011 (pdf), 1015 |
-| HELD, 8 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016; 1004 revised (the original was already paid; $4,050.00 difference); and 1010, which the policy approves and the reviewer agent holds |
+| PAID, 6 invoices, $26,325.00 | 1001, 1004, 1006, 1010, 1011 (pdf), 1015 |
+| HELD, 7 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016, and 1004 revised (the original was already paid; $4,050.00 difference) |
 | REJECTED, 4 | 1003, 1007, 1009, 1013 (json) |
 | SKIPPED_DUPLICATE, 3 | 1011 (txt), 1012 (txt), 1013 (pdf) |
 
