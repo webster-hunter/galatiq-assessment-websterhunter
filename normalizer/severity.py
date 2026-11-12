@@ -45,7 +45,8 @@ SEVERITY = {
     "INVENTORY_NOT_CHECKED": "REVIEW",
     # From the ledger, which compares an invoice with those already processed.
     "REVISION_OF_PAID": "REVIEW",  # revises an invoice that was already paid: a person settles the difference
-    "DUPLICATE_CONFLICT": "REVIEW",  # same vendor, number and revision as an earlier invoice, different content  # no inventory given, so products and stock are unverified
+    "DUPLICATE_CONFLICT": "REVIEW",
+    "POSSIBLE_DUPLICATE": "REVIEW",  # same number and content as an invoice on record under another vendor name  # same vendor, number and revision as an earlier invoice, different content  # no inventory given, so products and stock are unverified
     # Payable, but recorded.
     "DUPLICATE_ITEM": "WARN",  # often legitimate (discount or rush lines on 1013, 1010)
     # A value damaged by OCR, read and confirmed by an independent value on the invoice. Change to

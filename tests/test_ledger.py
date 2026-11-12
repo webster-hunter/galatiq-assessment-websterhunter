@@ -80,13 +80,13 @@ def test_an_invoice_is_paid_once_however_often_it_is_asked():
 
 
 def test_a_payment_that_never_confirmed_is_not_sent_again():
-    """If the payment call fails midway, the PENDING row remains. A retry does not call the payment function again: the first call may have gone through."""
+    """If the payment call fails, pay() reports it without raising and the PENDING row remains. A retry does not call the payment function again: the first call may have gone through."""
     def flaky(vendor, amount):
         raise TimeoutError("no answer from the bank")
 
     ledger = Ledger(":memory:", pay=flaky)
-    with pytest.raises(TimeoutError):
-        ledger.pay(invoice())
+    first = ledger.pay(invoice())
+    assert (first["status"], first["repeated"], first["error"]) == ("PENDING", False, "TimeoutError: no answer from the bank")
     calls = []
     ledger._pay = lambda vendor, amount: calls.append(amount)
     again = ledger.pay(invoice())
@@ -107,8 +107,8 @@ def test_the_ledger_file_outlives_the_object(tmp_path):
     """A ledger on disk is still there for the next process: the invoice is recognised and not paid again."""
     path = tmp_path / "ledger.db"
     first = Ledger(path, pay=lambda v, a: None)
-    first.record(invoice(), "RECEIVED")
     first.pay(invoice())
+    first.record(invoice(), "PAID")
     first.close()
     later = Ledger(path, pay=lambda v, a: pytest.fail("paid twice"))
     assert later.seen(invoice()).kind == "SAME_FILE" and later.pay(invoice())["repeated"] is True

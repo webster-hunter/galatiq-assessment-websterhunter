@@ -21,11 +21,15 @@ APPROVE, HOLD, REJECT = "APPROVE", "HOLD", "REJECT"
 STRICTNESS = (APPROVE, HOLD, REJECT)  # least to most strict
 
 # How many fraud signals make a rejection. One alone is not fraud (an unreadable due date is a
-# hold); two together are.
+# hold); two together are, provided at least one is HARD: a fact about the invoice, not a choice
+# of words. Wording is weak evidence, since honest invoices ask for bank transfers and mention
+# deadlines, so wording alone can hold an invoice for a person but never reject it.
 FRAUD_SIGNALS_TO_REJECT = 2
+HARD_SIGNALS = ("ZERO_STOCK_ITEM", "UNREADABLE_DUE_DATE")
+WORDING_SIGNALS = ("PRESSURE_LANGUAGE", "WIRE_REQUEST")
 
 
-def fraud_signals(flags: list[dict]) -> list[dict]:
+def fraud_signals(flags: list[dict], kinds_wanted: tuple = HARD_SIGNALS + WORDING_SIGNALS) -> list[dict]:
     """The flags that count as fraud signals, at most one per kind.
 
     Four kinds, each weak alone: billing for an item with no stock at all, a due date that isn't
@@ -39,7 +43,8 @@ def fraud_signals(flags: list[dict]) -> list[dict]:
         "PRESSURE_LANGUAGE": lambda f: f["code"] == "PRESSURE_LANGUAGE",
         "WIRE_REQUEST": lambda f: f["code"] == "WIRE_REQUEST",
     }
-    return [next(f for f in flags if is_kind(f)) for is_kind in kinds.values() if any(is_kind(f) for f in flags)]
+    return [next(f for f in flags if is_kind(f)) for name, is_kind in kinds.items()
+            if name in kinds_wanted and any(is_kind(f) for f in flags)]
 
 
 def _blocking(flags):
@@ -48,7 +53,12 @@ def _blocking(flags):
 
 def _fraud(flags):
     signals = fraud_signals(flags)
-    return signals if len(signals) >= FRAUD_SIGNALS_TO_REJECT else []
+    return signals if len(signals) >= FRAUD_SIGNALS_TO_REJECT and fraud_signals(flags, HARD_SIGNALS) else []
+
+
+def _fraud_wording(flags):
+    wording = fraud_signals(flags, WORDING_SIGNALS)
+    return wording if len(wording) == len(WORDING_SIGNALS) else []
 
 
 def _review(flags):
@@ -73,9 +83,11 @@ class Rule:
 # In order: the first rule that matches decides. INFO notes are never a reason for anything.
 POLICY = [
     Rule("BLOCKING_FLAG", REJECT, "Any BLOCK flag: the invoice can't be paid as submitted.", _blocking),
-    Rule("FRAUD_SIGNALS", REJECT, "Two or more fraud signals: zero-stock item, unreadable due date, "
-         "pressure wording, wire or changed-account request.", _fraud),
+    Rule("FRAUD_SIGNALS", REJECT, "Two or more fraud signals (zero-stock item, unreadable due date, pressure "
+         "wording, wire or changed-account request), at least one of them not wording.", _fraud),
     Rule("NEEDS_REVIEW", HOLD, "Any REVIEW flag: a person must decide.", _review),
+    Rule("FRAUD_WORDING", HOLD, "Pressure wording together with a wire or changed-account request, "
+         "and nothing else: suspicious, but words alone don't reject.", _fraud_wording),
     Rule("NEAR_THRESHOLD_WITH_WARNINGS", HOLD, "A total just under the approval threshold together with "
          "any other warning.", _near_threshold_with_warnings),
 ]

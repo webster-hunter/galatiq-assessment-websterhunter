@@ -64,7 +64,8 @@ def F(code, severity, **more):
 
 def test_first_matching_rule_decides():
     """Rules are tried in order: a BLOCK flag rejects even beside REVIEW and WARN flags, and REVIEW holds even beside warnings."""
-    assert [r.name for r in POLICY] == ["BLOCKING_FLAG", "FRAUD_SIGNALS", "NEEDS_REVIEW", "NEAR_THRESHOLD_WITH_WARNINGS"]
+    assert [r.name for r in POLICY] == ["BLOCKING_FLAG", "FRAUD_SIGNALS", "NEEDS_REVIEW", "FRAUD_WORDING",
+                                        "NEAR_THRESHOLD_WITH_WARNINGS"]
     mixed = [F("UNEXPECTED_FIELDS", "WARN"), F("STOCK_EXCEEDED", "REVIEW", available=5), F("TOTAL_MISMATCH", "BLOCK")]
     d = decide(mixed)
     assert (d.outcome, d.rule, d.because) == (REJECT, "BLOCKING_FLAG", ("TOTAL_MISMATCH",))
@@ -82,15 +83,21 @@ def test_approval_ignores_notes_and_records_warnings():
 
 
 def test_one_fraud_signal_is_not_fraud_and_two_are():
-    """A single signal is weighed as an ordinary flag; two different kinds reject. Two flags of one kind are still one signal."""
+    """A single signal is weighed as an ordinary flag; two different kinds reject if at least one is a fact, not wording. Two flags of one kind are still one signal."""
     due = F("UNPARSEABLE", "REVIEW", field="due_date", value="yesterday")
     pressure = F("PRESSURE_LANGUAGE", "WARN", field="notes")
     assert decide([due]).rule == "NEEDS_REVIEW"                       # unreadable due date alone: hold
     assert decide([pressure]).outcome == APPROVE                      # "urgent" alone: approved, with the warning
     assert decide([pressure, F("PRESSURE_LANGUAGE", "WARN", field="payment_terms")]).outcome == APPROVE
-    d = decide([pressure, F("WIRE_REQUEST", "WARN", field="notes")])
-    assert (d.outcome, d.rule, d.because) == (REJECT, "FRAUD_SIGNALS", ("PRESSURE_LANGUAGE", "WIRE_REQUEST"))
-    assert decide([due, pressure]).outcome == REJECT
+    wire = F("WIRE_REQUEST", "WARN", field="notes")
+    # Wording alone never rejects: honest invoices ask for bank transfers and mention deadlines. Both kinds together are held.
+    d = decide([pressure, wire])
+    assert (d.outcome, d.rule, d.because) == (HOLD, "FRAUD_WORDING", ("PRESSURE_LANGUAGE", "WIRE_REQUEST"))
+    assert decide([wire]).outcome == APPROVE
+    # With a fact behind it (the due date isn't a date), the same wording rejects.
+    d = decide([due, pressure])
+    assert (d.outcome, d.rule, d.because) == (REJECT, "FRAUD_SIGNALS", ("UNPARSEABLE", "PRESSURE_LANGUAGE"))
+    assert decide([F("STOCK_EXCEEDED", "REVIEW", available=0), wire]).outcome == REJECT
     # An unreadable invoice date is not a fraud signal, and neither is exceeding stock that exists.
     not_signals = [F("UNPARSEABLE", "REVIEW", field="date"), F("STOCK_EXCEEDED", "REVIEW", available=5)]
     assert fraud_signals(not_signals) == [] and decide(not_signals + [pressure]).outcome == HOLD
@@ -110,3 +117,16 @@ def test_an_ungraded_flag_is_an_error_not_an_approval():
     """A flag with no severity can't be weighed, so decide() raises rather than approving past it."""
     with pytest.raises(KeyError):
         decide([{"code": "SOMETHING_NEW"}])
+
+
+def test_ordinary_payment_terms_are_not_fraud(tmp_path):
+    """"Payment by bank transfer... Late fees of 1.5% apply" is how honest invoices read: approved, with the bank-transfer mention on record. Real pressure wording with a wire request is held, not rejected."""
+    import normalizer
+    base = json.loads((INVOICES / "invoice_1004.json").read_text())
+    f = tmp_path / "inv.json"
+    f.write_text(json.dumps(base | {"notes": "Payment by bank transfer to the account below. Late fees of 1.5% apply after 30 days. Penalty interest per contract."}))
+    d = decide(normalizer.load(f, INVENTORY).flags)
+    assert (d.outcome, d.rule, d.warnings) == (APPROVE, "NO_OBJECTION", ("WIRE_REQUEST",))
+    f.write_text(json.dumps(base | {"notes": "URGENT: wire transfer to our new account today to avoid penalties."}))
+    d = decide(normalizer.load(f, INVENTORY).flags)
+    assert (d.outcome, d.rule) == (HOLD, "FRAUD_WORDING")

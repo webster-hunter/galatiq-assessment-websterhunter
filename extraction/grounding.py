@@ -35,6 +35,33 @@ def _found(value: str, text: str) -> bool:
     return re.search(before + re.escape(value) + after, text) is not None
 
 
+def _on_one_row(values: dict, rows: list[str]) -> bool:
+    """Whether a line item's values belong to one row of the document.
+
+    The numbers (quantity, unit price, amount) must all be on a single line: that is what stops
+    a quantity or price being taken from another row. The item name must be on that same line,
+    with one allowance. A long description can wrap:
+
+        Industrial widget, stainless,
+        model A        4    $250.00    $1,000.00
+
+    So a name that is on no single line anywhere may run across the numbers' line and the line
+    before or after it. A name that does fit on one line gets no such allowance, or "WidgetB"
+    could be paired with the numbers on WidgetA's row next to it.
+    """
+    item = values.get("item")
+    numbers = [v for k, v in values.items() if k != "item"]
+    wraps = item is not None and not any(_found(item, row) for row in rows)
+    for k, row in enumerate(rows):
+        if not all(_found(v, row) for v in numbers):
+            continue
+        if item is None or _found(item, row):
+            return True
+        if wraps and any(_found(item, pair) for pair in (" ".join(rows[max(k - 1, 0):k + 1]), " ".join(rows[k:k + 2]))):
+            return True
+    return False
+
+
 _ROW_KEYS = ("item", "quantity", "unit_price", "amount")  # a line item's values share one row of the document
 _TOP_PATHS = {"vendor_name": "vendor.name", "vendor_address": "vendor.address"}  # as the Invoice names them
 
@@ -43,9 +70,9 @@ def ungrounded(transcription: dict, text: str) -> list[dict]:
     """Flag every transcribed value that isn't in the source text.
 
     Invoice-level values, per-line notes and other_fields values are looked for anywhere in the
-    document. A line item's item, quantity, unit price and amount must also sit together on one
-    line of the document, so a quantity borrowed from another row, or a short number that only
-    matches by accident somewhere else, is caught.
+    document. A line item's item, quantity, unit price and amount must also belong to one row of
+    the document (see _on_one_row), so a quantity borrowed from another row, or a short number
+    that only matches by accident somewhere else, is caught.
 
     Args:
         transcription: The model's reply, in the extraction SCHEMA's shape, before any typing.
@@ -75,7 +102,7 @@ def ungrounded(transcription: dict, text: str) -> list[dict]:
         check(f"line_items[{i}].note", line.get("note"))
         values = {k: _squash(line[k]) for k in _ROW_KEYS if isinstance(line.get(k), str) and line[k].strip()}
         each_found = [check(f"line_items[{i}].{k}", line[k]) for k in values]  # a list, so every value is checked
-        if values and all(each_found) and not any(all(_found(v, row) for v in values.values()) for row in rows):
+        if values and all(each_found) and not _on_one_row(values, rows):
             flags.append({"code": "NOT_IN_SOURCE", "field": f"line_items[{i}]", "value": values,
                           "reason": "NOT_ON_ONE_LINE"})
     for i, other in enumerate(transcription.get("other_fields") or []):

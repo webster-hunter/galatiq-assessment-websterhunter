@@ -3,6 +3,7 @@ __pycache__/
 
 # Rebuilt by `python seed_inventory.py`
 *.db
+*.db.*.bak
 
 prep/
 *.egg-info/

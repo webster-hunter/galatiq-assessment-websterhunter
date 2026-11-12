@@ -184,3 +184,118 @@ def test_the_readme_diagram_matches_the_graph(graph):
     for e in graph.get_graph().edges:
         arrow = "-.->" if e.conditional else "-->"
         assert f"{names.get(e.source, e.source)} {arrow} {names.get(e.target, e.target)}" in readme, (e.source, e.target)
+
+
+# --- Fixes from the code review ---------------------------------------------------------------------
+
+def revision_of_1004(tmp_path, label):
+    r = json.loads((INVOICES / "invoice_1004_revised.json").read_text())
+    r["revision"] = label
+    path = tmp_path / f"invoice_1004_{label}.json"
+    path.write_text(json.dumps(r))
+    return path
+
+
+def test_a_second_revision_still_knows_the_original_was_paid(graph, ledger, tmp_path):
+    """1004 paid ($1,890), R1 held, then R2 arrives. R2 is held for the difference from what was paid, not paid in full; R1 leaves the review queue."""
+    assert run(graph, INVOICES / "invoice_1004.json")["result"]["status"] == "PAID"
+    assert run(graph, INVOICES / "invoice_1004_revised.json")["result"]["status"] == "HELD"
+    state = run(graph, revision_of_1004(tmp_path, "R2"))
+    [f] = [f for f in state["invoice"].flags if f["code"] == "REVISION_OF_PAID"]
+    assert (f["earlier_file"], f["already_paid"], f["difference"]) == ("invoice_1004.json", Decimal("1890"), Decimal("4050.00"))
+    assert state["result"]["status"] == "HELD" and ledger.total_paid() == Decimal("1890")
+    assert [(r["revision"], r["status"]) for r in ledger.invoices()] == [(0, "PAID"), (1, "SUPERSEDED"), (2, "HELD")]
+
+
+def test_an_invoice_left_undecided_by_a_failed_run_is_finished_next_time(tmp_path):
+    """A run that dies after recording the invoice leaves it RECEIVED. The next run does not skip it as already processed: it decides it and pays it."""
+    ledger = Ledger(":memory:", pay=lambda vendor, amount: None)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
+    invoice = run(graph, INVOICES / "invoice_1006.csv")["invoice"]
+    ledger._db.execute("UPDATE invoices SET status='RECEIVED'")   # as a crash between register and pay would leave it
+    ledger._db.execute("DELETE FROM payments")
+    state = run(graph, INVOICES / "invoice_1006.csv")
+    assert state["trail"][2] == {"node": "register", "seen": "UNFINISHED", "earlier_file": "invoice_1006.csv",
+                                 "earlier_status": "RECEIVED"}
+    assert state["result"]["status"] == "PAID" and ledger.total_paid() == invoice.total
+
+
+def test_a_failed_payment_is_reported_and_the_batch_continues():
+    """The bank times out on one invoice: that invoice is PAYMENT_UNCONFIRMED, the next one is still processed, and a rerun neither pays the first again nor hides it."""
+    def bank(vendor, amount):
+        if vendor == "Widgets Inc.":
+            raise TimeoutError("no answer")
+
+    ledger = Ledger(":memory:", pay=bank)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
+    first = run(graph, INVOICES / "invoice_1001.txt")["result"]
+    assert (first["status"], first["error"]) == ("PAYMENT_UNCONFIRMED", "TimeoutError: no answer")
+    assert run(graph, INVOICES / "invoice_1006.csv")["result"]["status"] == "PAID"
+    again = run(graph, INVOICES / "invoice_1001.txt")["result"]
+    assert (again["status"], again["earlier_status"]) == ("ALREADY_PROCESSED", "PAYMENT_UNCONFIRMED")
+    assert [p["status"] for p in ledger.payments()] == ["PENDING", "PAID"]
+
+
+def test_a_revision_of_an_unconfirmed_payment_is_not_paid_in_full(tmp_path):
+    """Money may have moved for the original, so its revision is held like a revision of a paid invoice."""
+    def bank(vendor, amount):
+        raise TimeoutError("no answer")
+
+    ledger = Ledger(":memory:", pay=bank)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
+    assert run(graph, INVOICES / "invoice_1004.json")["result"]["status"] == "PAYMENT_UNCONFIRMED"
+    state = run(graph, INVOICES / "invoice_1004_revised.json")
+    assert state["decision"].because == ("REVISION_OF_PAID",) and state["result"]["status"] == "HELD"
+
+
+def test_the_same_bill_under_another_vendor_name_is_held(graph, ledger, tmp_path):
+    """The same number, lines and total with the vendor written differently is not a new invoice to pay: it is held as a possible duplicate, pointing at the first."""
+    assert run(graph, INVOICES / "invoice_1015.csv")["result"]["status"] == "PAID"
+    other = tmp_path / "other_vendor.csv"
+    other.write_text((INVOICES / "invoice_1015.csv").read_text().replace("Reliable Components Inc.", "Reliable Components (formerly RC Ltd.)"))
+    state = run(graph, other)
+    [f] = [f for f in state["invoice"].flags if f["code"] == "POSSIBLE_DUPLICATE"]
+    assert (f["severity"], f["earlier_file"], f["earlier_vendor"]) == ("REVIEW", "invoice_1015.csv", "Reliable Components Inc.")
+    assert state["result"]["status"] == "HELD" and ledger.total_paid() == Decimal("6500")
+
+
+def test_an_original_is_processed_when_its_only_newer_revision_was_rejected(graph, ledger, tmp_path):
+    """R1 arrives first and is rejected (its total doesn't add up). The original, arriving after, is not skipped as superseded: it is the only good version, and is paid."""
+    bad = json.loads((INVOICES / "invoice_1004_revised.json").read_text())
+    bad["total"] = 9999.00
+    (tmp_path / "a_revised.json").write_text(json.dumps(bad))
+    assert run(graph, tmp_path / "a_revised.json")["result"]["status"] == "REJECTED"
+    state = run(graph, INVOICES / "invoice_1004.json")
+    assert state["result"]["status"] == "PAID" and state["trail"][2]["seen"] == "NEW"
+
+
+def test_nodes_do_not_change_the_state_they_are_given(ledger):
+    """validate and register work on a copy of the invoice. Run on the same input state twice, each returns the same flags: nothing is added twice."""
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
+    nodes_ = graph.get_graph().nodes
+    ingested = nodes_["ingest"].data.invoke({"path": str(INVOICES / "invoice_1013.json"), "trail": []})
+    before = list(ingested["invoice"].flags)
+    first = nodes_["validate"].data.invoke(ingested)
+    second = nodes_["validate"].data.invoke(ingested)
+    assert ingested["invoice"].flags == before                       # the input was not touched
+    assert first["invoice"].flags == second["invoice"].flags and len(first["invoice"].flags) == 8
+    # register on a revision of a paid invoice: one REVISION_OF_PAID each time, never two.
+    run(graph, INVOICES / "invoice_1004.json")
+    checked = nodes_["validate"].data.invoke(nodes_["ingest"].data.invoke({"path": str(INVOICES / "invoice_1004_revised.json"), "trail": []}))
+    for _ in range(2):
+        out = nodes_["register"].data.invoke(checked)
+        assert [f["code"] for f in out["invoice"].flags].count("REVISION_OF_PAID") == 1
+    assert not any(f["code"] == "REVISION_OF_PAID" for f in checked["invoice"].flags)
+
+
+def test_fresh_keeps_the_old_ledger_and_says_what_it_means(capsys, tmp_path):
+    """--fresh renames the ledger, never deletes it, and warns that the payments it recorded will be made again."""
+    path = tmp_path / "l.db"
+    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(path)]
+    assert main.main(args) == 0
+    capsys.readouterr()
+    assert main.main(args + ["--fresh"]) == 0
+    err = capsys.readouterr().err
+    [kept] = list(tmp_path.glob("l.db.*.bak"))
+    assert "1 payments, $2,750.00" in err and "will be paid again" in err and kept.name in err
+    assert Ledger(kept).total_paid() == Decimal("2750") and Ledger(path).total_paid() == Decimal("2750")

@@ -14,13 +14,15 @@ file ({"file", "error"} for a file that can't be read); exits 1 if any file is a
 --trace, each step is also printed to stderr as it happens, one JSON line per node.
 
 The ledger (ledger.db) persists between runs, so running a file twice pays it once. --fresh
-starts with an empty one.
+sets it aside (kept, renamed) and starts with an empty one, which means invoices it had paid
+are paid again.
 """
 import argparse
 import json
 import sqlite3
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import normalizer
@@ -33,6 +35,28 @@ from pipeline import build_graph, run
 from seed_inventory import seed
 
 
+def set_aside(ledger_path: Path) -> Path | None:
+    """Move an existing ledger out of the way for --fresh, keeping it, and say what that means.
+
+    The ledger is the only record of what has been paid. Deleting it would erase that record, and
+    the next run would pay the same invoices again without a trace. So the file is renamed with a
+    timestamp, never removed, and the payments it held are reported.
+
+    Returns:
+        Where the old ledger went, or None if there was none.
+    """
+    if not ledger_path.exists():
+        return None
+    old = Ledger(ledger_path)
+    count, total = len(old.payments()), old.total_paid()
+    old.close()
+    kept = ledger_path.with_name(f"{ledger_path.name}.{datetime.now():%Y%m%d-%H%M%S-%f}.bak")
+    ledger_path.rename(kept)
+    print(f"--fresh: the ledger was set aside as {kept.name}. It recorded {count} payments, ${total:,.2f}; "
+          "with an empty ledger those invoices are not recognised and will be paid again.", file=sys.stderr)
+    return kept
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Process an invoice file, or every invoice in a folder.")
     ap.add_argument("--invoice_path", required=True, help="an invoice file or a folder of invoices")
@@ -40,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="SQLite inventory DB (default: inventory.db, created from the seed data if missing)")
     ap.add_argument("--ledger", default="ledger.db",
                     help="SQLite ledger of invoices seen and payments made (default: ledger.db)")
-    ap.add_argument("--fresh", action="store_true", help="start with an empty ledger, forgetting earlier runs")
+    ap.add_argument("--fresh", action="store_true",
+                    help="set the existing ledger aside and start with an empty one. Invoices it had paid will be paid again")
     ap.add_argument("--trace", action="store_true", help="print each pipeline step to stderr as it happens")
     model_options(ap)
     args = ap.parse_args(argv)
@@ -61,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         return emit([{"file": args.inventory, "error": f"{type(e).__name__}: {e}"}])
 
     if args.fresh:
-        Path(args.ledger).unlink(missing_ok=True)
+        set_aside(Path(args.ledger))
     ledger = Ledger(args.ledger)
     graph = build_graph(provider_from(args), inventory, ledger)
     results = []
@@ -80,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
             results.append({"file": str(file), "result": state["result"], "decision": decision,
                             "trail": state["trail"], "invoice": asdict(state["invoice"])})
     paid = [r["result"] for r in results if r.get("result", {}).get("status") == "PAID" and not r["result"]["repeated"]]
+    unconfirmed = [r["file"] for r in results if r.get("result", {}).get("status") == "PAYMENT_UNCONFIRMED"]
+    if unconfirmed:
+        print(f"{len(unconfirmed)} payment(s) sent but not confirmed; check with the bank before anything is "
+              f"paid again: {', '.join(Path(f).name for f in unconfirmed)}", file=sys.stderr)
     print(f"{len(results)} files: paid {len(paid)} now, ${sum(p['amount'] for p in paid):,.2f}. "
           f"Ledger {args.ledger}: {len(ledger.payments())} payments, ${ledger.total_paid():,.2f} in all.", file=sys.stderr)
     return emit(results)

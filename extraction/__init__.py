@@ -117,12 +117,52 @@ def _messages(text: str) -> list[dict]:
 MAX_ATTEMPTS = 3  # the first try plus two retries: a model that hasn't fixed it by then won't
 
 
-def _feedback(ungrounded_flags: list[dict]) -> str:
+_FLAG_KEYS = {"vendor.name": "vendor_name", "vendor.address": "vendor_address"}  # grounding's paths -> schema keys
+
+
+def _unasked_changes(base: dict, complaints: list[dict], reply: dict) -> list[str]:
+    """What a retry changed that it was not asked to change.
+
+    The feedback names specific fields. Anything else in the earlier transcription had passed
+    grounding and must come back exactly as it was. Without this check a model could "fix" a
+    complaint by returning less (no line items, a null total): nothing in such a reply is
+    ungrounded, so it would be accepted, and the invoice would then be rejected for missing data
+    that was in the document all along.
+
+    Args:
+        base: The transcription the feedback was about.
+        complaints: The NOT_IN_SOURCE flags raised on it.
+        reply: The retry.
+
+    Returns:
+        Paths that differ outside the complained-about fields; empty if the retry kept to its brief.
+        A complained-about line item may change in any of its fields, but must still be there.
+    """
+    fields = {f["field"] for f in complaints}
+    top_ok = {_FLAG_KEYS.get(f, f) for f in fields}
+    lines_ok = {int(m[1]) for f in fields if (m := re.match(r"line_items\[(\d+)\]", f))}
+    changed = [k for k in base if k not in ("line_items", "other_fields") and k not in top_ok and reply.get(k) != base[k]]
+    was, now = base.get("line_items") or [], reply.get("line_items") or []
+    if len(now) != len(was):
+        changed.append(f"line_items (had {len(was)}, now {len(now)})")
+    else:
+        changed += [f"line_items[{i}]" for i, (a, b) in enumerate(zip(was, now)) if a != b and i not in lines_ok]
+    if reply.get("other_fields") != base.get("other_fields") and not any(f.startswith("other_fields") for f in fields):
+        changed.append("other_fields")
+    return changed
+
+
+def _feedback(ungrounded_flags: list[dict], changed_unasked: list[str] = ()) -> str:
     """The retry message: exactly which values failed grounding, and the rule each one broke.
 
     Specific on purpose. "Please check your work" gives the model nothing to act on; naming the
     field and the value does. It never suggests a replacement value: the model must go back to
     the document, and "null" is always an allowed answer.
+
+    Args:
+        ungrounded_flags: The NOT_IN_SOURCE flags on the transcription being corrected.
+        changed_unasked: If the last reply changed fields it wasn't asked to (see
+            _unasked_changes), their paths: the message then also says to put them back.
     """
     lines = []
     for f in ungrounded_flags:
@@ -133,7 +173,11 @@ def _feedback(ungrounded_flags: list[dict]) -> str:
                          "A value that is not on the row is null, and an invoice-level figure belongs in its own field.")
         else:
             lines.append(f"- {f['field']}: {f['value']!r} does not appear in the document as written.")
-    return ("Some values in your transcription are not in the document:\n" + "\n".join(lines) + "\n\n"
+    restore = ""
+    if changed_unasked:
+        restore = ("Your last reply also changed values that were not listed and were correct: "
+                   + ", ".join(changed_unasked) + ". Put those back exactly as they were in your reply before it.\n\n")
+    return (restore + "Some values in your transcription are not in the document:\n" + "\n".join(lines) + "\n\n"
             "Return the complete transcription again with only these corrected. Copy each value exactly as the "
             "document writes it, or use null if the document does not state it where it belongs. "
             "Do not invent, correct or compute anything, and change nothing else.")
@@ -152,8 +196,9 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
     If the transcription has values that aren't in the document, the model is shown them and
     asked again, up to max_attempts in all. The loop stops when an attempt is fully grounded,
     when the model returns the same transcription twice running (it isn't going to change), or
-    at the limit. The attempt with the fewest ungrounded values is the one built; any that
-    remain stay on the invoice as NOT_IN_SOURCE flags, so it is held, not trusted.
+    at the limit. A retry that changes anything it wasn't asked to (drops a line item, blanks a
+    total) is never used. Of the usable attempts, the one with the fewest ungrounded values is
+    built; any that remain stay on the invoice as NOT_IN_SOURCE flags, so it is held, not trusted.
 
     Args:
         path: The .txt or .pdf file.
@@ -172,15 +217,19 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
     path = Path(path)
     text = read_text(path)
     messages = _messages(text)
-    attempts, best, previous = [], None, None
+    attempts, best, base, previous = [], None, None, None
     while True:
         t = provider.complete(messages, SCHEMA)
         # Judged on the model's own strings, before any typing: "$1,250.00" is in the document, Decimal("1250.00") isn't.
         problems = ungrounded(t, text)
-        attempts.append({"attempt": len(attempts) + 1, "ungrounded": problems})
-        if best is None or len(problems) < len(best[1]):
-            best = (t, problems)  # fewest ungrounded values; the earlier attempt on a tie
-        if not problems:
+        # A retry is only usable if it changed nothing beyond what it was asked to correct.
+        changed = _unasked_changes(*base, t) if base else []
+        attempts.append({"attempt": len(attempts) + 1, "ungrounded": problems, **({"changed_unasked": changed} if changed else {})})
+        if not changed:
+            base = (t, problems)  # the transcription the next feedback, if any, is about
+            if best is None or len(problems) < len(best[1]):
+                best = base  # fewest ungrounded values; the earlier attempt on a tie
+        if not changed and not problems:
             outcome = "GROUNDED"
         elif t == previous:
             outcome = "REPEATED"  # same answer to the feedback: asking again won't help
@@ -190,7 +239,7 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
             # The model sees its own reply and the specific complaint, then tries again. The reply holds
             # text copied from the vendor's document, so it stays inside the conversation as data.
             messages = messages + [{"role": "assistant", "content": json.dumps(t)},
-                                   {"role": "user", "content": _feedback(problems)}]
+                                   {"role": "user", "content": _feedback(base[1], changed)}]
             previous = t
             attempts[-1]["outcome"] = "RETRY"
             continue

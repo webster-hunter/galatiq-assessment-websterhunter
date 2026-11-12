@@ -430,3 +430,50 @@ def test_feedback_never_suggests_a_value():
     """The complaint names the field and the value that failed, but offers no replacement: the model must return to the document."""
     text = extraction._feedback([{"code": "NOT_IN_SOURCE", "field": "due_date", "value": "2026-03-01"}])
     assert "due_date" in text and "'2026-03-01'" in text and "2026-01-30" not in text
+
+
+# --- Fixes from the code review ---------------------------------------------------------------------
+
+def test_a_retry_that_drops_data_is_never_accepted():
+    """Told about one bad value, the model returns no line items and no total. Nothing in that reply is ungrounded, but it changed what it wasn't asked to, so it is not used: the first attempt is kept and held."""
+    emptied = T1002 | {"line_items": [], "total": None}
+    model = Sequence(BAD_1002, emptied)
+    inv = load(F1002, model, INVENTORY)
+    assert [(a["outcome"], a.get("changed_unasked")) for a in inv.extraction_attempts] == [
+        ("RETRY", None), ("RETRY", ["total", "line_items (had 1, now 0)"]), ("REPEATED", ["total", "line_items (had 1, now 0)"])]
+    assert inv.total == Decimal("15000.00") and len(inv.line_items) == 1
+    codes = [f["code"] for f in inv.flags]
+    assert "NOT_IN_SOURCE" in codes and "TOTAL_MISSING" not in codes and "LINE_ITEMS_MISSING" not in codes
+    # The next feedback says what to put back, as well as repeating the original complaint.
+    feedback = model.sent[2][-1]["content"]
+    assert "changed values that were not listed" in feedback and "total" in feedback and "line_items[0]" in feedback
+
+
+def test_a_retry_may_change_only_the_field_complained_about():
+    """Fixing the named line is allowed (that is the point); touching another field, even to something grounded, is not."""
+    assert extraction._unasked_changes(BAD_1002, ungrounded(BAD_1002, read_text(F1002)), T1002) == []
+    also_dropped_terms = T1002 | {"payment_terms": None}
+    assert extraction._unasked_changes(BAD_1002, ungrounded(BAD_1002, read_text(F1002)), also_dropped_terms) == ["payment_terms"]
+    model = Sequence(BAD_1002, also_dropped_terms, T1002)
+    inv = load(F1002, model, INVENTORY)
+    assert [a["outcome"] for a in inv.extraction_attempts] == ["RETRY", "RETRY", "GROUNDED"] and inv.payment_terms == "Net 30"
+
+
+WRAPPED = """INVOICE INV-7
+Vendor: Long Names Ltd.
+Industrial widget, stainless,
+model A              4    $250.00    $1,000.00
+Bracket              2     $10.00       $20.00
+Total: $1,020.00
+"""
+
+
+def test_a_wrapped_item_name_is_grounded_and_borrowed_values_still_are_not():
+    """A description that runs onto the line before its numbers is one row, not a model error. A name that fits on one line gets no such allowance, and numbers must still share a line."""
+    wrapped = transcription(line_items=[line("Industrial widget, stainless, model A", "4", "$250.00", "$1,000.00"),
+                                        line("Bracket", "2", "$10.00", "$20.00")])
+    assert ungrounded(wrapped, WRAPPED) == []
+    swapped = transcription(line_items=[line("Bracket", "4", "$250.00", "$1,000.00")])       # Bracket with the other row's numbers
+    assert [f["reason"] for f in ungrounded(swapped, WRAPPED)] == ["NOT_ON_ONE_LINE"]
+    mixed = transcription(line_items=[line("Industrial widget, stainless, model A", "2", "$250.00", "$1,000.00")])
+    assert [f["reason"] for f in ungrounded(mixed, WRAPPED)] == ["NOT_ON_ONE_LINE"]      # quantity taken from the Bracket row

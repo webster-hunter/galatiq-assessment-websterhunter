@@ -37,7 +37,11 @@ NEAR_THRESHOLD_BAND = Decimal("0.02")
 # Wording that pushes for fast payment, and requests to pay by wire or to a changed account: the
 # two marks of payment fraud that show in an invoice's own text. Keyword checks, in code, so that
 # rejecting an invoice never depends on a model noticing something. Each is a warning on its own.
-PRESSURE_WORDS = re.compile(r"\b(urgent(ly)?|immediate(ly)?|asap|right away|final notice|penalt(y|ies)|late fees?|legal action)\b", re.I)
+# The lists are narrow on purpose. Ordinary terms are not pressure: "late fees of 1.5% apply" and
+# "penalty" in a terms clause appear on honest invoices, so only "avoid penalties", the phrasing
+# that pushes, is matched. Paying by bank transfer is also ordinary, which is why the policy never
+# rejects on wording alone.
+PRESSURE_WORDS = re.compile(r"\b(urgent(ly)?|immediate(ly)?|asap|right away|final notice|avoid (any |further )?penalt(y|ies)|legal action)\b", re.I)
 WIRE_WORDS = re.compile(r"\b(wire(d| transfers?)?|bank transfers?|(new|updated|changed) (bank )?(account|details)|routing number)\b", re.I)
 
 

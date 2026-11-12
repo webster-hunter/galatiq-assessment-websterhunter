@@ -136,9 +136,11 @@ JSON list on stdout, one `{"file", "result", "decision", "trail", "invoice"}` or
 
 - `--trace` prints each step to stderr as it happens, one JSON line per node.
 - `--offline`, `--model` and `--replays` control the model.
-- `--ledger` names the ledger file (default `ledger.db`); `--fresh` starts with an empty one. The
-  ledger persists, so a second run over the same files reports them as already processed and
-  pays nothing. Use `--fresh` to see a first run again.
+- `--ledger` names the ledger file (default `ledger.db`). The ledger persists, so a second run
+  over the same files reports them as already processed and pays nothing.
+- `--fresh` sets the existing ledger aside (renamed with a timestamp, never deleted) and starts
+  with an empty one, to see a first run again. It warns that the invoices the old ledger had
+  paid will be paid again: fine with the mock payment, not something to do with a real one.
 - `inventory.db` is created from the seed data if it doesn't exist.
 
 Not built yet: the reviewer agent that explains and can tighten a decision, and a review queue for
@@ -185,6 +187,8 @@ graph TD;
 - **Nodes that change the world are safe to repeat.** LangGraph may run a node again after a
   crash or a resume, so `register` and `pay` rely on the ledger: recording is an upsert, and a
   payment carries a key the ledger accepts once.
+- **Nodes don't change what they are given.** `validate` and `register` add flags to a copy of the
+  invoice and return it, so running a node again on the same state gives the same result.
 - **Branches read the state, they don't decide.** The outcome is set by the `approve` node; the
   branch after it only looks at that outcome and picks a node.
 - **A trail of steps.** Every node appends one entry saying what it did. It comes back in the
@@ -212,16 +216,20 @@ people who own it without touching a prompt.
 | Rule | Condition | Outcome |
 |---|---|---|
 | `BLOCKING_FLAG` | Any BLOCK flag | REJECT |
-| `FRAUD_SIGNALS` | Two or more fraud signals | REJECT |
+| `FRAUD_SIGNALS` | Two or more fraud signals, at least one of them a fact and not wording | REJECT |
 | `NEEDS_REVIEW` | Any REVIEW flag | HOLD |
+| `FRAUD_WORDING` | Pressure wording and a wire request together, with nothing else | HOLD |
 | `NEAR_THRESHOLD_WITH_WARNINGS` | Total within 2% below $10,000, plus any other warning | HOLD |
 | `NO_OBJECTION` | None of the above | APPROVE, with any warnings listed |
 
-- **Fraud signals** are four kinds of flag, each weak alone: an item with no stock at all, a due
-  date that isn't a date (`yesterday`), pressure wording (`PRESSURE_LANGUAGE`), and a request to
-  pay by wire or to a changed account (`WIRE_REQUEST`). One is weighed as an ordinary flag; two
-  different kinds reject. The wording checks are keyword matches in code, so a rejection never
-  depends on a model noticing something.
+- **Fraud signals** are four kinds of flag, each weak alone. Two are facts about the invoice: an
+  item with no stock at all, and a due date that isn't a date (`yesterday`). Two are wording:
+  pressure to pay fast (`PRESSURE_LANGUAGE`) and a request to pay by wire or to a changed account
+  (`WIRE_REQUEST`). One signal is weighed as an ordinary flag. Two different kinds reject, but
+  only if at least one is a fact: honest invoices ask for bank transfers and mention deadlines,
+  so wording alone can hold an invoice for a person and never rejects it. The wording checks are
+  narrow keyword matches in code ("late fees apply" is not pressure; "avoid penalties" is), so a
+  rejection never depends on a model noticing something.
 - **INFO notes are never a reason** for any outcome.
 - **It is a floor.** Later stages may make an outcome stricter (approve, then hold, then reject),
   never looser.
@@ -260,8 +268,8 @@ every invoice processed and every payment made.
 `INV-1012`, `INV 1012` and `1012` are one number, and `R1` is revision 1. Two vendors can both
 issue a 1001, so the vendor is part of it.
 
-**Same invoice, different file.** Sameness is judged on content: a fingerprint of the vendor,
-number, revision, total and each line's item, quantity and price. A PDF and a TXT of one invoice
+**Same invoice, different file.** Sameness is judged on content: a fingerprint of the number,
+revision, total and each line's item, quantity and price. A PDF and a TXT of one invoice
 match although the PDF omits the subtotal line.
 
 | The ledger finds | What happens |
@@ -270,14 +278,19 @@ match although the PDF omits the subtotal line.
 | This same file, processed before | Skipped as `ALREADY_PROCESSED`, with the earlier outcome |
 | Another file with the same invoice and content | Skipped as `SKIPPED_DUPLICATE`, pointing at the first |
 | Same vendor, number and revision, different content | `DUPLICATE_CONFLICT` (REVIEW): held. The first record is untouched |
-| A revision of an invoice already paid | `REVISION_OF_PAID` (REVIEW), with the amount paid and the difference: held |
+| A revision of an invoice with any earlier revision paid | `REVISION_OF_PAID` (REVIEW), with everything paid so far and the difference: held. Earlier revisions still held are replaced by it |
 | A revision of an invoice not paid | The earlier one is marked superseded; the revision is judged on its own (`SUPERSEDES_UNPAID`, INFO) |
-| An older revision than one on record | Skipped as `SKIPPED_SUPERSEDED` |
+| An older revision than a live one on record | Skipped as `SKIPPED_SUPERSEDED`. If every newer revision was rejected, it is processed normally |
+| The same number and content under a different vendor name | `POSSIBLE_DUPLICATE` (REVIEW): held, pointing at the first |
+| Recorded by an earlier run that stopped before deciding it | Finished now, not skipped |
 
 **Paying once.** `mock_payment` is the brief's function. Each payment has a key built from the
 invoice's identity, and the ledger holds at most one payment per key. The payment row is written
-as PENDING before the payment function is called and marked PAID after it returns, so a crash in
-between leaves a PENDING row that stops a blind retry: the first call may have gone through.
+as PENDING before the payment function is called and marked PAID after it returns. If the call
+fails or the process dies in between, the PENDING row stops a blind retry, since the first call
+may have gone through. The invoice is reported as `PAYMENT_UNCONFIRMED` for a person to check
+with the bank, a revision of it is treated like a revision of a paid invoice, and the rest of
+the batch carries on.
 
 ### The sample folder, in file order
 
@@ -327,8 +340,9 @@ doesn't was invented or altered by the model, for example an OCR error it "fixed
 reconciles perfectly.
 
 - Matching is on whole tokens, so `5` is not found inside `$500.00` or `2026-01-15`.
-- A line item's item, quantity, price and amount must sit together on one line of the document, so
-  a value taken from another row is caught (`NOT_ON_ONE_LINE`).
+- A line item's quantity, price and amount must sit together on one line of the document, with
+  its item name, so a value taken from another row is caught (`NOT_ON_ONE_LINE`). A long item
+  name that wraps onto the line before or after its numbers is still one row.
 - It proves a value wasn't made up. It does not prove the value is in the right field, and it can't
   see a line the model left out; the arithmetic checks catch that.
 
@@ -339,9 +353,13 @@ up to three attempts in all. The complaint never suggests a replacement, and nul
 - Only grounding failures are retried, because only they are the model's mistakes. A total that
   doesn't add up (1013) or OCR damage copied as written (1012) is what the document says;
   retrying would push the model to change it.
+- A retry may change only what was complained about. One that changes anything else (drops a
+  line item, blanks the total) is never used, and the next message says what to put back.
+  Otherwise a model could clear a complaint by returning less, and the invoice would be
+  rejected for missing data that was in the document.
 - The loop stops when an attempt is fully grounded, when the model returns the same transcription
-  twice running, or at the limit. The attempt with the fewest ungrounded values is used, and any
-  that remain stay on the invoice as `NOT_IN_SOURCE`, so it is held.
+  twice running, or at the limit. Of the usable attempts, the one with the fewest ungrounded
+  values is built, and any that remain stay on the invoice as `NOT_IN_SOURCE`, so it is held.
 - Every attempt is kept on the invoice in `extraction_attempts` (what failed, and why the loop
   stopped), and a file that needed more than one attempt carries an `EXTRACTION_RETRIED` note.
 
@@ -571,6 +589,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `STOCK_EXCEEDED` | item | REVIEW | Quantity summed across all of the item's lines exceeds stock |
 | `STOCK_UNKNOWN` | item | REVIEW | Inventory has no usable stock number for the item |
 | `REVISION_OF_PAID` | `earlier_file`, `already_paid`, `difference` | REVIEW | From the ledger: this revises an invoice that was already paid |
+| `POSSIBLE_DUPLICATE` | `earlier_file`, `earlier_vendor`, `earlier_status` | REVIEW | From the ledger: the same number and content as an invoice on record under a different vendor name |
 | `DUPLICATE_CONFLICT` | `earlier_file`, `earlier_total` | REVIEW | From the ledger: same vendor, number and revision as an earlier invoice, with different content |
 | `NOT_IN_SOURCE` | the field, or `line_items[i]` with reason `NOT_ON_ONE_LINE` | REVIEW | LLM extraction only: the model returned a value the document doesn't contain |
 | `INVENTORY_NOT_CHECKED` | `skipped`: the checks that didn't run | REVIEW | No inventory was given, so products and stock are unverified |

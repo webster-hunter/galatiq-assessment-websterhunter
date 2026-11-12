@@ -72,11 +72,11 @@ python main.py --invoice_path=data/invoices/invoice_1013.pdf --offline
 ## The whole folder: what gets paid, and that it is paid once
 
 ```bash
-python main.py --invoice_path=data/invoices --offline --fresh > /dev/null    # first run
-python main.py --invoice_path=data/invoices --offline > /dev/null            # second run
+python main.py --invoice_path=data/invoices --offline --ledger demo.db > /dev/null    # first run
+python main.py --invoice_path=data/invoices --offline --ledger demo.db > /dev/null    # second run
 ```
 
-Each run prints a one-line summary on stderr (and the brief's "Paid ... to ..." line per payment).
+`demo.db` is a ledger of its own for the demo (delete it to start over). Each run prints a one-line summary on stderr (and the brief's "Paid ... to ..." line per payment).
 
 | | First run | Second run |
 |---|---|---|
@@ -92,7 +92,7 @@ Each run prints a one-line summary on stderr (and the brief's "Paid ... to ..." 
   ($3,000.00), and 1012 would be in the review queue twice.
 - **1004's revision is held.** The original ($1,890.00) is paid first; the revision ($5,940.00)
   then arrives and is held with the $4,050.00 difference for a person to settle.
-- **1003 is rejected on four fraud signals**, each from a check in code: FakeItem has no stock,
+- **1003 is rejected on four fraud signals** (two of them facts, not wording), each from a check in code: FakeItem has no stock,
   the due date is "yesterday", the notes say "URGENT... penalties", and they ask for a wire.
 - **1012 is held although nothing on it is wrong any more.** It is $25 under the $10K limit and
   carries repairs and other warnings.

@@ -25,6 +25,7 @@ badly. The reviewer and critic loop is an edge that points backwards. A held inv
 that pauses and is resumed later by a person. Both are built-in graph features, and both slot
 into this file as new nodes and edges without changing the stages themselves.
 """
+import copy
 import operator
 from decimal import Decimal
 from pathlib import Path
@@ -113,7 +114,11 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
 
     def validate(state: State) -> dict:
         """Stage 2. Repair what the invoice proves, run every check against the inventory, grade each flag."""
-        invoice = normalizer.check(state["invoice"], inventory)
+        # check() adds flags to the invoice it is given. A node must not change the state it was
+        # handed: if LangGraph runs it again (after a crash, or resuming a paused run) it would
+        # then start from an invoice that already has those flags and add them a second time.
+        # So work on a copy and return it.
+        invoice = normalizer.check(copy.deepcopy(state["invoice"]), inventory)
         return {"invoice": invoice, "trail": _step("validate", flags=[f["code"] for f in invoice.flags])}
 
     def register(state: State) -> dict:
@@ -123,7 +128,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         the run here (an exact duplicate needs no decision) or travels on as a flag, so that the
         policy, not this node, decides what a revision or a conflict means.
         """
-        invoice = state["invoice"]
+        invoice = copy.deepcopy(state["invoice"])  # a copy, for the same reason as in validate
         found = ledger.seen(invoice)
         earlier = found.earlier or {}
         step = {"seen": found.kind, **({"earlier_file": earlier["source_file"], "earlier_status": earlier["status"]} if earlier else {})}
@@ -145,13 +150,19 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         if found.kind == seen.UNIDENTIFIED:  # no invoice number; INVOICE_NUMBER_MISSING already holds it
             return {"recorded": False, "trail": _step("register", **step)}
         if found.kind == seen.REVISION_OF_PAID:
-            paid = Decimal(earlier["total"])
-            flag("REVISION_OF_PAID", earlier_file=earlier["source_file"], already_paid=paid,
-                 difference=invoice.total - paid if invoice.total is not None else None)
+            # paid_total covers every earlier revision that was paid, not only the latest one.
+            flag("REVISION_OF_PAID", earlier_file=earlier["source_file"], already_paid=found.paid_total,
+                 difference=invoice.total - found.paid_total if invoice.total is not None else None)
         elif found.kind == seen.REVISION_OF_UNPAID:
-            ledger.supersede(earlier, invoice.source_file)
             flag("SUPERSEDES_UNPAID", earlier_file=earlier["source_file"], earlier_status=earlier["status"])
-        ledger.record(invoice, "RECEIVED")
+        elif found.kind == seen.SAME_BILL_OTHER_VENDOR:
+            flag("POSSIBLE_DUPLICATE", earlier_file=earlier["source_file"], earlier_vendor=earlier["vendor"],
+                 earlier_status=earlier["status"])
+        for replaced in found.replaces:  # earlier revisions still held or unfinished: this one takes their place
+            ledger.supersede(replaced, invoice.source_file)
+        # NEW, UNFINISHED (an earlier run recorded it and stopped), a revision, or a possible duplicate:
+        # all go on to approval. record() is an upsert, so repeating it is harmless.
+        ledger.record(invoice, seen.RECEIVED)
         return {"invoice": invoice, "recorded": True, "trail": _step("register", **step)}
 
     def skip(state: State) -> dict:
@@ -172,8 +183,11 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     def pay(state: State) -> dict:
         """Stage 4, approved branch. Pay through the ledger, which pays any one invoice only once."""
         payment = ledger.pay(state["invoice"])
-        result = {"status": payment["status"], **payment}
-        settle(state, payment["status"], payment["payment_key"])
+        # PENDING means the payment was sent, now or earlier, and never confirmed. It is not PAID
+        # and must not be retried: it is reported for a person to check.
+        status = "PAID" if payment["status"] == "PAID" else "PAYMENT_UNCONFIRMED"
+        result = {**payment, "status": status}
+        settle(state, status, payment.get("error") or payment["payment_key"])
         return {"result": result, "trail": _step("pay", **result)}
 
     def hold(state: State) -> dict:

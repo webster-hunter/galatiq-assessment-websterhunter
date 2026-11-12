@@ -8,9 +8,10 @@ An invoice is identified by three things:
 
 The vendor is part of the identity because two vendors can both issue an invoice 1001.
 
-Whether two files are the same invoice is decided by content, not by file name or bytes: a hash
-of the vendor, number, revision, total and each line's item, quantity and unit price. So a PDF
-and a TXT of one invoice match although the PDF leaves out the subtotal line.
+Whether two files are the same invoice is decided by content, not by file name or bytes: a
+fingerprint of the number, revision, total and each line's item, quantity and unit price. So a
+PDF and a TXT of one invoice match although the PDF leaves out the subtotal line. The vendor is
+not in the fingerprint, so the same bill under a slightly different vendor name can be noticed.
 """
 import hashlib
 import re
@@ -34,6 +35,13 @@ SUPERSEDED = "SUPERSEDED"                # a newer revision has already been pro
 REVISION_OF_PAID = "REVISION_OF_PAID"    # this revises an invoice that was already paid
 REVISION_OF_UNPAID = "REVISION_OF_UNPAID"  # this revises one that wasn't paid; that one is now superseded
 UNIDENTIFIED = "UNIDENTIFIED"            # no invoice number, so nothing to look up
+UNFINISHED = "UNFINISHED"                # recorded by an earlier run that stopped before deciding it
+SAME_BILL_OTHER_VENDOR = "SAME_BILL_OTHER_VENDOR"  # same number and content, under a different vendor name
+
+# Invoice statuses. RECEIVED is the only one that isn't an outcome: it means "recorded, not decided".
+RECEIVED = "RECEIVED"
+MONEY_MAY_HAVE_MOVED = ("PAID", "PAYMENT_UNCONFIRMED")  # a revision of either must not be paid in full
+OPEN = (RECEIVED, "HELD")                               # not paid, not closed: a newer revision replaces these
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS invoices (
@@ -67,17 +75,30 @@ def identity(inv: Invoice) -> tuple[str, str, int] | None:
 
 
 def content_hash(inv: Invoice) -> str:
-    """A fingerprint of what the invoice bills: who, which number, how much, for which lines."""
-    parts = [*map(str, identity(inv) or ("", "", 0)), _plain(inv.total)]
+    """A fingerprint of what the invoice bills: which number and revision, how much, for which lines.
+
+    The vendor is left out on purpose. Within one vendor it adds nothing, and across vendors its
+    absence is what lets "QuickShip Distributers" and "QuickShip Distributers (formerly FastShip
+    Ltd.)" be recognised as the same bill.
+    """
+    parts = [*map(str, (identity(inv) or ("", "", 0))[1:]), _plain(inv.total)]
     parts += [f"{_alnum(li.item)}|{_plain(li.quantity)}|{_plain(li.unit_price)}" for li in inv.line_items]
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
 class Seen:
-    """The ledger's answer about one invoice: what kind of arrival it is, and the earlier record it relates to, if any."""
+    """The ledger's answer about one invoice.
+
+    kind: what sort of arrival it is (the constants above).
+    earlier: the record it was compared with, if any.
+    paid_total: for REVISION_OF_PAID, everything already paid across earlier revisions.
+    replaces: earlier revisions still open (held or unfinished), which this revision replaces.
+    """
     kind: str
     earlier: dict | None = None
+    paid_total: Decimal | None = None
+    replaces: tuple = ()
 
 
 class Ledger:
@@ -98,35 +119,62 @@ class Ledger:
     def close(self) -> None:
         self._db.close()
 
-    def _row(self, key, revision=None):
-        if revision is None:  # the highest revision on record for this vendor and number
-            sql, args = "SELECT * FROM invoices WHERE vendor_key=? AND number_key=? ORDER BY revision DESC LIMIT 1", key[:2]
-        else:
-            sql, args = "SELECT * FROM invoices WHERE vendor_key=? AND number_key=? AND revision=?", (*key[:2], revision)
-        row = self._db.execute(sql, args).fetchone()
-        return dict(row) if row else None
+    def _history(self, vendor_key: str, number_key: str) -> list[dict]:
+        """Every revision on record for one vendor and number, lowest revision first."""
+        return [dict(r) for r in self._db.execute(
+            "SELECT * FROM invoices WHERE vendor_key=? AND number_key=? ORDER BY revision", (vendor_key, number_key))]
 
     def seen(self, inv: Invoice) -> Seen:
         """Compare an invoice with what is on record. Changes nothing.
 
+        It looks at the invoice's whole history, not only the latest revision: what matters for
+        a revision is whether money has already gone out for ANY earlier one.
+
         Returns:
-            Seen(kind, earlier), where kind is one of the constants at the top of this module and
-            earlier is the record it was compared with (None for NEW and UNIDENTIFIED).
+            Seen(kind, earlier, ...), where kind is one of the constants at the top of this
+            module and earlier is the record it was compared with (None for NEW and UNIDENTIFIED).
         """
         key = identity(inv)
         if key is None:
             return Seen(UNIDENTIFIED)
-        same = self._row(key, key[2])
+        vendor_key, number_key, revision = key
+        history = self._history(vendor_key, number_key)
+        fingerprint = content_hash(inv)
+
+        same = next((r for r in history if r["revision"] == revision), None)
         if same:
-            if same["content_hash"] != content_hash(inv):
+            if same["content_hash"] != fingerprint:
                 return Seen(CONFLICT, same)
-            return Seen(SAME_FILE if same["source_file"] == inv.source_file else DUPLICATE, same)
-        latest = self._row(key)
-        if latest is None:
-            return Seen(NEW)
-        if latest["revision"] > key[2]:
-            return Seen(SUPERSEDED, latest)
-        return Seen(REVISION_OF_PAID if latest["status"] == "PAID" else REVISION_OF_UNPAID, latest)
+            if same["status"] != RECEIVED:
+                return Seen(SAME_FILE if same["source_file"] == inv.source_file else DUPLICATE, same)
+            # RECEIVED: recorded but never decided, because an earlier run stopped partway.
+            # Skipping it as "already processed" would leave it undecided for good, so it is
+            # finished now. It still goes through the revision checks below, exactly as a new
+            # arrival would: an unfinished revision of a paid invoice is still that.
+
+        # A newer revision replaces this one only while it is still live. If every newer revision
+        # was rejected, this one is the best there is and is processed normally.
+        newer = [r for r in history if r["revision"] > revision and r["status"] != "REJECTED"]
+        if newer:
+            return Seen(SUPERSEDED, newer[-1])
+
+        older = [r for r in history if r["revision"] < revision]
+        paid = [r for r in older if r["status"] in MONEY_MAY_HAVE_MOVED]
+        open_ = tuple(r for r in older if r["status"] in OPEN)  # held or unfinished: replaced by this revision
+        if paid:
+            return Seen(REVISION_OF_PAID, paid[-1], paid_total=sum((Decimal(r["total"]) for r in paid), Decimal(0)),
+                        replaces=open_)
+        if open_:
+            return Seen(REVISION_OF_UNPAID, open_[-1], replaces=open_)
+
+        # Nothing under this vendor. The same number, revision and content under another vendor
+        # name is probably one invoice whose vendor was written or read differently.
+        other = self._db.execute("SELECT * FROM invoices WHERE number_key=? AND revision=? AND content_hash=? "
+                                 "AND vendor_key<>? AND status<>'REJECTED' LIMIT 1",
+                                 (number_key, revision, fingerprint, vendor_key)).fetchone()
+        if other:
+            return Seen(SAME_BILL_OTHER_VENDOR, dict(other))
+        return Seen(UNFINISHED, same) if same else Seen(NEW)
 
     def record(self, inv: Invoice, status: str, detail: str | None = None) -> None:
         """Add the invoice, or update the status of the one already recorded under its identity."""
@@ -139,7 +187,7 @@ class Ledger:
                  self._now().isoformat()))
 
     def supersede(self, earlier: dict, by_file: str) -> None:
-        """Mark an earlier, unpaid revision as replaced, so it is not paid or reviewed on its own."""
+        """Mark an earlier, open revision as replaced, so it is not paid or reviewed on its own."""
         with self._db:
             self._db.execute("UPDATE invoices SET status='SUPERSEDED', detail=?, updated_at=? "
                              "WHERE vendor_key=? AND number_key=? AND revision=?",
@@ -150,13 +198,17 @@ class Ledger:
         """Pay the invoice once. A second call for the same invoice pays nothing and says so.
 
         The payment row is written as PENDING before the payment function is called, and marked
-        PAID after it returns. So if the process dies in between, the PENDING row is still there:
-        the next attempt does not call the payment function again, because the first call may
-        have gone through. That payment needs a person to check; it is never retried blindly.
+        PAID after it returns. If the call raises (a timeout, a dropped connection), or the
+        process dies in between, the PENDING row stays: the payment may have gone through, so it
+        is never sent again blindly. It needs a person to check with the bank.
+
+        A failure of the payment function is caught here and reported in the result, so one bad
+        payment costs one invoice and the rest of a batch carries on.
 
         Returns:
             {"payment_key", "amount", "status", "repeated"}: status is PAID, or PENDING for a
-            payment whose first attempt never confirmed; repeated is True if nothing was sent now.
+            payment that never confirmed (with "error" if it failed just now); repeated is True
+            if nothing was sent now.
 
         Raises:
             ValueError: The invoice has no identity or no positive total. Approval should never
@@ -173,7 +225,11 @@ class Ledger:
         except sqlite3.IntegrityError:
             row = self._db.execute("SELECT amount, status FROM payments WHERE payment_key=?", (pkey,)).fetchone()
             return {"payment_key": pkey, "amount": Decimal(row["amount"]), "status": row["status"], "repeated": True}
-        self._pay(inv.vendor_name, inv.total)
+        try:
+            self._pay(inv.vendor_name, inv.total)
+        except Exception as e:  # whatever the payment API throws: we can't know whether money moved
+            return {"payment_key": pkey, "amount": inv.total, "status": "PENDING", "repeated": False,
+                    "error": f"{type(e).__name__}: {e}"}
         with self._db:
             self._db.execute("UPDATE payments SET status='PAID' WHERE payment_key=?", (pkey,))
         return {"payment_key": pkey, "amount": inv.total, "status": "PAID", "repeated": False}
