@@ -24,6 +24,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["normalizer", "extraction", "approval", "ledger", "pipeline", "rates", "web"]  # explicit: data/, tests/ and seed_inventory.py are not part of the package
 
+[tool.setuptools.package-data]
+web = ["static/*"]  # the page, its styles and the compiled script
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

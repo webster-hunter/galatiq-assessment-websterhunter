@@ -349,12 +349,18 @@ class Ledger:
                                     (why, self._now().isoformat(), entry["vendor_key"], entry["number_key"], entry["revision"]))
         return done.rowcount > 0
 
-    def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None, amount: Decimal | None = None) -> None:
-        """Record a person's decision on a queued invoice: who, what, why, and any amount they set."""
+    def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None, amount: Decimal | None = None) -> bool:
+        """Record a person's decision on a queued invoice: who, what, why, and any amount they set.
+
+        Returns:
+            True if this call recorded the decision. False if the entry was no longer waiting:
+            someone else decided it first, and that decision stands.
+        """
         with self._db:
-            self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, amount=?, resolved_at=? "
+            done = self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, amount=?, resolved_at=? "
                              "WHERE thread_id=? AND status='WAITING'",
                              (action, reviewer, note, _plain(amount) or None, self._now().isoformat(), thread_id))
+        return done.rowcount > 0
 
     def vendor_history(self, vendor_name: str | None) -> list[dict]:
         """What is on record for a vendor: each of its invoices with its number, revision, total and outcome.

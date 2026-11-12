@@ -18,6 +18,8 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: v
 h3 { font-size: 14px; margin: 22px 0 8px; }
 #totals { margin: 0; color: var(--muted); }
 #problem { margin: 12px 20px 0; padding: 10px 14px; background: var(--block-bg); color: var(--block); border-radius: 6px; }
+#outcome { margin: 12px 20px 0; max-width: 1240px; }
+.small.warn { color: var(--block); }
 main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 20px; padding: 4px 20px 40px; max-width: 1280px; }
 @media (max-width: 760px) { main { grid-template-columns: 1fr; padding: 4px 16px 32px; } }
 nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }

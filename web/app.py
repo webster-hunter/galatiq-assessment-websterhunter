@@ -3,6 +3,7 @@
     GET  /api/queue                 what is waiting, what was decided, and what has been paid
     GET  /api/queue/{id}            one held invoice in full
     POST /api/queue/{id}/decision   {"action": "approve" | "reject", "reviewer": "...", "note": "..."}
+    POST /api/queue/{id}/reopen     put back an invoice whose saved run is gone, to be processed again
 
 This adds no rules of its own. Listing reads the ledger and the saved runs; deciding calls
 pipeline.release, so what may be approved, what is paid and
@@ -13,24 +14,28 @@ connections belong to the thread that opened them, and the server answers each r
 whichever worker thread is free.
 
 There is no login. The server listens on this machine only, and a reviewer is whoever types
-their name.
+their name. Requests addressed to any other host name are refused: without that check, a web
+page the reviewer has open could point its own domain at 127.0.0.1 and post decisions here.
 """
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
 from extraction import Replay
 from ledger import Ledger
 from ledger.ledger import currency_of
+from ledger.payment import payment_key
 from normalizer.__main__ import _json_default
 from normalizer.severity import MEANING
-from pipeline import build_graph, cannot_approve, checkpointer, conversion, release
+from pipeline import build_graph, cannot_approve, checkpointer, conversion, payable, release
 from pipeline.graph import _thread
 from rates import MockRates
 
@@ -49,11 +54,9 @@ def _plain(value):
 
 
 def _pays(invoice) -> dict:
-    """What approving this invoice would pay: its total, or for a revision of a paid invoice, the difference."""
-    revision = next((f for f in invoice.flags if f["code"] == "REVISION_OF_PAID"), None)
-    if revision:
-        return {"amount": revision["difference"], "currency": currency_of(invoice), "already_paid": revision["already_paid"]}
-    return {"amount": invoice.total, "currency": currency_of(invoice), "already_paid": None}
+    """What approving this invoice would pay, by the rule release() pays by (pipeline.payable)."""
+    amount, already_paid = payable(invoice)
+    return {"amount": amount, "currency": currency_of(invoice), "already_paid": already_paid}
 
 
 def _summary(entry: dict, state: dict, rates) -> dict:
@@ -71,7 +74,18 @@ def _summary(entry: dict, state: dict, rates) -> dict:
     }
 
 
-def _detail(entry: dict, state: dict, rates) -> dict:
+def _decided(entry: dict, payments: dict) -> dict:
+    """One row of the decided list, with the payment made for it, if any: its amount, currency and whether it confirmed."""
+    payment = None
+    if entry["number_key"] is not None:
+        payment = payments.get(payment_key(entry["vendor_key"], entry["number_key"], entry["revision"]))
+    return {"id": entry["id"], "file": entry["source_file"], "vendor": entry["vendor"], "total": entry["total"],
+            "status": entry["status"], "action": entry["action"], "reviewer": entry["reviewer"], "note": entry["note"],
+            "payment": payment and entry["action"] == "approve" and {
+                "amount": payment["amount"], "currency": payment["currency"], "status": payment["status"]} or None}
+
+
+def _detail(entry: dict, state: dict, rates, stuck: bool) -> dict:
     """Everything a reviewer needs to decide one invoice."""
     invoice = state["invoice"]
     advice = state.get("assessment")
@@ -79,6 +93,8 @@ def _detail(entry: dict, state: dict, rates) -> dict:
               "detail": {k: v for k, v in f.items() if k not in ("code", "severity")}} for f in invoice.flags]
     return {
         **_summary(entry, state, rates),
+        # Decided, but the run never resumed: the decision as recorded, to be carried out again.
+        "stuck": stuck and {"action": entry["action"], "reviewer": entry["reviewer"], "note": entry["note"]},
         "status": entry["status"], "invoice_number": invoice.invoice_number, "date": invoice.date, "due_date": invoice.due_date,
         "payment_terms": invoice.payment_terms, "notes": invoice.notes,
         "subtotal": invoice.subtotal, "tax_amount": invoice.tax_amount, "shipping": invoice.shipping,
@@ -96,15 +112,21 @@ def _detail(entry: dict, state: dict, rates) -> dict:
     }
 
 
-def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates_path="rates.db") -> FastAPI:
+def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates_path="rates.db",
+               allowed_hosts=("127.0.0.1", "localhost")) -> FastAPI:
     """The review application.
 
     Args:
         ledger_path: The ledger main.py wrote.
         checkpoints_path: The saved runs main.py wrote. A held invoice can only be decided with these.
         rates_path: The exchange-rate table. Without one, a foreign-currency invoice shows no dollar estimate.
+        allowed_hosts: The host names this server answers to. A request for any other is refused.
     """
-    app = FastAPI(title="Invoice review", docs_url="/api/docs", redoc_url=None)
+    app = FastAPI(title="Invoice review", docs_url=None, redoc_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
+    # One decision at a time. release() already refuses a second decision on the same invoice;
+    # this also keeps two requests from resuming runs against the same files at once.
+    deciding = threading.Lock()
 
     @contextmanager
     def session():
@@ -137,9 +159,8 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
             everything = ledger.queue(status=None)
             waiting = [_summary(e, saved(graph, e), rates) | {"stuck": e["id"] in stuck and {"action": e["action"], "reviewer": e["reviewer"]}}
                        for e in everything if e["status"] == "WAITING" or e["id"] in stuck]
-            decided = [{"id": e["id"], "file": e["source_file"], "vendor": e["vendor"], "total": e["total"], "status": e["status"],
-                        "action": e["action"], "reviewer": e["reviewer"], "note": e["note"], "amount": e["amount"]}
-                       for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
+            payments = {p["payment_key"]: p for p in ledger.payments()}
+            decided = [_decided(e, payments) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
             return _plain({"waiting": waiting, "decided": decided[::-1], "paid": ledger.paid_totals(),
                            "payments": len(ledger.payments())})
 
@@ -149,20 +170,38 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
             entry = ledger.queue_entry(queue_id)
             if entry is None:
                 raise HTTPException(404, f"No queue number {queue_id}.")
+            stuck = any(e["id"] == queue_id for e in ledger.decided_not_finished())
+            if entry["status"] != "WAITING" and not stuck:
+                how = f"{entry['action']} by {entry['reviewer']}" if entry["action"] else entry["status"].lower()
+                raise HTTPException(409, f"{entry['source_file']} is no longer waiting: it was already decided ({how}).")
             state = saved(graph, entry)
             if not state:
-                raise HTTPException(409, f"{entry['source_file']} has no saved run under these checkpoints, so it can't be shown "
-                                         "or decided here. Start the server with the --checkpoints file main.py used.")
-            return _plain(_detail(entry, state, rates))
+                raise HTTPException(409, f"The saved run for {entry['source_file']} was not found, so it can't be decided. "
+                                         "Put it back to be processed again, then run main.py on the file.")
+            return _plain(_detail(entry, state, rates, stuck))
 
     @app.post("/api/queue/{queue_id}/decision")
     def decide(queue_id: int, decision: Decision):
         with session() as (ledger, graph, rates):
             try:
-                state = release(graph, ledger, queue_id, decision.action, decision.reviewer, decision.note, rates=rates)
+                with deciding:
+                    state = release(graph, ledger, queue_id, decision.action, decision.reviewer, decision.note, rates=rates)
             except ValueError as e:
                 raise HTTPException(400, str(e))
-            return _plain({"file": state["invoice"].source_file, "result": state["result"], "review": state["review"]})
+            return _plain({"file": state["invoice"].source_file, "vendor": state["invoice"].vendor_name,
+                           "result": state["result"], "review": state["review"]})
+
+    @app.post("/api/queue/{queue_id}/reopen")
+    def reopen(queue_id: int):
+        """For a waiting invoice whose saved run is gone: close the entry as LOST and return the invoice to unprocessed."""
+        with session() as (ledger, graph, rates), deciding:
+            entry = ledger.queue_entry(queue_id)
+            if entry is None or entry["status"] != "WAITING":
+                raise HTTPException(400, f"No invoice is waiting under queue number {queue_id}.")
+            if saved(graph, entry):
+                raise HTTPException(400, f"{entry['source_file']} still has its saved run: decide it instead.")
+            ledger.reopen(entry, "its saved run was not found, so it could not be released")
+            return {"file": entry["source_file"]}
 
     @app.get("/")
     def page():

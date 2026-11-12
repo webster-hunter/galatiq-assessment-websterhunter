@@ -615,7 +615,7 @@ def test_fresh_warning_reports_every_currency_paid(capsys, tmp_path):
     main.main([f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", *where])
     main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
     assert "1 held for review. Open the review screen with: python -m web" in capsys.readouterr().err
-    reviewed = TestClient(create_app(*where[1::2])).post("/api/queue/1/decision", json={"action": "approve", "reviewer": "Dana"})
+    reviewed = TestClient(create_app(*where[1::2]), base_url="http://127.0.0.1:8000").post("/api/queue/1/decision", json={"action": "approve", "reviewer": "Dana"})
     assert reviewed.status_code == 200
     capsys.readouterr()
     main.main([f"--invoice_path={INVOICES / 'invoice_1001.txt'}", "--offline", "--fresh", *where])
@@ -728,3 +728,15 @@ def test_without_recordings_the_policy_decides_alone(tmp_path):
         state = run(graph, INVOICES / name)
         assert state["result"]["status"] == status and state["assessment"]["by"] == "policy"
         assert ("reviewer agent unavailable" in state["assessment"].get("note", "")) == (status == "HELD")
+
+
+def test_two_decisions_on_one_invoice_the_second_is_refused_and_nothing_resumes_twice(graph, ledger, monkeypatch):
+    """Two reviewers decide the same invoice at the same moment: both see it waiting, one records the decision first. The other is told so and its run is not resumed, so an invoice can't be both paid and rejected."""
+    queue_id, _ = held(graph, "invoice_1005.json")
+    entry = ledger.queue_entry(queue_id)
+    assert ledger.resolve(entry["thread_id"], "reject", "First Reviewer", "Over stock") is True      # the other request got there first
+    monkeypatch.setattr(ledger, "queue_entry", lambda _id: entry)                                     # this one still sees WAITING
+    with pytest.raises(ValueError, match="decided by someone else a moment ago"):
+        release(graph, ledger, queue_id, "approve", "Second Reviewer")
+    assert ledger.payments() == [] and ledger.invoices()[0]["status"] == "HELD"
+

@@ -5,6 +5,6 @@
 Nothing in normalizer, extraction or approval imports LangGraph. The graph only decides what runs
 next; each node calls one function from those packages.
 """
-from .graph import State, build_graph, cannot_approve, checkpointer, conversion, release, run
+from .graph import State, build_graph, cannot_approve, checkpointer, conversion, payable, release, run
 
-__all__ = ["State", "build_graph", "cannot_approve", "checkpointer", "conversion", "release", "run"]
+__all__ = ["State", "build_graph", "cannot_approve", "checkpointer", "conversion", "payable", "release", "run"]

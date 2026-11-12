@@ -6,6 +6,8 @@
 // as HTML, so nothing a vendor writes can become markup or script.
 const $ = (id) => document.getElementById(id);
 let selected = null;
+let waiting = [];
+let latest = 0; // counts requests for an invoice's detail, so an answer that arrives late is dropped
 /** Create an element. Children that are strings become text nodes. */
 function el(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
@@ -48,7 +50,7 @@ function showProblem(message) {
     $("problem").hidden = message === null;
     $("problem").textContent = message ?? "";
 }
-async function loadQueue() {
+async function loadQueue(openFirst = true) {
     let queue;
     try {
         queue = await api("/api/queue");
@@ -61,33 +63,92 @@ async function loadQueue() {
     const paid = Object.entries(queue.paid).map(([currency, amount]) => money(amount, currency)).join(" + ") || "$0.00";
     $("totals").textContent = `${queue.payments} payment${queue.payments === 1 ? "" : "s"} made: ${paid}`;
     $("count").textContent = String(queue.waiting.length);
-    const waiting = queue.waiting.map((s) => {
+    waiting = queue.waiting;
+    const rows = queue.waiting.map((s) => {
         const button = el("button", { type: "button", "aria-current": String(s.id === selected) }, el("div", { class: "row" }, el("strong", {}, s.vendor ?? "No vendor named"), el("span", {}, money(s.total, s.currency))), el("div", { class: "small" }, s.file), el("div", { class: "small" }, s.stuck ? `Decided (${s.stuck.action} by ${s.stuck.reviewer}) but not carried out`
-            : s.reasons.map(words).join(", ")));
+            : !s.has_saved_run ? "Saved run not found" : s.reasons.map(words).join(", ")));
+        button.dataset.id = String(s.id);
         button.addEventListener("click", () => select(s.id));
         return el("li", {}, button);
     });
-    $("waiting").replaceChildren(...(waiting.length ? waiting : [el("li", { class: "empty" }, "Nothing is waiting.")]));
-    const decided = queue.decided.map((d) => el("li", { class: "done" }, el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"), el("span", { class: `tag ${d.action ?? ""}` }, d.action === "approve" ? "Approved" : d.action === "reject" ? "Rejected" : d.status)), el("div", { class: "small" }, `${d.file} · ${d.reviewer ?? "nobody"}${d.amount ? ` · paid ${money(d.amount)}` : ""}`), d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
+    $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, "Nothing is waiting.")]));
+    const decided = queue.decided.map((d) => el("li", { class: "done" }, el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"), el("span", { class: `tag ${d.action ?? ""}` }, d.action === "approve" ? "Approved" : d.action === "reject" ? "Rejected" : d.status)), el("div", { class: "small" }, `${d.file} · ${d.reviewer ?? "nobody"}`
+        + (d.payment?.status === "PAID" ? ` · paid ${money(d.payment.amount, d.payment.currency)}` : "")), d.payment && d.payment.status !== "PAID"
+        ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null, d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
     $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, "No decisions yet.")]));
-    if (selected === null && queue.waiting.length)
+    if (selected !== null && !queue.waiting.some((s) => s.id === selected))
+        selected = null; // decided elsewhere
+    if (selected === null && openFirst && queue.waiting.length)
         await select(queue.waiting[0].id);
-    if (selected === null)
-        $("detail").replaceChildren(el("p", { class: "empty" }, "Select an invoice to review it."));
+    if (selected === null && openFirst)
+        $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
 }
 async function select(id) {
     selected = id;
-    document.querySelectorAll("#waiting button").forEach((b) => b.setAttribute("aria-current", "false"));
+    const request = ++latest;
+    document.querySelectorAll("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(id))));
+    const summary = waiting.find((s) => s.id === id);
+    if (summary && !summary.has_saved_run) {
+        renderLost(summary);
+        return;
+    }
     let d;
     try {
         d = await api(`/api/queue/${id}`);
     }
     catch (e) {
+        if (request !== latest)
+            return;
         $("detail").replaceChildren(el("p", { class: "notice error" }, e.message));
+        selected = null;
+        await loadQueue(false); // the list was out of date (someone else decided this one): refresh it, keep the message
         return;
     }
+    if (request !== latest)
+        return; // another invoice was chosen while this one loaded
     render(d);
-    await loadQueue();
+}
+/** A waiting invoice whose paused run can't be found: it can't be decided, only put back to be processed again. */
+function renderLost(s) {
+    const button = el("button", { type: "button", class: "reject" }, "Put it back to be processed again");
+    const message = el("p", { class: "notice error" }, `The saved run for ${s.file} was not found, so it can't be approved or rejected here. `
+        + "Putting it back closes this entry; run main.py on the file again and it will be checked and queued afresh.");
+    button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+            await api(`/api/queue/${s.id}/reopen`, {});
+            showOutcome(`${s.file} was put back as unprocessed. Run main.py on it again.`, "notice");
+            selected = null;
+            await loadQueue();
+        }
+        catch (e) {
+            message.textContent = e.message;
+            button.disabled = false;
+        }
+    });
+    $("detail").replaceChildren(el("h2", {}, s.vendor ?? "No vendor named"), el("div", { class: "amount" }, amountOf(s)), message, el("form", {}, el("div", { class: "buttons" }, button)));
+}
+function showOutcome(message, kind = "notice done") {
+    $("outcome").hidden = message === null;
+    $("outcome").className = kind;
+    $("outcome").textContent = message ?? "";
+}
+/** What a decision did, in words. A payment that didn't confirm, or wasn't sent, is not reported as paid. */
+function describe(o) {
+    const r = o.result, who = o.vendor ?? o.file;
+    const amount = money(r.amount ?? null, r.currency ?? "USD");
+    if (r.status === "PAID")
+        return [`Paid ${amount} to ${who} (${o.file}).`, "notice done"];
+    if (r.status === "REJECTED")
+        return [`Rejected ${o.file}: ${(r.reasons ?? []).join("; ")}`, "notice done"];
+    if (r.status === "PAYMENT_UNCONFIRMED") {
+        return [`The payment of ${amount} to ${who} was sent but did not confirm${r.error ? ` (${r.error})` : ""}. `
+                + "It may or may not have gone through: check with the bank. It will not be sent again automatically.", "notice error"];
+    }
+    if (r.status === "PAYMENT_NOT_SENT") {
+        return [`Nothing was paid to ${who}: ${r.error ?? "the payment could not be sent"}. ${o.file} was put back to be processed again.`, "notice error"];
+    }
+    return [`${o.file}: ${r.status}`, "notice"];
 }
 function render(d) {
     const held = d.flags.filter((f) => f.severity !== "INFO");
@@ -113,9 +174,29 @@ function render(d) {
     ];
     $("detail").replaceChildren(...parts.filter((p) => p !== null));
 }
+/** For a decision that was recorded but never carried out: one button, which carries it out as recorded. */
+function finishForm(d, stuck) {
+    const button = el("button", { type: "button", class: stuck.action === "approve" ? "approve" : "reject" }, stuck.action === "approve" ? "Finish: approve and pay" : "Finish: reject");
+    const message = el("p", { class: "notice error", role: "status" }, `${stuck.reviewer} decided to ${stuck.action} this invoice${stuck.note ? ` (“${stuck.note}”)` : ""}, but the decision was not carried out. `
+        + "Finishing it carries out that decision, as recorded.");
+    button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+            const outcome = await api(`/api/queue/${d.id}/decision`, { action: stuck.action, reviewer: stuck.reviewer, note: stuck.note ?? null });
+            showOutcome(...describe(outcome));
+            selected = null;
+            await loadQueue();
+        }
+        catch (e) {
+            message.textContent = e.message;
+            button.disabled = false;
+        }
+    });
+    return el("form", {}, message, el("div", { class: "buttons" }, button));
+}
 function decisionForm(d, pays) {
-    if (d.status !== "WAITING" && !d.stuck)
-        return el("p", { class: "notice done" }, `This invoice has been decided (${d.status.toLowerCase()}).`);
+    if (d.stuck)
+        return finishForm(d, d.stuck);
     let remembered = "";
     try {
         remembered = localStorage.getItem("reviewer") ?? "";
@@ -146,7 +227,8 @@ function decisionForm(d, pays) {
                 localStorage.setItem("reviewer", name.value.trim());
             }
             catch { /* not remembered */ }
-            await api(`/api/queue/${d.id}/decision`, { action, reviewer: name.value, note: note.value || null });
+            const outcome = await api(`/api/queue/${d.id}/decision`, { action, reviewer: name.value, note: note.value || null });
+            showOutcome(...describe(outcome));
             selected = null;
             await loadQueue();
         }

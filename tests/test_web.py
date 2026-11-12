@@ -20,9 +20,14 @@ def paths(tmp_path, capsys):
     return where
 
 
+def browser(app, **more):
+    """A client that addresses the server as a browser on this machine does."""
+    return TestClient(app, base_url="http://127.0.0.1:8000", **more)
+
+
 @pytest.fixture
 def client(paths):
-    return TestClient(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    return browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
 
 
 def by_file(client):
@@ -60,8 +65,8 @@ def test_approving_pays_once_and_moves_the_invoice_to_decided(client):
     assert done.status_code == 200 and done.json()["result"]["status"] == "PAID" and done.json()["result"]["amount"] == "4050.00"
     queue = client.get("/api/queue").json()
     assert len(queue["waiting"]) == 5 and (queue["payments"], queue["paid"]) == (7, {"USD": "30375"})
-    assert [(d["file"], d["action"], d["reviewer"], d["amount"]) for d in queue["decided"]] == [
-        ("invoice_1004_revised.json", "approve", "Dana Lee", "4050")]
+    assert [(d["file"], d["action"], d["reviewer"], d["payment"]) for d in queue["decided"]] == [
+        ("invoice_1004_revised.json", "approve", "Dana Lee", {"amount": "4050", "currency": "USD", "status": "PAID"})]
     again = client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
     assert again.status_code == 400 and "it is RESOLVED" in again.json()["detail"]
     assert client.get("/api/queue").json()["payments"] == 7
@@ -73,7 +78,9 @@ def test_a_foreign_invoice_is_paid_in_its_own_currency(client):
     done = client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee"}).json()
     assert (done["result"]["amount"], done["result"]["currency"]) == ("4125.00", "EUR")
     assert done["result"]["usd_estimate"]["usd_estimate"] == "4480.16" and done["review"]["reviewer"] == "Dana Lee"
-    assert client.get("/api/queue").json()["paid"] == {"USD": "26325", "EUR": "4125"}
+    queue = client.get("/api/queue").json()
+    assert queue["paid"] == {"USD": "26325", "EUR": "4125"}
+    assert queue["decided"][0]["payment"] == {"amount": "4125", "currency": "EUR", "status": "PAID"}    # in euros, not dollars
 
 
 def test_rejecting_needs_a_note_and_pays_nothing(client):
@@ -93,10 +100,10 @@ def test_rejecting_needs_a_note_and_pays_nothing(client):
 
 def test_unknown_numbers_and_missing_files_are_reported_not_created(paths, tmp_path):
     """An unknown queue number is a 404. A ledger or saved-runs path that doesn't exist is a 503 with what to do, and no empty file is left behind."""
-    client = TestClient(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
     assert client.get("/api/queue/99").status_code == 404
     assert client.post("/api/queue/99/decision", json={"action": "approve", "reviewer": "Dana"}).status_code == 400
-    wrong = TestClient(create_app(paths["ledger"], tmp_path / "typo.db", paths["rates"]))
+    wrong = browser(create_app(paths["ledger"], tmp_path / "typo.db", paths["rates"]))
     answer = wrong.get("/api/queue")
     assert answer.status_code == 503 and "No saved runs at" in answer.json()["detail"] and not (tmp_path / "typo.db").exists()
     assert wrong.post("/api/queue/1/decision", json={"action": "approve", "reviewer": "Dana"}).status_code == 503
@@ -111,3 +118,108 @@ def test_the_page_is_served_and_never_writes_vendor_text_as_html(client):
     assert "/api/queue" in script and "innerHTML" not in script and "insertAdjacentHTML" not in script
     source = (ROOT / "web" / "frontend" / "src" / "app.ts").read_text()
     assert "innerHTML" not in source
+
+
+# --- Fixes from the code review ----------------------------------------------------------------------
+
+def test_requests_for_another_host_name_are_refused(paths):
+    """The server answers to 127.0.0.1 and localhost only. A page that points its own domain at this machine is refused before any route runs."""
+    app = create_app(paths["ledger"], paths["checkpoints"], paths["rates"])
+    assert TestClient(app, base_url="http://localhost:8000").get("/api/queue").status_code == 200
+    rebound = TestClient(app, base_url="http://attacker.example:8000")
+    assert rebound.get("/api/queue").status_code == 400
+    assert rebound.post("/api/queue/1/decision", json={"action": "approve", "reviewer": "x"}).status_code == 400
+    assert len(browser(app).get("/api/queue").json()["waiting"]) == 6
+
+
+def test_a_decision_recorded_but_not_carried_out_can_be_finished_from_the_screen(paths, monkeypatch):
+    """The server dies between recording a decision and resuming the run. The invoice stays in the list, marked; its detail carries the recorded decision; only that decision can be repeated, and repeating it pays."""
+    import pipeline.graph as g
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]), raise_server_exceptions=False)
+    queue_id = by_file(client)["invoice_1016.json"]["id"]
+    real = g._stream
+    monkeypatch.setattr(g, "_stream", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("process died")))
+    assert client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee", "note": "OK'd by purchasing"}).status_code == 500
+    monkeypatch.setattr(g, "_stream", real)
+
+    listed = by_file(client)["invoice_1016.json"]
+    assert listed["stuck"] == {"action": "approve", "reviewer": "Dana Lee"}
+    assert client.get(f"/api/queue/{queue_id}").json()["stuck"] == {"action": "approve", "reviewer": "Dana Lee", "note": "OK'd by purchasing"}
+    other = client.post(f"/api/queue/{queue_id}/decision", json={"action": "reject", "reviewer": "Someone Else", "note": "no"})
+    assert other.status_code == 400 and "already decided: approve by Dana Lee" in other.json()["detail"]
+    done = client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Someone Else"}).json()
+    assert (done["result"]["status"], done["result"]["approved_by"]) == ("PAID", "Dana Lee")
+    assert "invoice_1016.json" not in by_file(client)
+
+
+def test_an_invoice_already_decided_says_so_instead_of_blaming_the_files(client):
+    """Opening an invoice someone else decided a moment ago reports the decision, not a missing saved run."""
+    queue_id = by_file(client)["invoice_1016.json"]["id"]
+    client.post(f"/api/queue/{queue_id}/decision", json={"action": "reject", "reviewer": "Dana Lee", "note": "Not ordered"})
+    stale = client.get(f"/api/queue/{queue_id}")
+    assert stale.status_code == 409 and "already decided (reject by Dana Lee)" in stale.json()["detail"]
+
+
+def test_a_waiting_invoice_whose_saved_run_is_gone_can_be_put_back(paths, tmp_path):
+    """The saved runs were replaced. The list marks each invoice as having no saved run; it can't be shown or decided, but it can be put back, which closes the entry and returns the invoice to unprocessed. One with its run intact can't be put back."""
+    import sqlite3
+    from ledger import Ledger
+    sqlite3.connect(tmp_path / "other.db").close()      # an existing file with no runs in it
+    lost = browser(create_app(paths["ledger"], tmp_path / "other.db", paths["rates"]))
+    entry = by_file(lost)["invoice_1005.json"]
+    assert entry["has_saved_run"] is False
+    assert lost.get(f"/api/queue/{entry['id']}").status_code == 409
+    assert lost.post(f"/api/queue/{entry['id']}/reopen").json() == {"file": "invoice_1005.json"}
+    assert "invoice_1005.json" not in by_file(lost)
+    ledger = Ledger(paths["ledger"])
+    assert ledger.queue_entry(entry["id"])["status"] == "LOST"
+    assert [i["status"] for i in ledger.invoices() if i["source_file"] == "invoice_1005.json"] == ["RECEIVED"]
+    assert lost.post(f"/api/queue/{entry['id']}/reopen").status_code == 400            # already put back
+    good = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    assert good.post(f"/api/queue/{by_file(good)['invoice_1016.json']['id']}/reopen").status_code == 400
+
+
+def test_a_payment_that_does_not_confirm_is_reported_as_such(paths, monkeypatch):
+    """The payment function fails mid-call. The answer says PAYMENT_UNCONFIRMED with the error, and the decided list carries the payment as PENDING, so the screen can say to check with the bank instead of 'paid'."""
+    import web.app as web_app
+    from ledger import Ledger
+
+    def timeout(*args):
+        raise TimeoutError("bank did not answer")
+
+    monkeypatch.setattr(web_app, "Ledger", lambda path: Ledger(path, pay=timeout))
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    queue_id = by_file(client)["invoice_1016.json"]["id"]
+    done = client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee"}).json()
+    assert done["vendor"] == "Widgets Inc." and done["result"]["status"] == "PAYMENT_UNCONFIRMED"
+    assert "TimeoutError: bank did not answer" in done["result"]["error"]
+    queue = client.get("/api/queue").json()
+    assert queue["decided"][0]["payment"] == {"amount": "3233", "currency": "USD", "status": "PENDING"}
+    assert (queue["payments"], queue["paid"]) == (7, {"USD": "26325"})          # on record, and not counted as paid
+
+
+def test_the_screen_shows_the_amount_release_would_pay():
+    """One rule, in pipeline.payable: the total, or for a revision of a paid invoice the difference. A revision with nothing more owed can't be approved, and the screen is told so before anyone clicks."""
+    from decimal import Decimal
+    import normalizer
+    from pipeline import cannot_approve, payable
+    invoice = normalizer.load(INVOICES / "invoice_1004_revised.json", {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5})
+    assert payable(invoice) == (Decimal("5940.00"), None)
+    invoice.flags.append({"code": "REVISION_OF_PAID", "severity": "REVIEW", "already_paid": Decimal("1890"), "difference": Decimal("4050.00")})
+    assert payable(invoice) == (Decimal("4050.00"), Decimal("1890")) and cannot_approve(invoice) is None
+    invoice.flags[-1] |= {"already_paid": Decimal("5940"), "difference": Decimal("0.00")}
+    assert cannot_approve(invoice) == "it revises an invoice already paid 5940, and nothing more is owed"
+
+
+def test_the_compiled_script_matches_its_source(tmp_path):
+    """web/static/app.js is committed so the screen runs without Node. Where the TypeScript compiler is installed, check it is what app.ts compiles to."""
+    import shutil
+    import subprocess
+    if shutil.which("tsc") is None:
+        pytest.skip("the TypeScript compiler is not installed")
+    frontend = ROOT / "web" / "frontend"
+    built = subprocess.run(["tsc", "-p", str(frontend), "--outDir", str(tmp_path)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stdout
+    assert (tmp_path / "app.js").read_text() == (ROOT / "web" / "static" / "app.js").read_text(), \
+        "web/static/app.js is out of date: run `npm run build` in web/frontend"
+

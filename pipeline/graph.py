@@ -467,7 +467,26 @@ def cannot_approve(invoice: Invoice, rates=None) -> str | None:
     if "CURRENCY_UNSUPPORTED" in codes and conversion(invoice, rates) is None:
         return (f"it is billed in {invoice.currency} and the rate service has no usable rate for it, so its cost in "
                 "dollars isn't known. Approve it once a rate is available")
+    amount, already_paid = payable(invoice)
+    if already_paid is not None and (amount is None or amount <= 0):
+        return f"it revises an invoice already paid {already_paid}, and nothing more is owed"
     return None
+
+
+def payable(invoice: Invoice) -> tuple[Decimal | None, Decimal | None]:
+    """What approving a held invoice pays, and what was paid before it.
+
+    Normally the invoice total. For a revision of an invoice that was already paid, the
+    difference. This is the one place that rule is written: release() pays by it and the review
+    screen shows it.
+
+    Returns:
+        (amount to pay, amount already paid on earlier versions or None if this isn't a revision of a paid invoice).
+    """
+    revision = next((f for f in invoice.flags if f["code"] == "REVISION_OF_PAID"), None)
+    if revision:
+        return revision["difference"], revision["already_paid"]
+    return invoice.total, None
 
 
 def conversion(invoice: Invoice, rates=None) -> dict | None:
@@ -553,13 +572,12 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
         if reason := cannot_approve(invoice, rates):
             raise ValueError(f"{invoice.source_file} can't be approved: {reason}, or reject it with a note.")
         basis = conversion(invoice, rates)
-        revision = next((f for f in invoice.flags if f["code"] == "REVISION_OF_PAID"), None)
-        if revision:
-            amount = revision["difference"]
-            if amount is None or amount <= 0:
-                raise ValueError(f"{invoice.source_file} revises an invoice already paid {revision['already_paid']}, "
-                                 "and nothing more is owed. Reject it with a note instead.")
+        to_pay, already_paid = payable(invoice)
+        amount = to_pay if already_paid is not None else None   # None: the pay step uses the invoice total
     review = {"action": action, "reviewer": reviewer.strip(), "note": (note or "").strip() or None, "amount": amount,
               **({"converted": basis} if basis else {})}
-    ledger.resolve(entry["thread_id"], action, review["reviewer"], review["note"], amount)
+    # The decision is taken by whoever records it first. Two people deciding the same invoice at
+    # once both get this far; the UPDATE lets one through, and the other must not resume the run.
+    if not ledger.resolve(entry["thread_id"], action, review["reviewer"], review["note"], amount) and not unfinished:
+        raise ValueError(f"queue number {queue_id} was decided by someone else a moment ago; nothing was changed")
     return _stream(graph, Command(resume=review), entry["thread_id"], on_step, seen=len(saved.values["trail"]))

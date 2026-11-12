@@ -74,7 +74,7 @@ why it is held, with each flag explained; the reviewer agent's advice, its quest
 looked up; the lines; and what approving would pay. The reviewer enters their name, and a note if
 rejecting.
 
-**How it is built.** `web/app.py` is a FastAPI application with three routes, and it adds no rules
+**How it is built.** `web/app.py` is a FastAPI application with four routes, and it adds no rules
 of its own: deciding calls `pipeline.release`, where everything below is enforced.
 
 | Route | Does |
@@ -82,12 +82,18 @@ of its own: deciding calls `pipeline.release`, where everything below is enforce
 | `GET /api/queue` | What is waiting, what was decided, and what has been paid |
 | `GET /api/queue/{id}` | One held invoice in full |
 | `POST /api/queue/{id}/decision` | `{"action": "approve" or "reject", "reviewer", "note"}`. A refusal is a 400 with the reason |
+| `POST /api/queue/{id}/reopen` | Puts back an invoice whose saved run is gone, to be processed again |
 
 The page is plain TypeScript with no framework (`web/frontend/src/app.ts`), compiled to
 `web/static/app.js`. The compiled file is committed, so running the screen needs only Python;
 `npm install && npm run build` in `web/frontend` rebuilds it. Vendor text is put on the page as
-text, never as HTML. There is no login: the server listens on this machine only, and a reviewer
-is whoever types their name.
+text, never as HTML. There is no login: the server listens on this machine only, refuses
+requests addressed to any other host name, and a reviewer is whoever types their name.
+
+After a decision the screen says what happened, from the server's answer: paid, rejected, or a
+payment that was sent but did not confirm, which is shown as a warning to check with the bank
+and never as paid. If two people decide the same invoice at once, the first decision stands and
+the second is refused.
 
 - **Deciding resumes the run.** Approve continues the paused run into payment; reject records the
   reviewer's note as the reason. The reviewer's name, decision and note are kept in the ledger,
