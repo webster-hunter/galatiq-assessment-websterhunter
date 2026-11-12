@@ -356,6 +356,15 @@ class Ledger:
                              "WHERE thread_id=? AND status='WAITING'",
                              (action, reviewer, note, _plain(amount) or None, self._now().isoformat(), thread_id))
 
+    def vendor_history(self, vendor_name: str | None) -> list[dict]:
+        """What is on record for a vendor: each of its invoices with its number, revision, total and outcome.
+
+        Matched on the vendor's name without case or punctuation, as identity() does.
+        """
+        rows = self._db.execute("SELECT number_key, revision, total, status, source_file FROM invoices "
+                                "WHERE vendor_key=? ORDER BY number_key, revision", (_alnum(vendor_name),))
+        return [dict(r) for r in rows]
+
     def invoices(self) -> list[dict]:
         """Every invoice on record, oldest identity first."""
         return [dict(r) for r in self._db.execute("SELECT * FROM invoices ORDER BY number_key, vendor_key, revision")]

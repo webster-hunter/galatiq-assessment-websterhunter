@@ -5,6 +5,7 @@ Runs one invoice file, or every invoice in a folder, through the pipeline graph 
     ingest     structured files by the deterministic normalizer, TXT and PDF by LLM extraction
     validate   repairs, then every check against the inventory, each flag graded
     approve    the policy floor turns the flags into APPROVE, HOLD or REJECT
+    reviewer   the reviewer agent looks into holds and warned approvals, and writes the reason
 
     register   the ledger: is this a duplicate, or a revision of one already handled?
     pay / hold / reject, or skip for an invoice that was already handled
@@ -12,7 +13,7 @@ Runs one invoice file, or every invoice in a folder, through the pipeline graph 
 A held invoice is a paused run, saved in checkpoints.db. review.py lists what is waiting and
 resumes a run with a person's decision.
 
-Prints a JSON list on stdout, one {"file", "result", "decision", "trail", "invoice"} entry per
+Prints a JSON list on stdout, one {"file", "result", "decision", "assessment", "trail", "invoice"} entry per
 file ({"file", "error"} for a file that can't be read); exits 1 if any file is an error. With
 --trace, each step is also printed to stderr as it happens, one JSON line per node.
 
@@ -123,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             # A skipped invoice has no decision: it was already handled.
             decision = asdict(state["decision"]) if "decision" in state else None
             results.append({"file": str(file), "result": state["result"], "decision": decision,
-                            "trail": state["trail"], "invoice": asdict(state["invoice"])})
+                            "assessment": state.get("assessment"), "trail": state["trail"],
+                            "invoice": asdict(state["invoice"])})
     paid = [r["result"] for r in results if r.get("result", {}).get("status") == "PAID" and not r["result"]["repeated"]]
     not_sent = [r["file"] for r in results if r.get("result", {}).get("status") == "PAYMENT_NOT_SENT"]
     if not_sent:

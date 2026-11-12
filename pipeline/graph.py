@@ -10,10 +10,10 @@ LangGraph runs a program as a graph. Three things define one:
 
 This graph, with the decision the policy made choosing the branch after approve:
 
-    START -> ingest -> validate -> register -> approve -+-> pay ------------------> END
-                 |                     |                +-> reject ---------------> END
-                 +-> failed -> END     +-> skip -> END  +-> hold -> await_review -+-> pay
-                                                                                  +-> reject
+    START -> ingest -> validate -> register -> approve -> reviewer -+-> pay ------------------> END
+                 |                     |                            +-> reject ---------------> END
+                 +-> failed -> END     +-> skip -> END              +-> hold -> await_review -+-> pay
+                                                                                              +-> reject
 
 Pausing for a person. A held invoice is a run that stops and waits. Two LangGraph features do it:
 
@@ -52,7 +52,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 import normalizer
-from approval import APPROVE, HOLD, REJECT, Decision, decide
+from approval import APPROVE, HOLD, REJECT, Decision, assess, decide
 from ledger import Ledger
 from ledger import ledger as seen
 from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
@@ -77,6 +77,7 @@ class State(TypedDict, total=False):
     invoice: Invoice
     recorded: bool  # True once this invoice has its own row in the ledger, so later nodes may update it
     decision: Decision
+    assessment: dict  # the reason for the decision: {"by", "recommendation", "rationale", "open_questions", "tools_used"}
     review: dict    # a person's decision on a held invoice: {"action", "reviewer", "note", "amount"[, "converted"]}
                     # amount: set only for a revision of a paid invoice (the difference). converted: the dollar
                     # estimate, for an invoice in another currency.
@@ -222,6 +223,19 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         return {"decision": decision,
                 "trail": _step("approve", outcome=decision.outcome, rule=decision.rule, because=list(decision.because))}
 
+    def reviewer(state: State) -> dict:
+        """Stage 3, second half. The reviewer agent looks into a hold or a warned approval and writes the reason.
+
+        It is the only node after ingest that calls a model. What it can change is fixed in
+        approval/reviewer.py: an approval may become a hold, nothing else. For a rejection or a
+        clean approval it calls nothing and the reason is written from the flags. If the model
+        can't be reached, the policy's decision stands as it is.
+        """
+        decision, assessment = assess(state["invoice"], state["decision"], provider, inventory, ledger)
+        step = {"by": assessment["by"], "recommendation": assessment["recommendation"], "outcome": decision.outcome,
+                "tools": [t["tool"] for t in assessment["tools_used"]], **({"note": assessment["note"]} if "note" in assessment else {})}
+        return {"decision": decision, "assessment": assessment, "trail": _step("reviewer", **step)}
+
     def settle(state: State, status: str, detail: str) -> None:
         """Write the outcome to the invoice's ledger row, if it has one of its own."""
         if state.get("recorded"):
@@ -314,7 +328,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     # --- Wiring. --------------------------------------------------------------------------------
     graph = StateGraph(State)  # the State type tells LangGraph the keys and their reducers
 
-    for node in (ingest, validate, register, skip, approve, pay, hold, await_review, reject, failed):
+    for node in (ingest, validate, register, skip, approve, reviewer, pay, hold, await_review, reject, failed):
         graph.add_node(node.__name__, node)
 
     graph.add_edge(START, "ingest")  # START and END are LangGraph's own entry and exit markers
@@ -323,7 +337,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     graph.add_conditional_edges("ingest", after_ingest, ["validate", "failed"])
     graph.add_edge("validate", "register")
     graph.add_conditional_edges("register", after_register, ["approve", "skip"])
-    graph.add_conditional_edges("approve", by_outcome, ["pay", "hold", "reject"])
+    graph.add_edge("approve", "reviewer")
+    graph.add_conditional_edges("reviewer", by_outcome, ["pay", "hold", "reject"])
     graph.add_edge("hold", "await_review")
     graph.add_conditional_edges("await_review", by_review, ["pay", "reject"])
     for last in ("pay", "reject", "skip", "failed"):

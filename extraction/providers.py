@@ -2,7 +2,7 @@
 
 Two implementations of one method, complete(messages, schema) -> dict:
 
-    Grok    xAI's chat-completions API with structured outputs. The model and endpoint are
+    Grok    xAI's chat-completions API with structured outputs, and function calling (chat()). The model and endpoint are
             settings; another provider is one more class with the same complete() method.
             Temporary failures (timeouts, rate limits, server errors) are retried with backoff.
     Replay  returns recorded responses, so the repo runs and tests with no key. Given a
@@ -88,6 +88,59 @@ class Grok:
             raise ProviderError(f"model refused: {msg['refusal']}")
         return _json_object(msg.get("content"))
 
+    def chat(self, messages: list[dict], schema: dict, tools: list[dict]) -> dict:
+        """One turn of a conversation in which the model may call tools.
+
+        This is function calling. The request lists the tools (name, description, a JSON schema
+        for the arguments). The model answers in one of two ways:
+
+            it asks for tools   the reply has tool_calls and no content. The caller runs them,
+                                appends the results to the conversation, and calls chat() again.
+            it answers          the reply has content, a JSON object that fits `schema`.
+
+        The model never runs anything. It only names a tool and its arguments; the caller decides
+        whether and how to run it.
+
+        Args:
+            messages: The conversation so far, including any earlier tool calls and their results.
+            schema: The JSON schema the final answer must fit.
+            tools: Tool definitions, each {"name", "description", "parameters"}.
+
+        Returns:
+            {"tool_calls": [{"id", "name", "arguments"}], "message": the assistant message to
+            append before the tool results} or {"content": the answer, "tool_calls": []}.
+
+        Raises:
+            ProviderError: As complete(), plus tool arguments that aren't a JSON object.
+        """
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0,
+            "tools": [{"type": "function", "function": t} for t in tools],
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "answer", "strict": True, "schema": schema}},
+        }
+        reply = self._post(body)
+        try:
+            choice = reply["choices"][0]
+            msg = choice["message"]
+            calls = msg.get("tool_calls") or []
+            parsed = [{"id": c["id"], "name": c["function"]["name"], "arguments": c["function"]["arguments"]} for c in calls]
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            raise ProviderError(f"unexpected reply shape: {str(reply)[:200]!r}") from e
+        if msg.get("refusal"):
+            raise ProviderError(f"model refused: {msg['refusal']}")
+        if parsed:
+            for call in parsed:
+                call["arguments"] = _json_object(call["arguments"])  # the API sends arguments as a JSON string
+            # Kept as the API sent it, minus fields we don't send back: it must be appended to the
+            # conversation, ahead of the tool results, for the next turn to be accepted.
+            return {"tool_calls": parsed, "message": {"role": "assistant", "content": msg.get("content"), "tool_calls": calls}}
+        if choice.get("finish_reason") != "stop":
+            raise ProviderError(f"reply not complete: finish_reason={choice.get('finish_reason')!r}")
+        return {"content": _json_object(msg.get("content")), "tool_calls": []}
+
 
     def _post(self, body: dict):
         """POST the request, retrying temporary failures with jittered exponential backoff.
@@ -172,7 +225,14 @@ class Replay:
         self.folder, self.live = Path(folder), live
 
     def complete(self, messages: list[dict], schema: dict) -> dict:
-        key = hashlib.sha256(json.dumps([messages, schema], sort_keys=True).encode()).hexdigest()[:16]
+        return self._replay([messages, schema], messages, lambda: self.live.complete(messages, schema))
+
+    def chat(self, messages: list[dict], schema: dict, tools: list[dict]) -> dict:
+        """Replay or record one tool-calling turn. The tools are part of the key: change one and the turn is recorded again."""
+        return self._replay([messages, schema, tools], messages, lambda: self.live.chat(messages, schema, tools))
+
+    def _replay(self, key_parts: list, messages: list[dict], call) -> dict:
+        key = hashlib.sha256(json.dumps(key_parts, sort_keys=True).encode()).hexdigest()[:16]
         path = self.folder / f"{key}.json"
         if path.exists():
             recorded = json.loads(path.read_text(encoding="utf-8"))
@@ -181,7 +241,7 @@ class Replay:
                 return recorded["response"]
         if self.live is None:
             raise ProviderError(f"no recording {path.name}; run once with an API key to record it")
-        response = self.live.complete(messages, schema)
+        response = call()
         self.folder.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"model": getattr(self.live, "model", None), "messages": messages,
                                     "response": response}, indent=2), encoding="utf-8")

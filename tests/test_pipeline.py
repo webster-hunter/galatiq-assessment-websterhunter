@@ -33,16 +33,16 @@ def nodes(state):
 
 
 def test_the_graph_has_the_stages_and_four_branch_points(graph):
-    """One fixed path in (ingest, validate, register, approve) with a branch after ingest (unreadable file), after register (already handled), after approve (the three outcomes) and after await_review (the reviewer's decision)."""
+    """One fixed path in (ingest, validate, register, approve, reviewer) with a branch after ingest (unreadable file), after register (already handled), after reviewer (the three outcomes) and after await_review (the person's decision)."""
     drawn = graph.get_graph()
-    assert set(drawn.nodes) == {"__start__", "ingest", "validate", "register", "skip", "approve", "pay", "hold",
+    assert set(drawn.nodes) == {"__start__", "ingest", "validate", "register", "skip", "approve", "reviewer", "pay", "hold",
                                 "await_review", "reject", "failed", "__end__"}
     fixed = {(e.source, e.target) for e in drawn.edges if not e.conditional}
     branches = {(e.source, e.target) for e in drawn.edges if e.conditional}
-    assert fixed == {("__start__", "ingest"), ("validate", "register"), ("hold", "await_review"), ("pay", "__end__"),
-                     ("reject", "__end__"), ("skip", "__end__"), ("failed", "__end__")}
+    assert fixed == {("__start__", "ingest"), ("validate", "register"), ("approve", "reviewer"), ("hold", "await_review"),
+                     ("pay", "__end__"), ("reject", "__end__"), ("skip", "__end__"), ("failed", "__end__")}
     assert branches == {("ingest", "validate"), ("ingest", "failed"), ("register", "approve"), ("register", "skip"),
-                        ("approve", "pay"), ("approve", "hold"), ("approve", "reject"),
+                        ("reviewer", "pay"), ("reviewer", "hold"), ("reviewer", "reject"),
                         ("await_review", "pay"), ("await_review", "reject")}
 
 
@@ -55,7 +55,7 @@ def test_the_graph_has_the_stages_and_four_branch_points(graph):
 def test_each_outcome_takes_its_own_branch(graph, name, last, status):
     """The trail lists the nodes that ran, in order (each node appends one entry), ending at the branch the decision chose."""
     state = run(graph, INVOICES / name)
-    assert nodes(state) == ["ingest", "validate", "register", "approve", last]
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", last]
     assert state["result"]["status"] == status and "error" not in state
 
 
@@ -152,7 +152,7 @@ def test_steps_are_reported_as_they_happen(graph):
     """run() streams: on_step gets each node's trail entry in order, and they are the same entries the final state holds."""
     seen = []
     state = run(graph, INVOICES / "invoice_1002.txt", seen.append)
-    assert seen == state["trail"] and nodes(state) == ["ingest", "validate", "register", "approve", "hold"]
+    assert seen == state["trail"] and nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", "hold"]
     assert seen[0] == {"node": "ingest", "method": "llm", "model_attempts": 2}  # 1002's recorded retry
     assert seen[2] == {"node": "register", "seen": "NEW"}
 
@@ -163,7 +163,7 @@ def test_main_trace_prints_one_json_line_per_step(capsys, tmp_path):
     out = capsys.readouterr()
     [entry] = json.loads(out.out)
     lines = [json.loads(line) for line in out.err.splitlines() if line.startswith("{")]
-    assert code == 0 and [ln["node"] for ln in lines] == ["ingest", "validate", "register", "approve", "reject"]
+    assert code == 0 and [ln["node"] for ln in lines] == ["ingest", "validate", "register", "approve", "reviewer", "reject"]
     assert all(ln["file"] == "invoice_1007.csv" for ln in lines)
     assert (entry["decision"]["outcome"], entry["result"]["status"]) == ("REJECT", "REJECTED")
 
@@ -316,7 +316,7 @@ def held(graph, name):
 def test_a_held_invoice_pauses_and_waits_in_the_queue(graph, ledger):
     """The run stops after hold: the state has the HELD result and a queue number, the trail ends at hold, and the queue lists it with its reasons."""
     queue_id, state = held(graph, "invoice_1005.json")
-    assert nodes(state) == ["ingest", "validate", "register", "approve", "hold"]
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", "hold"]
     [entry] = ledger.queue()
     assert (entry["id"], entry["source_file"], entry["status"], entry["reasons"]) == (
         queue_id, "invoice_1005.json", "WAITING", "OVER_APPROVAL_THRESHOLD, STOCK_EXCEEDED")
@@ -331,7 +331,7 @@ def test_approving_resumes_the_run_and_pays(graph, ledger):
     queue_id, _ = held(graph, "invoice_1005.json")
     seen = []
     state = release(graph, ledger, queue_id, "approve", "Dana Lee", "Stock due Friday", on_step=seen.append)
-    assert nodes(state) == ["ingest", "validate", "register", "approve", "hold", "await_review", "pay"]
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", "hold", "await_review", "pay"]
     assert [s["node"] for s in seen] == ["await_review", "pay"]     # only the new steps are reported
     assert (state["result"]["status"], state["result"]["approved_by"], state["result"]["amount"]) == ("PAID", "Dana Lee", Decimal("15225.00"))
     assert state["decision"].outcome == "HOLD"                      # the policy's decision is kept; the review sits beside it

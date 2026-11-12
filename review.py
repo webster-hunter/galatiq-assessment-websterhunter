@@ -97,12 +97,21 @@ def main(argv: list[str] | None = None) -> int:
     # nodes left to run (pay or reject) use neither the model nor the inventory.
     graph = build_graph(Replay("data/replays"), None, ledger, checkpointer(args.checkpoints), rates)
 
-    def saved_invoice(entry):
-        return graph.get_state(_thread(entry["thread_id"])).values.get("invoice")
+    def saved(entry):
+        return graph.get_state(_thread(entry["thread_id"])).values
 
     if args.command in (None, "list"):
         waiting, stuck = ledger.queue(), ledger.decided_not_finished()
-        print(_table(waiting, {e["id"]: saved_invoice(e) for e in waiting + stuck}, rates, stuck))
+        states = {e["id"]: saved(e) for e in waiting + stuck}
+        print(_table(waiting, {i: s.get("invoice") for i, s in states.items()}, rates, stuck))
+        advice = [(e["id"], states[e["id"]].get("assessment")) for e in waiting]
+        if any(a and a["by"] == "reviewer_agent" for _, a in advice):
+            print("\nThe reviewer agent's advice (a recommendation, not a decision):")
+            for queue_id, a in advice:
+                if a and a["by"] == "reviewer_agent":
+                    print(f"{queue_id:>3}  {a['recommendation']}: {a['rationale']}")
+                    for q in a["open_questions"]:
+                        print(f"       ? {q}")
         return 0
 
     if args.command == "show":
@@ -110,12 +119,12 @@ def main(argv: list[str] | None = None) -> int:
         if entry is None:
             print(f"No queue number {args.queue_id}.", file=sys.stderr)
             return 1
-        saved = graph.get_state(_thread(entry["thread_id"])).values
+        state = saved(entry)
         out = {"queue": entry}
-        if saved:
-            out |= {"cannot_approve_because": cannot_approve(saved["invoice"], rates),
-                    "usd_estimate": conversion(saved["invoice"], rates), "decision": asdict(saved["decision"]),
-                    "trail": saved["trail"], "invoice": asdict(saved["invoice"])}
+        if state:
+            out |= {"cannot_approve_because": cannot_approve(state["invoice"], rates),
+                    "usd_estimate": conversion(state["invoice"], rates), "decision": asdict(state["decision"]),
+                    "assessment": state.get("assessment"), "trail": state["trail"], "invoice": asdict(state["invoice"])}
         print(json.dumps(out, indent=2, default=_json_default))
         return 0
     try:

@@ -164,9 +164,10 @@ graph TD;
     validate --> register;
     register -.-> approve;
     register -.-> skip;
-    approve -.-> pay;
-    approve -.-> hold;
-    approve -.-> reject;
+    approve --> reviewer;
+    reviewer -.-> pay;
+    reviewer -.-> hold;
+    reviewer -.-> reject;
     hold --> await_review;
     await_review -.-> pay;
     await_review -.-> reject;
@@ -183,6 +184,7 @@ graph TD;
 | `register` | Asks the ledger whether this invoice was seen before, and records it if new | `ledger.Ledger` |
 | `skip` | The invoice was already handled, as this file or another copy: nothing is decided or paid | |
 | `approve` | The policy floor: the minimum outcome the flags require | `approval.decide` |
+| `reviewer` | The reviewer agent looks into holds and warned approvals with lookup tools, writes the reason, and may turn an approval into a hold | `approval.assess` |
 | `pay` | Pays through the ledger, which pays any one invoice once | `ledger.Ledger.pay` |
 | `hold` | Puts the invoice in the review queue and records it as held | `ledger.Ledger.enqueue` |
 | `await_review` | Pauses the run until a person decides, then sends it to `pay` or `reject` | LangGraph `interrupt` |
