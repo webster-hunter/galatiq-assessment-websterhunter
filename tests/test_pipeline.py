@@ -153,7 +153,7 @@ def test_an_unreadable_file_goes_to_failed_and_never_reaches_approval(graph, tmp
     assert nodes(state) == ["ingest", "failed"]
     assert "invoice" not in state and "decision" not in state
     assert state["result"]["status"] == "ERROR" and state["error"].startswith("JSONDecodeError")
-    assert run(graph, tmp_path / "notes.docx")["error"].startswith("ValueError: No loader")
+    assert run(graph, tmp_path / "notes.docx")["error"].startswith("ValueError: No reader for .docx files")
 
 
 def test_steps_are_reported_as_they_happen(graph):

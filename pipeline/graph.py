@@ -164,7 +164,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
             elif suffix in LOADERS:
                 invoice = LOADERS[suffix](path)
             else:
-                raise ValueError(f"No loader for {suffix} files: {path}")
+                raise ValueError(f"No reader for {suffix or 'extensionless'} files ({path.name}). Supported: "
+                                 f"{', '.join(sorted(LOADERS.keys() | TEXT_SUFFIXES))}. It needs a person, or a reader for this format.")
         except (*normalizer.LOAD_ERRORS, ProviderError) as e:
             # A node reports failure through the state, like any other result. The edge after
             # ingest reads `error` and routes to the `failed` node. Any other exception is a bug

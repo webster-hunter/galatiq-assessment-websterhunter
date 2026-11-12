@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
 python -m web                                                              # the review screen, at http://127.0.0.1:8000
-pytest                                                                     # 311 tests, about 17 seconds
+pytest                                                                     # 315 tests, about 20 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -145,6 +145,21 @@ Invoice text is written by the vendor, and may be written to persuade. It reache
 inside delimited blocks that can't be closed from inside, and the worst a successful injection
 can cause is an extra hold.
 
+### What happens to a format it hasn't seen
+
+A file's extension decides how it is read. Only free text goes to the model.
+
+| The file is | How it is read | A layout never seen before |
+|---|---|---|
+| `.txt`, `.pdf` | The model transcribes it | Handled: the model reads whatever layout arrives, and grounding checks what it returns |
+| `.json`, `.csv`, `.xml` | A parser, no model | Not understood: the fields it expects are missing, so the invoice is rejected with those flags. Nothing is lost: the unrecognised fields are kept on the invoice for a person to see |
+| Anything else (`.docx`, `.xlsx`, an image) | Not read | Ends as an error naming the file and the formats that can be read, and is listed on the review screen. It is never skipped silently and never guessed at |
+
+Structured files are parsed, not sent to the model, on purpose: a parser is exact, free, and
+gives the same answer every time. The cost is that a supplier's new JSON layout needs a mapping
+written for it. The cheaper alternative, falling back to the model when a parser finds none of
+its fields, is not built; the grounding check would apply to it unchanged.
+
 ### Self-correction, measured
 
 Two loops, each judged by code and each with a hard stop.
@@ -203,6 +218,8 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | Not built | Why |
 |---|---|
 | OCR for scanned images | The sample PDFs have a text layer. A scan is refused with a message saying so |
+| Reading Word, Excel or image files | Each is reported as an error for a person. Converting one to text would put it on the same path as a PDF |
+| Model fallback for an unfamiliar JSON, CSV or XML layout | Such a file is rejected with its fields kept. The fallback is a few lines, since extraction and grounding already exist |
 | Matching to purchase orders and goods receipts | No such data in the brief. It is the first thing to add with real systems |
 | A vendor list | Would catch a changed bank account, a billing currency, and a vendor name spelled two ways |
 | Real exchange rates | The brief rules out internet access. `rates/` is a local mock with made-up rates |
@@ -232,5 +249,5 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/replays/` | The sample invoices; the model's recorded replies |
 | `demo/` | Numbers and examples for a walkthrough, each with the command that reproduces it |
-| `tests/` | 311 tests. Each one's first line says the behaviour it pins |
+| `tests/` | 315 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

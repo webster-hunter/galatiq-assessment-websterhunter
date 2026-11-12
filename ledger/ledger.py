@@ -20,7 +20,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from normalizer.models import Invoice
@@ -70,9 +70,54 @@ CREATE TABLE IF NOT EXISTS runs (
     thread_id TEXT PRIMARY KEY, source_file TEXT NOT NULL, vendor TEXT, total TEXT, currency TEXT,
     status TEXT NOT NULL, resolved_by TEXT NOT NULL, reviewer TEXT, summary TEXT NOT NULL, finished_at TEXT NOT NULL,
     -- What a list of runs shows and searches, kept out of the JSON so listing never has to parse it.
-    source_path TEXT, reasons TEXT, note TEXT
+    source_path TEXT, reasons TEXT, note TEXT,
+    search TEXT  -- everything a search looks through, in lower case (see search_text)
 );
 """
+# The kinds of outcome a list can be narrowed to, and the condition each puts on a finished run.
+# "other" is whatever is none of the first three: a file that couldn't be read, a payment that
+# didn't confirm.
+RUN_OUTCOMES = {"paid": "status = 'PAID'", "rejected": "status = 'REJECTED'", "skipped": "status LIKE 'SKIPPED%'",
+                "other": "status NOT IN ('PAID', 'REJECTED') AND status NOT LIKE 'SKIPPED%'", "waiting": "0"}
+# The same for a reviewer's decision: an approval counts as paid only if its payment confirmed.
+DECIDED_OUTCOMES = {"paid": "q.action = 'approve' AND p.status = 'PAID'", "rejected": "q.action = 'reject'",
+                    "other": "NOT (q.action = 'reject' OR (q.action = 'approve' AND p.status IS 'PAID'))",
+                    "skipped": "0", "waiting": "0"}
+# A queue entry with what the lists need from other tables: whether its decision was recorded but
+# never carried out (stuck), the payment made for it, and whether its finished run was logged.
+_QUEUE = """
+SELECT q.*, COALESCE(q.status = 'RESOLVED' AND i.status = 'HELD', 0) AS stuck,
+       p.amount AS paid_amount, p.currency AS paid_currency, p.status AS payment_status, r.thread_id IS NOT NULL AS logged
+FROM review_queue q
+LEFT JOIN invoices i ON i.vendor_key = q.vendor_key AND i.number_key = q.number_key AND i.revision = q.revision
+LEFT JOIN payments p ON p.payment_key = q.vendor_key || '/' || q.number_key || '/r' || q.revision
+LEFT JOIN runs r ON r.thread_id = q.thread_id
+"""
+_WAITING = "(q.status = 'WAITING' OR COALESCE(q.status = 'RESOLVED' AND i.status = 'HELD', 0))"
+
+
+def search_text(*fields, total=None) -> str:
+    """What a row is searched by: its fields in lower case, flag codes also in words, the amount also as shown.
+
+    "stock exceeded" finds STOCK_EXCEEDED, and "15,000" or "$15,000.00" finds a total stored as
+    15000. Written to the row's `search` column when the row is, so a search is one LIKE per word.
+    """
+    text = " ".join(str(f) for f in fields if f).lower()
+    text += " " + text.replace("_", " ")
+    try:
+        amount = Decimal(str(total))
+        text += f" {total} {amount:.2f} ${amount:,.2f}"     # "15,000.00" is inside "$15,000.00"
+    except (InvalidOperation, ValueError):
+        pass
+    return text
+
+
+def _matching(words: str, column: str = "search") -> tuple[str, list[str]]:
+    """The SQL condition for "every word appears", and its parameters. LIKE's own wildcards in a word are taken literally."""
+    terms = [w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for w in words.lower().split()]
+    return " AND ".join([f"{column} LIKE ? ESCAPE '\\'"] * len(terms)) or "1", [f"%{t}%" for t in terms]
+
+
 RUN_COLUMNS = ("thread_id", "source_file", "source_path", "vendor", "total", "currency", "status", "resolved_by", "reviewer",
                "reasons", "note", "finished_at")
 
@@ -155,13 +200,27 @@ class Ledger:
             self._db.execute("ALTER TABLE review_queue ADD COLUMN amount TEXT")
         if "currency" not in {row["name"] for row in self._db.execute("PRAGMA table_info(payments)")}:
             self._db.execute("ALTER TABLE payments ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'")
-        for column in ("source_path", "reasons", "note"):  # added to runs after its first version
+        for column in ("source_path", "reasons", "note", "search"):  # added to runs after its first version
             if column not in {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}:
                 self._db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+        if "search" not in {row["name"] for row in self._db.execute("PRAGMA table_info(review_queue)")}:
+            self._db.execute("ALTER TABLE review_queue ADD COLUMN search TEXT")
+        self._fill_search()
         self._pay, self._now = pay, now
 
     def close(self) -> None:
         self._db.close()
+
+    def _fill_search(self) -> None:
+        """Give rows written before the search column existed their search text."""
+        with self._db:
+            for r in self._db.execute("SELECT * FROM runs WHERE search IS NULL").fetchall():
+                self._db.execute("UPDATE runs SET search=? WHERE thread_id=?", (search_text(
+                    r["source_file"], r["vendor"], r["reasons"], r["note"], r["status"], r["resolved_by"], r["reviewer"],
+                    total=r["total"]), r["thread_id"]))
+            for q in self._db.execute("SELECT * FROM review_queue WHERE search IS NULL").fetchall():
+                self._db.execute("UPDATE review_queue SET search=? WHERE id=?", (search_text(
+                    q["source_file"], q["vendor"], q["reasons"], q["action"], q["reviewer"], q["note"], total=q["total"]), q["id"]))
 
     def _history(self, vendor_key: str, number_key: str) -> list[dict]:
         """Every revision on record for one vendor and number, lowest revision first."""
@@ -241,9 +300,9 @@ class Ledger:
         the revision that replaced it, not both.
         """
         with self._db:
-            self._db.execute("UPDATE review_queue SET status='SUPERSEDED', note=?, resolved_at=? "
+            self._db.execute("UPDATE review_queue SET status='SUPERSEDED', note=?, resolved_at=?, search = search || ' ' || ? "
                              "WHERE vendor_key=? AND number_key=? AND revision=? AND status='WAITING'",
-                             (f"by {by_file}", self._now().isoformat(),
+                             (f"by {by_file}", self._now().isoformat(), search_text("superseded", by_file),
                               earlier["vendor_key"], earlier["number_key"], earlier["revision"]))
             self._db.execute("UPDATE invoices SET status='SUPERSEDED', detail=?, updated_at=? "
                              "WHERE vendor_key=? AND number_key=? AND revision=?",
@@ -318,9 +377,9 @@ class Ledger:
         with self._db:
             self._db.execute(
                 "INSERT OR IGNORE INTO review_queue (thread_id, vendor_key, number_key, revision, source_file, vendor, "
-                "total, reasons, status, created_at) VALUES (?,?,?,?,?,?,?,?,'WAITING',?)",
+                "total, reasons, status, created_at, search) VALUES (?,?,?,?,?,?,?,?,'WAITING',?,?)",
                 (thread_id, *key, inv.source_file, inv.vendor_name, _plain(inv.total), ", ".join(reasons),
-                 self._now().isoformat()))
+                 self._now().isoformat(), search_text(inv.source_file, inv.vendor_name, *reasons, total=inv.total)))
         return self._db.execute("SELECT id FROM review_queue WHERE thread_id=?", (thread_id,)).fetchone()["id"]
 
     def queue(self, status: str | None = "WAITING") -> list[dict]:
@@ -356,8 +415,8 @@ class Ledger:
             anyway since nothing was recorded for it.
         """
         with self._db:
-            self._db.execute("UPDATE review_queue SET status='LOST', note=?, resolved_at=? WHERE id=?",
-                             (why, self._now().isoformat(), entry["id"]))
+            self._db.execute("UPDATE review_queue SET status='LOST', note=?, resolved_at=?, search = search || ' ' || ? WHERE id=?",
+                             (why, self._now().isoformat(), search_text("lost", why), entry["id"]))
             done = self._db.execute("UPDATE invoices SET status='RECEIVED', detail=?, updated_at=? "
                                     "WHERE vendor_key=? AND number_key=? AND revision=? AND status='HELD'",
                                     (why, self._now().isoformat(), entry["vendor_key"], entry["number_key"], entry["revision"]))
@@ -371,9 +430,10 @@ class Ledger:
             someone else decided it first, and that decision stands.
         """
         with self._db:
-            done = self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, amount=?, resolved_at=? "
-                             "WHERE thread_id=? AND status='WAITING'",
-                             (action, reviewer, note, _plain(amount) or None, self._now().isoformat(), thread_id))
+            done = self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, amount=?, resolved_at=?, "
+                             "search = search || ' ' || ? WHERE thread_id=? AND status='WAITING'",
+                             (action, reviewer, note, _plain(amount) or None, self._now().isoformat(),
+                              search_text(action, reviewer, note), thread_id))
         return done.rowcount > 0
 
     def vendor_history(self, vendor_name: str | None) -> list[dict]:
@@ -406,7 +466,8 @@ class Ledger:
         row = {"thread_id": thread_id, "source_file": source_file, "source_path": source_path, "vendor": vendor,
                "total": _plain(total) if total is not None else None, "currency": currency, "status": status,
                "resolved_by": resolved_by, "reviewer": reviewer, "reasons": ", ".join(reasons), "note": note,
-               "summary": summary, "finished_at": self._now().isoformat()}
+               "summary": summary, "finished_at": self._now().isoformat(),
+               "search": search_text(source_file, vendor, *reasons, note, status, resolved_by, reviewer, total=total)}
         with self._db:  # columns are named: the table has gained columns since it was first created
             self._db.execute(f"INSERT OR REPLACE INTO runs ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
 
@@ -417,6 +478,48 @@ class Ledger:
     def runs(self) -> list[dict]:
         """Every finished run, newest first, without its evidence (see run_record for one in full)."""
         return [dict(r) for r in self._db.execute(f"SELECT {', '.join(RUN_COLUMNS)} FROM runs ORDER BY finished_at DESC, rowid DESC")]
+
+    def find_runs(self, words: str = "", outcome: str = "", limit: int = 200) -> tuple[list[dict], int]:
+        """Runs that ended without a person, newest first, narrowed in the database.
+
+        Args:
+            words: A search: every word must appear in the run's search text. Empty: no narrowing.
+            outcome: A key of RUN_OUTCOMES, to keep one kind. Empty: all kinds.
+            limit: The most rows to return.
+
+        Returns:
+            (the matching rows, without their evidence; how many such runs there are before narrowing).
+        """
+        match, params = _matching(words)
+        sql = (f"SELECT {', '.join(RUN_COLUMNS)} FROM runs WHERE resolved_by != 'person' AND {match} "
+               f"AND ({RUN_OUTCOMES[outcome] if outcome else '1'}) ORDER BY finished_at DESC, rowid DESC LIMIT ?")
+        rows = [dict(r) for r in self._db.execute(sql, (*params, limit))]
+        return rows, self._db.execute("SELECT COUNT(*) FROM runs WHERE resolved_by != 'person'").fetchone()[0]
+
+    def find_waiting(self, words: str = "") -> tuple[list[dict], int]:
+        """Queue entries needing a person, oldest first: those waiting, and those decided but never carried out (stuck).
+
+        Returns:
+            (the entries matching the search, each with a `stuck` column; how many there are before narrowing). Never limited.
+        """
+        match, params = _matching(words, "q.search")
+        rows = [dict(r) for r in self._db.execute(f"{_QUEUE} WHERE {_WAITING} AND {match} ORDER BY q.id", params)]
+        return rows, self._db.execute(f"SELECT COUNT(*) FROM ({_QUEUE} WHERE {_WAITING})").fetchone()[0]
+
+    def find_decided(self, words: str = "", outcome: str = "", limit: int = 200) -> tuple[list[dict], int]:
+        """Queue entries a reviewer has dealt with (or that were closed as lost or superseded), newest first.
+
+        Each row carries the payment made for it (paid_amount, paid_currency, payment_status) and
+        whether its finished run was logged.
+
+        Returns:
+            (the matching rows; how many such entries there are before narrowing).
+        """
+        match, params = _matching(words, "q.search")
+        sql = (f"{_QUEUE} WHERE NOT {_WAITING} AND {match} AND ({DECIDED_OUTCOMES[outcome] if outcome else '1'}) "
+               "ORDER BY q.id DESC LIMIT ?")
+        rows = [dict(r) for r in self._db.execute(sql, (*params, limit))]
+        return rows, self._db.execute(f"SELECT COUNT(*) FROM ({_QUEUE} WHERE NOT {_WAITING})").fetchone()[0]
 
     def run_record(self, thread_id: str) -> dict | None:
         row = self._db.execute("SELECT * FROM runs WHERE thread_id=?", (thread_id,)).fetchone()

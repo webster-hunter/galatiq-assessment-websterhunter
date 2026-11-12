@@ -1,4 +1,5 @@
 """The review screen's API: listing, showing and deciding held invoices over HTTP, on the sample folder."""
+import json
 from pathlib import Path
 
 import pytest
@@ -399,3 +400,62 @@ def test_the_lists_of_finished_invoices_are_limited_and_read_without_their_evide
     by_name = {r["source_file"]: r for r in rows}
     assert by_name["invoice_1003.txt"]["reasons"] == "STOCK_EXCEEDED, UNPARSEABLE, PRESSURE_LANGUAGE, WIRE_REQUEST"
     assert by_name["invoice_1011.txt"]["note"] == "A copy of invoice_1011.pdf, which was paid"
+
+
+# --- Search in SQL, and files in a format nothing reads ----------------------------------------------
+
+def test_the_search_is_done_by_the_ledger_in_sql(paths):
+    """Ledger.find_* narrow in the database: every word must be in the row's search text, the outcome is a condition, the limit applies after narrowing, and the count before narrowing comes back alongside."""
+    from ledger import Ledger
+    ledger = Ledger(paths["ledger"])
+    rows, in_all = ledger.find_runs("total mismatch", "rejected", limit=2)
+    assert (sorted(r["source_file"] for r in rows), in_all) == (["invoice_1009.json", "invoice_1013.json"], 14)   # newest two of three
+    assert [r["source_file"] for r in ledger.find_runs("$22,562.80")[0]] == ["invoice_1013.pdf", "invoice_1013.json"]
+    assert ledger.find_runs("anything", "waiting") == ([], 14)
+    waiting, in_all = ledger.find_waiting("gadgets")
+    assert ([w["source_file"] for w in waiting], in_all, waiting[0]["stuck"]) == (["invoice_1002.txt"], 6, 0)
+    assert ledger.find_decided() == ([], 0)
+    assert "search" not in ledger.find_runs()[0][0]          # the search text is for the database, not the caller
+
+
+def test_a_search_word_is_taken_literally(client):
+    """LIKE's wildcards mean nothing special when typed: "%" and "_" match only themselves, and a quote does no harm."""
+    assert client.get("/api/queue", params={"q": "%"}).json()["automatic"] == []
+    assert files(client.get("/api/queue", params={"q": "total_mismatch"}).json()["automatic"]) == ["1007.csv", "1009.json", "1013.json"]
+    assert client.get("/api/queue", params={"q": "inv_ice"}).json()["waiting"] == []        # "_" is not "any character"
+    assert client.get("/api/queue", params={"q": "'; DROP TABLE runs; --"}).status_code == 200
+    assert len(client.get("/api/queue").json()["automatic"]) == 14
+
+
+def test_rows_from_before_the_search_column_are_given_their_search_text(paths):
+    """A ledger written before search moved into SQL has no search text. Opening it fills it in, so its rows are found like new ones."""
+    import sqlite3
+    from ledger import Ledger
+    db = sqlite3.connect(paths["ledger"])
+    db.execute("UPDATE runs SET search = NULL")
+    db.execute("UPDATE review_queue SET search = NULL")
+    db.commit()
+    db.close()
+    ledger = Ledger(paths["ledger"])
+    assert [r["source_file"] for r in ledger.find_runs("stock exceeded")[0]] == ["invoice_1003.txt"]
+    assert [w["source_file"] for w in ledger.find_waiting("15,225")[0]] == ["invoice_1005.json"]
+
+
+def test_a_file_in_a_format_nothing_reads_is_reported_not_passed_over(paths, tmp_path, capsys):
+    """A folder holds a spreadsheet and a Word file among the invoices. Each ends as an ERROR naming the formats that can be read, and shows on the screen; a hidden file and a subfolder are left alone. No model is asked to read them."""
+    inbox = tmp_path / "inbox"
+    (inbox / "archive").mkdir(parents=True)
+    (inbox / "invoice_1004.json").write_text((INVOICES / "invoice_1004.json").read_text())
+    (inbox / "invoice_2001.docx").write_bytes(b"PK\\x03\\x04 not really a document")
+    (inbox / "invoice_2002.xlsx").write_bytes(b"PK\\x03\\x04")
+    (inbox / ".DS_Store").write_bytes(b"\\x00")
+    where = [x for k, v in paths.items() for x in (f"--{k}", str(v))]
+    main.main([f"--invoice_path={inbox}", "--offline", *where])
+    out = capsys.readouterr()
+    assert "3 files:" in out.err
+    errors = {Path(r["file"]).name: r["error"] for r in json.loads(out.out) if "error" in r}
+    assert set(errors) == {"invoice_2001.docx", "invoice_2002.xlsx"}
+    assert "No reader for .docx files (invoice_2001.docx). Supported: .csv, .json, .pdf, .txt, .xml" in errors["invoice_2001.docx"]
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    other = client.get("/api/queue", params={"outcome": "other"}).json()["automatic"]
+    assert sorted(a["file"] for a in other) == ["invoice_2001.docx", "invoice_2002.xlsx"] and other[0]["status"] == "ERROR"

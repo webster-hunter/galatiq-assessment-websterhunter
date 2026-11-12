@@ -78,16 +78,18 @@ def expand(paths, suffixes=LOADERS) -> list[Path]:
 
     Args:
         paths: File and folder paths, as strings or Paths.
-        suffixes: Which extensions to take from a folder (lowercase, with the dot).
+        suffixes: Which extensions to take from a folder (lowercase, with the dot). None takes
+            every file except hidden ones (names starting with a dot), so that a file in a format
+            nothing here reads is reported by whoever loads it, not passed over in silence.
 
     Returns:
-        Files as given, in order; each folder replaced by its supported files, sorted by name
-        (not recursive).
+        Files as given, in order; each folder replaced by its files, sorted by name (not recursive).
     """
     out = []
     for p in map(Path, paths):
         if p.is_dir():
-            out += sorted(f for f in p.iterdir() if f.suffix.lower() in suffixes)
+            out += sorted(f for f in p.iterdir() if f.is_file() and (
+                not f.name.startswith(".") if suffixes is None else f.suffix.lower() in suffixes))
         else:
             out.append(p)
     return out

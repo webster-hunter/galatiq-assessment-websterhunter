@@ -22,7 +22,6 @@ page the reviewer has open could point its own domain at 127.0.0.1 and post deci
 import dataclasses
 import json
 import sqlite3
-from decimal import Decimal, InvalidOperation
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,7 +35,6 @@ from pydantic import BaseModel
 from extraction import Replay
 from ledger import Ledger
 from ledger.ledger import currency_of
-from ledger.payment import payment_key
 from normalizer.__main__ import _json_default
 from normalizer.severity import MEANING
 from pipeline import build_graph, cannot_approve, checkpointer, conversion, payable, release
@@ -79,20 +77,17 @@ def _summary(entry: dict, state: dict, rates) -> dict:
     }
 
 
-def _decided(entry: dict, payments: dict, logged: set) -> dict:
-    """One row of the decided list, with the payment made for it, if any: its amount, currency and whether it confirmed.
+def _decided(entry: dict) -> dict:
+    """One row of the decided list, from Ledger.find_decided: the entry, the payment made for it and whether it confirmed.
 
     `run` is the name of the finished run to open for the full record, or None if none was logged
     (an entry closed as lost or superseded, or a decision made before runs were logged).
     """
-    payment = None
-    if entry["number_key"] is not None:
-        payment = payments.get(payment_key(entry["vendor_key"], entry["number_key"], entry["revision"]))
-    return {"id": entry["id"], "run": entry["thread_id"] if entry["thread_id"] in logged else None,
+    paid = entry["action"] == "approve" and entry["payment_status"] is not None
+    return {"id": entry["id"], "run": entry["thread_id"] if entry["logged"] else None,
             "file": entry["source_file"], "vendor": entry["vendor"], "total": entry["total"],
             "status": entry["status"], "action": entry["action"], "reviewer": entry["reviewer"], "note": entry["note"],
-            "payment": payment and entry["action"] == "approve" and {
-                "amount": payment["amount"], "currency": payment["currency"], "status": payment["status"]} or None}
+            "payment": {"amount": entry["paid_amount"], "currency": entry["paid_currency"], "status": entry["payment_status"]} if paid else None}
 
 
 def _evidence(invoice: dict, assessment: dict | None, critique: dict | None, trail: list) -> dict:
@@ -130,44 +125,6 @@ def _detail(entry: dict, state: dict, rates, stuck: bool) -> dict:
 # The kinds of outcome the lists can be narrowed to. "other" is everything that is none of the
 # first four: a file that couldn't be read, a payment that didn't confirm, an entry closed as lost.
 OUTCOMES = ("waiting", "paid", "rejected", "skipped", "other")
-
-
-def _outcome_of(status: str) -> str:
-    """The kind of outcome a finished run's status belongs to."""
-    if status in ("PAID", "REJECTED"):
-        return status.lower()
-    return "skipped" if status.startswith("SKIPPED") else "other"
-
-
-def _decided_outcome(row: dict) -> str:
-    """The kind of outcome a reviewer's decision led to: an approval counts as paid only if its payment confirmed."""
-    if row["action"] == "reject":
-        return "rejected"
-    if row["action"] == "approve":
-        return "paid" if row["payment"] and row["payment"]["status"] == "PAID" else "other"
-    return "other"
-
-
-def _amount_text(total) -> str:
-    """A stored total in the forms someone might type it: 15000, 15000.00, 15,000.00 and $15,000.00."""
-    try:
-        amount = Decimal(str(total))
-    except (InvalidOperation, ValueError):
-        return ""
-    return f"{total} {amount:.2f} ${amount:,.2f}"     # "15,000.00" is inside "$15,000.00"
-
-
-def _mentions(text: str, *fields, total=None) -> bool:
-    """Whether every word of a search appears somewhere in a row's fields, ignoring case.
-
-    A flag code matches as written and in words, so "stock exceeded" finds STOCK_EXCEEDED. An
-    amount matches as stored and as the screen shows it, so "15,000" and "$15,000.00" find 15000.
-    """
-    if not text.strip():
-        return True
-    haystack = " ".join(str(f) for f in fields if f).lower()
-    haystack += " " + haystack.replace("_", " ") + " " + _amount_text(total)
-    return all(word in haystack for word in text.lower().split())
 
 
 WHO = {"policy": "The policy", "policy+agent": "The policy, with the reviewer agent's reason", "ledger": "The ledger",
@@ -254,28 +211,18 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
         if outcome and outcome not in OUTCOMES:
             raise HTTPException(400, f"outcome must be one of: {', '.join(OUTCOMES)}")
         with session() as (ledger, graph, rates):
-            stuck = {e["id"] for e in ledger.decided_not_finished()}
-            everything = ledger.queue(status=None)
-            held = [e for e in everything if e["status"] == "WAITING" or e["id"] in stuck]
-            # Narrowed on the queue row, before the saved run is read: a search that matches two
-            # invoices loads two runs, not all of them.
-            keep = [e for e in held if outcome in ("", "waiting")
-                    and _mentions(q, e["source_file"], e["vendor"], e["reasons"], e["reviewer"], total=e["total"])]
-            waiting = [_summary(e, saved(graph, e), rates) | {"stuck": e["id"] in stuck and {"action": e["action"], "reviewer": e["reviewer"]}}
-                       for e in keep]
-            payments = {p["payment_key"]: p for p in ledger.payments()}
-            runs = ledger.runs()   # the list columns only: no run's evidence is read or parsed here
-            logged = {r["thread_id"] for r in runs}
-            all_decided = [_decided(e, payments, logged) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
-            decided = [d for d in all_decided[::-1] if outcome in ("", _decided_outcome(d))
-                       and _mentions(q, d["file"], d["vendor"], d["reviewer"], d["note"], d["status"], total=d["total"])]
-            all_automatic = [_run_summary(r) for r in runs if r["resolved_by"] != "person"]
-            automatic = [a for a in all_automatic if outcome in ("", _outcome_of(a["status"]))
-                         and _mentions(q, a["file"], a["vendor"], " ".join(a["reasons"]), a["note"], a["who"], a["status"], total=a["total"])]
-            return _plain({"waiting": waiting, "decided": decided[:limit], "automatic": automatic[:limit],
+            # The narrowing is done by the ledger, in SQL (Ledger.find_*): only matching rows are
+            # read, and for a waiting invoice only then is its saved run loaded.
+            held, held_in_all = ledger.find_waiting(q) if outcome in ("", "waiting") else ([], ledger.find_waiting()[1])
+            waiting = [_summary(e, saved(graph, e), rates) | {"stuck": bool(e["stuck"]) and {"action": e["action"], "reviewer": e["reviewer"]}}
+                       for e in held]
+            decided, decided_in_all = ledger.find_decided(q, outcome, limit)
+            automatic, automatic_in_all = ledger.find_runs(q, outcome, limit)
+            return _plain({"waiting": waiting, "decided": [_decided(e) for e in decided],
+                           "automatic": [_run_summary(r) for r in automatic],
                            # How many there are in all, so the screen can say "2 of 14" when a list
                            # is narrowed or cut short.
-                           "of": {"waiting": len(held), "decided": len(all_decided), "automatic": len(all_automatic)},
+                           "of": {"waiting": held_in_all, "decided": decided_in_all, "automatic": automatic_in_all},
                            "paid": ledger.paid_totals(), "payments": len(ledger.payments())})
 
     @app.get("/api/runs/{run}")

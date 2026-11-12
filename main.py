@@ -31,11 +31,9 @@ from datetime import datetime
 from pathlib import Path
 
 import normalizer
-from extraction import TEXT_SUFFIXES
 from extraction.__main__ import emit, model_options, provider_from
 from ledger import Ledger
 from normalizer.__main__ import _json_default
-from normalizer.parsing import LOADERS
 from pipeline import build_graph, checkpointer, run
 from rates import MockRates
 from rates import seed as seed_rates
@@ -112,7 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     ledger = Ledger(args.ledger)
     graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints), rates)
     results = []
-    for file in normalizer.expand([path], LOADERS.keys() | TEXT_SUFFIXES):
+    # Every file in a folder, whatever its extension: one in a format nothing here reads ends as
+    # an ERROR with its name, where a person will see it. Skipping it would lose an invoice quietly.
+    for file in normalizer.expand([path], None):
         on_step = None
         if args.trace:
             def on_step(step, file=file):
