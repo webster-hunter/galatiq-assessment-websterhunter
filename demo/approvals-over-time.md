@@ -17,7 +17,8 @@ what it changed.
 | Reviewer agent, first recording | `493ac7d` | **5 paid ($19,140.00), 8 held**, 4 rejected, 3 skipped | The model added a hold to 1010. It was wrong to |
 | Reviewer agent, told who the buyer is | `a5d6c6a` | **6 paid ($26,325.00), 7 held**, 4 rejected, 3 skipped | 1010 is paid again. The model had been missing context |
 | Critic, first recording | `e3d4d80` | Same outcomes. 4 of the agent's 8 assessments are sent back once; all 8 end accepted | The reasons a reviewer reads are checked. No decision changed |
-| Critic, after its review | current | Same outcomes. 1 of 8 is sent back, by a check in code; all 8 end accepted | The critic was told what it had been missing, and an agent-added hold can no longer be undone |
+| Critic, after its review | `b6009c7` | Same outcomes. 1 of 8 is sent back, by a check in code; all 8 end accepted | The critic was told what it had been missing, and an agent-added hold can no longer be undone |
+| Unknown products rejected | current | **6 paid ($26,325.00), 5 held, 6 rejected**, 3 skipped. The agent now reviews 6 invoices; 1 is sent back, all 6 end accepted | A rule change, not a new stage: 1008 and 1016 move from held to rejected |
 
 ## Each change, by invoice
 
@@ -106,6 +107,26 @@ assessment sent back is caught by code.
 The code review also changed a rule. The critic could previously lead the agent to withdraw a
 hold it had added, on the model critic's word alone. Now a hold the agent adds stays, whatever
 the critic says and even if the model fails mid-revision; a person releases it.
+
+### Unknown products: from held to rejected
+
+A decision about the rule, made after the pipeline was complete. A product that isn't in
+inventory is one Acme doesn't stock, so there is nothing to check the line against and no way to
+fulfil it. Holding such an invoice asked a person a question with one answer.
+
+| Invoice | Before | After |
+|---|---|---|
+| 1008 (SuperGizmo, MegaSprocket) | Held; the agent looked for similar products and found none | **Rejected** by the policy. No model is called |
+| 1016 (WidgetC) | Held; the agent found WidgetA and WidgetB and asked whether WidgetC was a new product | **Rejected** by the policy. No model is called |
+
+What it costs: a misspelled name in a structured file ("WidgtA") is now rejected too, where
+before a person could have waved it through. Spacing, hyphen and case differences are still
+repaired first, so "Widget A" is unaffected. It also shows what self-correction is worth on 1012:
+without the name repair its two scanner-damaged product names would now reject the invoice, and
+with it the invoice is held on its other grounds.
+
+The figures in the sections above are as they were at each commit. Today the agent reviews six
+invoices (the five holds and 1010), and the critic sends one back.
 
 ## What stayed the same throughout
 

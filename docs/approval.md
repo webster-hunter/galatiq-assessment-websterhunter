@@ -44,12 +44,12 @@ Each decision records the rule that fired and the flags that caused it:
 | APPROVE | 1001, 1004, 1004 revised, 1006, 1011 (txt and pdf), 1015 | Nothing to object to |
 | APPROVE | 1010 | Warnings only (a repeated item, a Bill To line), on record |
 | HOLD | 1002, 1005 | Over stock, and $10,000 or more |
-| HOLD | 1008, 1016 | Products not in inventory |
 | HOLD | 1014 | Billed in EUR |
 | HOLD | 1012 (txt and pdf) | $25 under the threshold, with repaired values and other warnings |
 | REJECT | 1003 | Four fraud signals: FakeItem has no stock, due date `yesterday`, "URGENT... penalties", "Wire transfer preferred" |
 | REJECT | 1007, 1013 (json and pdf) | The stated total doesn't match the lines |
 | REJECT | 1009 | Negative quantity and total, no vendor, wrong subtotal |
+| REJECT | 1008, 1016 | A product that isn't in inventory |
 
 The policy decides each invoice on its flags alone. What happens across files (a second copy, a
 revision) is the ledger's job, below.
@@ -66,7 +66,7 @@ answers, that is its assessment: a recommendation, a short rationale, and questi
 | Tool | Returns |
 |---|---|
 | `get_stock(item)` | How many of a product are in stock, or that it isn't an inventory product |
-| `find_similar_products(name)` | Up to three inventory products with similar names, and their stock |
+| `find_similar_products(name)` | Up to three inventory products with similar names, and their stock. Not reached on the samples now that an unknown product is rejected before the agent runs |
 | `get_vendor_history(vendor)` | The vendor's other invoices on record, with totals and outcomes |
 
 All three only read. The model names a tool and arguments; the code decides whether and how to
@@ -126,19 +126,17 @@ Three things keep the critic itself honest:
 
 ### What they did on the samples
 
-From recorded replies (`grok-4`), on the folder run in order. The agent reviewed eight invoices:
-the seven policy holds, and 1010. On all eight it agreed with the policy's outcome.
+From recorded replies (`grok-4`), on the folder run in order. The agent reviewed six invoices:
+the five policy holds, and 1010. On all six it agreed with the policy's outcome.
 
 - **1010: it agreed the invoice is payable, and said why.** The second WidgetA line's higher
   price carries the vendor's "rush order" note, and it is billed to an Acme division. No hold.
-- **1016:** it looked for products like WidgetC (WidgetA and WidgetB), and asks whether to accept
-  WidgetC as a new product.
-- **1008:** it looked up both unknown items, found nothing similar, and asks whether they were
-  ordered.
+- **1005:** it looked up the vendor's history, found no earlier invoice, and asks whether this
+  new vendor has been approved.
 - **1004 revised:** it found the original in the vendor's history, paid $1,890, explains that
   this revision adds $4,050, and asks whether the PO amendment authorises it.
 
-The critic accepted seven of the eight on the first pass. It sent 1010's back once, on the check
+The critic accepted five of the six on the first pass. It sent 1010's back once, on the check
 in code: two flag codes had been written into its text. The revision describes them in words and
 was accepted. The model critic objected to none.
 

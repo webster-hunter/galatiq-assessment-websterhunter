@@ -137,7 +137,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `SHIPPING_NEGATIVE` | `shipping` | BLOCK | Shipping below zero; it would quietly offset an inflated line sum |
 | `TAX_NEGATIVE` | `tax_amount` or `tax_rate` | BLOCK | Tax below zero; same risk as negative shipping |
 | `CONFLICTING_ROWS` | the field, with `row`, `value`, `first_value` | BLOCK | CSV rows disagree on an invoice-level field such as invoice number or vendor |
-| `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match) |
+| `UNKNOWN_PRODUCT` | `line_items[i].item` | BLOCK | Not in inventory (exact name match): Acme doesn't stock it, so the invoice is rejected |
 | `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |
 | `DUE_DATE_MISSING` | `due_date` | REVIEW | No due date |
 | `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
@@ -213,7 +213,7 @@ also carries `CURRENCY_ASSUMED`.
 
 - Scanned PDFs with no text layer (they need OCR first; the loader says so).
 - Fuzzy product matching: a typo or a longer name such as "WidgetA (rush order)" in a structured
-  file is left as written and flagged `UNKNOWN_PRODUCT`. Only spacing, hyphen and case variants are matched.
+  file is left as written, flagged `UNKNOWN_PRODUCT` and so rejected. Only spacing, hyphen and case variants are matched.
 - Real exchange rates: the rate service is a local mock with made-up rates (see Exchange rates).
 - Confirming an assumed currency. An invoice that names none is read as USD and says so
   (`CURRENCY_ASSUMED`). A vendor who bills in another dollar and writes only `$` can't be told apart

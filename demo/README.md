@@ -112,9 +112,9 @@ After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to bo
 keep the demo's saved runs apart too):
 
 ```bash
-python review.py --ledger demo.db                                     # seven invoices waiting, with the agent's advice
+python review.py --ledger demo.db                                     # five invoices waiting, with the agent's advice
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
+python review.py --ledger demo.db approve 5 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
 ```
 
 What to point at:
@@ -142,9 +142,9 @@ and which tools it called. `python review.py --ledger demo.db` then prints its a
 
 What to point at:
 
-- **1016.** The agent chose two lookups itself: products like WidgetC (it found WidgetA and
-  WidgetB) and the vendor's history (one earlier invoice, paid). Its question to the reviewer:
-  is WidgetC something we mean to order?
+- **1005.** The agent chose a lookup itself: the vendor's history, which is empty. Its questions
+  to the reviewer: can the GadgetX quantity be cut to what is in stock, and has this new vendor
+  been approved?
 - **1010.** The policy approves it with two warnings. The agent reads them and agrees: the higher
   price on the second WidgetA line is the vendor's stated rush order, and the Bill To line is
   Acme's own division. It is paid, with that reason on record.

@@ -121,7 +121,7 @@ def repair_item_names(inv: Invoice, inventory: dict) -> Invoice:
     is found, and its quantity is summed with any other WidgetA line. Only an exact match on the
     stripped name counts, and only if it points to one inventory name. A near miss ("WidgtA") or
     a product the inventory doesn't have (WidgetC) is left as written, to be flagged
-    UNKNOWN_PRODUCT and reviewed.
+    UNKNOWN_PRODUCT, which rejects the invoice.
 
     Args:
         inv: An Invoice straight from a loader. Changed in place: a matched item is renamed and

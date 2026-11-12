@@ -33,7 +33,7 @@ def test_what_changed_for_each_improved_file():
     b = r["invoice_1012.txt"]
     assert (b["attempts"], b["ocr_repairs"], b["name_repairs"], b["change"]) == (1, 2, 2, "BETTER")
     assert b["before"]["holding"] == ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT"]
-    assert (b["before"]["worst"], b["after"]["worst"], b["after"]["holding"]) == ("REVIEW", "WARN", [])
+    assert (b["before"]["worst"], b["after"]["worst"], b["after"]["holding"]) == ("BLOCK", "WARN", [])
 
 
 def test_the_vendors_problems_are_left_alone():
@@ -47,7 +47,7 @@ def test_the_vendors_problems_are_left_alone():
 def test_report_prints_a_table_and_a_missing_recording_is_an_error_row(tmp_path, capsys):
     """The CLI prints one line per file and the summary; a file with no recording is reported, not fatal."""
     table = render(list(rows().values()))
-    assert "invoice_1012.txt" in table and "REVIEW -> WARN" in table and "3 better, 0 worse, 17 unchanged" in table
+    assert "invoice_1012.txt" in table and "BLOCK -> WARN" in table and "3 better, 0 worse, 17 unchanged" in table
     out = measure([INVOICES / "invoice_1001.txt", INVOICES / "invoice_1004.json"], Replay(tmp_path), INVENTORY)
     assert out[0]["error"].startswith("ProviderError") and out[1]["change"] == "SAME"
     assert main([str(INVOICES / "invoice_1004.json"), "--inventory", str(tmp_path / "missing.db")]) == 1

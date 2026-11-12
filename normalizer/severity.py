@@ -29,9 +29,9 @@ SEVERITY = {
     "SUBTOTAL_MISMATCH": "BLOCK",
     "TAX_AMOUNT_MISMATCH": "BLOCK",
     "TOTAL_MISMATCH": "BLOCK",
+    "UNKNOWN_PRODUCT": "BLOCK",  # not a product we stock: nothing to check the line against, so it can't be paid
     # A person must decide.
     "UNPARSEABLE": "REVIEW",  # value couldn't be read; the flag carries the raw value
-    "UNKNOWN_PRODUCT": "REVIEW",
     "QTY_NOT_WHOLE": "REVIEW",  # stock is counted in whole units
     "DUE_DATE_MISSING": "REVIEW",  # can be looked up
     "DUE_DATE_BEFORE_INVOICE_DATE": "REVIEW",  # data error, or pressure to pay at once

@@ -79,7 +79,7 @@ def test_the_graph_never_decides_below_the_policy_floor(graph):
 
 
 def test_the_sample_folder_pays_six_invoices_once(graph, ledger):
-    """All 20 files in order: 6 paid ($26,325.00), 7 held, 4 rejected, 3 second copies skipped. Run again: nothing more is paid."""
+    """All 20 files in order: 6 paid ($26,325.00), 5 held, 6 rejected, 3 second copies skipped. Run again: nothing more is paid."""
     def outcomes():
         return {p.name: run(graph, p)["result"]["status"] for p in sorted(INVOICES.iterdir())}
 
@@ -87,8 +87,8 @@ def test_the_sample_folder_pays_six_invoices_once(graph, ledger):
     by_status = {s: sorted(n[8:] for n, v in first.items() if v == s) for s in set(first.values())}
     assert by_status == {
         "PAID": ["1001.txt", "1004.json", "1006.csv", "1010.txt", "1011.pdf", "1015.csv"],
-        "HELD": ["1002.txt", "1004_revised.json", "1005.json", "1008.txt", "1012.pdf", "1014.xml", "1016.json"],
-        "REJECTED": ["1003.txt", "1007.csv", "1009.json", "1013.json"],
+        "HELD": ["1002.txt", "1004_revised.json", "1005.json", "1012.pdf", "1014.xml"],
+        "REJECTED": ["1003.txt", "1007.csv", "1008.txt", "1009.json", "1013.json", "1016.json"],
         "SKIPPED_DUPLICATE": ["1011.txt", "1012.txt", "1013.pdf"],
     }
     assert (len(ledger.payments()), ledger.total_paid()) == (6, Decimal("26325"))
@@ -350,10 +350,10 @@ def test_approving_resumes_the_run_and_pays(graph, ledger):
 
 def test_rejecting_resumes_the_run_and_records_the_reason(graph, ledger):
     """A rejection goes from await_review to reject with the reviewer's note as the reason, and pays nothing."""
-    queue_id, _ = held(graph, "invoice_1016.json")
-    state = release(graph, ledger, queue_id, "reject", "Dana Lee", "WidgetC is not a product we buy")
+    queue_id, _ = held(graph, "invoice_1005.json")
+    state = release(graph, ledger, queue_id, "reject", "Dana Lee", "Only 5 GadgetX were delivered")
     assert nodes(state)[-2:] == ["await_review", "reject"]
-    assert state["result"] == {"status": "REJECTED", "rejected_by": "Dana Lee", "reasons": ["WidgetC is not a product we buy"]}
+    assert state["result"] == {"status": "REJECTED", "rejected_by": "Dana Lee", "reasons": ["Only 5 GadgetX were delivered"]}
     assert ledger.invoices()[0]["status"] == "REJECTED" and ledger.payments() == []
 
 
@@ -478,7 +478,7 @@ def test_an_invoice_held_without_a_rate_can_be_approved_once_one_exists(ledger, 
 
 def test_a_decision_needs_a_name_a_reason_to_reject_and_a_waiting_invoice(graph, ledger):
     """Refused without changing anything: no reviewer, a rejection with no note, an unknown action, an unknown queue number, and deciding the same invoice twice."""
-    queue_id, _ = held(graph, "invoice_1008.txt")
+    queue_id, _ = held(graph, "invoice_1005.json")
     for args, message in ((("approve", " "), "reviewer name"), (("reject", "Dana"), "needs a note"), (("pay", "Dana"), "approve or reject")):
         with pytest.raises(ValueError, match=message):
             release(graph, ledger, queue_id, *args)
@@ -555,7 +555,7 @@ def test_review_command_lists_shows_and_decides(capsys, tmp_path):
 def test_a_decision_recorded_but_not_carried_out_can_be_finished(graph, ledger, monkeypatch):
     """The process dies after the decision is written and before the run resumes. The entry stays visible as decided-not-finished; repeating the decision completes it, as first recorded, and a different decision is refused."""
     import pipeline.graph as g
-    queue_id, _ = held(graph, "invoice_1016.json")
+    queue_id, _ = held(graph, "invoice_1005.json")
     real = g._stream
     monkeypatch.setattr(g, "_stream", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("process died")))
     with pytest.raises(RuntimeError):
@@ -576,13 +576,13 @@ def test_a_held_invoice_whose_saved_run_is_lost_is_put_back(tmp_path):
     """The checkpoints file is gone. Releasing says so, closes the entry as LOST and resets the invoice; running its file again checks it afresh and queues it under a new number, from which it can be released."""
     ledger = Ledger(tmp_path / "l.db", pay=lambda vendor, amount: None)
     first = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp1.db"))
-    lost, _ = held(first, "invoice_1016.json")
+    lost, _ = held(first, "invoice_1005.json")
     graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp2.db"))   # other checkpoints
-    with pytest.raises(ValueError, match="no saved run to resume.*closed as LOST.*run main.py on invoice_1016.json again"):
+    with pytest.raises(ValueError, match="no saved run to resume.*closed as LOST.*run main.py on invoice_1005.json again"):
         release(graph, ledger, lost, "approve", "Dana Lee")
     assert ledger.queue_entry(lost)["status"] == "LOST" and ledger.invoices()[0]["status"] == "RECEIVED"
 
-    state = run(graph, INVOICES / "invoice_1016.json")
+    state = run(graph, INVOICES / "invoice_1005.json")
     assert state["trail"][2]["seen"] == "UNFINISHED" and state["result"]["status"] == "HELD"
     again = state["result"]["queue_id"]
     assert again != lost and [e["id"] for e in ledger.queue()] == [again]
@@ -621,7 +621,7 @@ def test_a_failing_rate_service_costs_one_estimate_not_the_batch(ledger):
 
 
 def test_only_paused_runs_keep_their_saved_state(tmp_path):
-    """After the whole folder, the checkpoints file holds the seven held runs and nothing for the thirteen that finished."""
+    """After the whole folder, the checkpoints file holds the five held runs and nothing for the fifteen that finished."""
     import sqlite3
     ledger = Ledger(":memory:", pay=lambda vendor, amount: None)
     graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp.db"))
@@ -629,9 +629,9 @@ def test_only_paused_runs_keep_their_saved_state(tmp_path):
         run(graph, p)
     db = sqlite3.connect(tmp_path / "cp.db")
     threads = {row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}
-    assert threads == {e["thread_id"] for e in ledger.queue()} and len(threads) == 7
+    assert threads == {e["thread_id"] for e in ledger.queue()} and len(threads) == 5
     release(graph, ledger, ledger.queue()[0]["id"], "approve", "Dana Lee")           # a released run finishes, and is cleared too
-    assert len({row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}) == 6
+    assert len({row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}) == 4
     db.close()
 
 
@@ -651,12 +651,12 @@ def test_review_does_not_create_a_checkpoints_file_or_decide_without_one(capsys,
     """Given a path with no saved runs, review.py lists from the ledger with a warning, refuses to decide, and leaves no new file behind. The held invoice is untouched."""
     import review
     good = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
-    main.main([f"--invoice_path={INVOICES / 'invoice_1016.json'}", "--offline", *good])
+    main.main([f"--invoice_path={INVOICES / 'invoice_1005.json'}", "--offline", *good])
     capsys.readouterr()
     wrong = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "typo.db")]
     assert review.main(wrong) == 0
     out = capsys.readouterr()
-    assert "invoice_1016.json" in out.out and "No saved runs at" in out.err
+    assert "invoice_1005.json" in out.out and "No saved runs at" in out.err
     assert review.main([*wrong, "approve", "1", "--by", "Dana"]) == 1
     assert not (tmp_path / "typo.db").exists()
     assert review.main([*good, "approve", "1", "--by", "Dana"]) == 0     # still there, and releasable with the right file
@@ -677,11 +677,9 @@ AGENT_TOOLS = {   # what Grok chose to look up for each invoice it reviewed
     "invoice_1002.txt": [],
     "invoice_1004_revised.json": [],
     "invoice_1005.json": ["get_vendor_history"],
-    "invoice_1008.txt": ["find_similar_products", "find_similar_products", "get_vendor_history"],
     "invoice_1010.txt": [],
     "invoice_1012.pdf": [],
     "invoice_1014.xml": [],
-    "invoice_1016.json": ["find_similar_products", "get_vendor_history"],
 }
 ACCEPTED_FIRST_TIME = [("ACCEPT", [])]
 CRITIC_ROUNDS = {  # per invoice: (verdict, kinds of problem found) for each critic pass
@@ -690,27 +688,27 @@ CRITIC_ROUNDS = {  # per invoice: (verdict, kinds of problem found) for each cri
 }
 
 
-def test_the_agent_reviews_the_eight_held_or_warned_invoices_and_no_others(folder):
-    """Real model output: the agent is used for the seven policy holds and the one warned approval, each with a recommendation, a rationale and the tools it chose. Every other invoice's reason is written by the policy."""
+def test_the_agent_reviews_the_six_held_or_warned_invoices_and_no_others(folder):
+    """Real model output: the agent is used for the five policy holds and the one warned approval, each with a recommendation, a rationale and the tools it chose. Every other invoice's reason is written by the policy."""
     by_agent = {n: s["assessment"] for n, s in folder.items() if s.get("assessment", {}).get("by") == "reviewer_agent"}
     assert {n: [t["tool"] for t in a["tools_used"]] for n, a in by_agent.items()} == AGENT_TOOLS
     for name, a in by_agent.items():
         assert a["recommendation"] == ("APPROVE" if name == "invoice_1010.txt" else "HOLD"), name
         assert len(a["rationale"]) > 100 and "note" not in a, name
     others = [s["assessment"] for n, s in folder.items() if "assessment" in s and n not in AGENT_TOOLS]
-    assert len(others) == 9 and all(a["by"] == "policy" and a["tools_used"] == [] for a in others)
+    assert len(others) == 11 and all(a["by"] == "policy" and a["tools_used"] == [] for a in others)
 
 
-def test_the_critic_sends_one_assessment_back_and_accepts_all_eight(folder):
-    """Real model output: seven of the eight assessments are accepted on the first pass. 1010's is sent back once, by the check in code, for two flag codes written into its text; the revision is accepted. The model critic objects to none."""
+def test_the_critic_sends_one_assessment_back_and_accepts_all_six(folder):
+    """Real model output: five of the six assessments are accepted on the first pass. 1010's is sent back once, by the check in code, for two flag codes written into its text; the revision is accepted. The model critic objects to none."""
     rounds = {n: [(c["verdict"], c["problems"]) for c in s["trail"] if c["node"] == "critic"] for n, s in folder.items() if n in AGENT_TOOLS}
     assert rounds == CRITIC_ROUNDS
     assert all(folder[n]["critique"]["verdict"] == "ACCEPT" for n in AGENT_TOOLS)
     models = [c["model"] for n in AGENT_TOOLS for c in folder[n]["trail"] if c["node"] == "critic"]
-    assert models == ["ACCEPT"] * 9      # nine passes in all, the model critic taking part in each
+    assert models == ["ACCEPT"] * 7      # seven passes in all, the model critic taking part in each
     # Invoices the agent didn't review pass the critic without a model call.
     untouched = [c for n, s in folder.items() if n not in AGENT_TOOLS for c in s["trail"] if c["node"] == "critic"]
-    assert len(untouched) == 9 and all(c["model"] == "NOT_NEEDED" for c in untouched)
+    assert len(untouched) == 11 and all(c["model"] == "NOT_NEEDED" for c in untouched)
 
 
 def test_every_final_assessment_passes_the_code_checks(folder):
@@ -739,14 +737,9 @@ def test_the_agent_is_told_who_it_works_for():
 
 
 def test_the_agents_lookups_are_reflected_in_what_it_says(folder):
-    """What the tools returned shows in the rationale: WidgetC resembles stocked items and the vendor was paid before (1016); nothing resembles SuperGizmo or MegaSprocket and the vendor is new (1008). The revision's figures come from its flag (1004)."""
-    a = folder["invoice_1016.json"]["assessment"]
-    assert [s["item"] for s in a["tools_used"][0]["result"]["similar"]] == ["WidgetB", "WidgetA"]
-    assert a["tools_used"][1]["result"]["other_invoices"] == [{"number": "1001", "revision": 0, "total": "5000", "outcome": "PAID"}]
-    assert "similar items WidgetA and WidgetB are stocked" in a["rationale"] and "one prior paid invoice" in a["rationale"]
-    b = folder["invoice_1008.txt"]["assessment"]
-    assert [t["result"].get("similar", t["result"].get("other_invoices")) for t in b["tools_used"]] == [[], [], []]
-    assert "returned no matches" in b["rationale"] and "no prior invoices" in b["rationale"]
+    """What the agent was given shows in the rationale: the vendor-history lookup found nothing earlier (1005), and the revision's figures come from its flag (1004)."""
+    a = folder["invoice_1005.json"]["assessment"]
+    assert [t["result"]["other_invoices"] for t in a["tools_used"]] == [[]]
     c = folder["invoice_1004_revised.json"]["assessment"]
     assert "$1890" in c["rationale"] and "$4050" in c["rationale"]
     assert c["open_questions"] == ["Confirm the PO amendment authorizes the added line items and new total."]
@@ -754,7 +747,7 @@ def test_the_agents_lookups_are_reflected_in_what_it_says(folder):
 
 def test_the_invoice_under_review_is_not_mistaken_for_an_earlier_one(folder):
     """Vendor history leaves out the invoice being reviewed, so no rationale reports it as already received or as a possible duplicate of itself."""
-    for name in ("invoice_1005.json", "invoice_1008.txt"):
+    for name in ("invoice_1005.json",):
         a = folder[name]["assessment"]
         history = [t["result"] for t in a["tools_used"] if t["tool"] == "get_vendor_history"]
         assert history and all(h["other_invoices"] == [] for h in history), name
@@ -766,7 +759,7 @@ def test_without_recordings_the_policy_decides_alone(tmp_path):
     """No recordings and no key: every invoice is still decided, by the policy, with a note that the agent was unavailable. 1010 is then paid, as the policy alone would have it."""
     ledger = Ledger(":memory:", pay=lambda *args: None)
     graph = build_graph(Replay(tmp_path / "none"), INVENTORY, ledger)
-    for name, status in (("invoice_1016.json", "HELD"), ("invoice_1004.json", "PAID")):
+    for name, status in (("invoice_1005.json", "HELD"), ("invoice_1004.json", "PAID"), ("invoice_1016.json", "REJECTED")):
         state = run(graph, INVOICES / name)
         assert state["result"]["status"] == status and state["assessment"]["by"] == "policy"
-    assert "reviewer agent unavailable" in run(graph, INVOICES / "invoice_1005.json")["assessment"]["note"]
+        assert ("reviewer agent unavailable" in state["assessment"].get("note", "")) == (status == "HELD")

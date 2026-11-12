@@ -46,8 +46,8 @@ python main.py --invoice_path=data/invoices --offline --fresh
 | Result | Invoices |
 |---|---|
 | PAID, 6 invoices, $26,325.00 | 1001, 1004, 1006, 1010, 1011 (pdf), 1015 |
-| HELD, 7 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016, and 1004 revised (the original was already paid; $4,050.00 difference) |
-| REJECTED, 4 | 1003, 1007, 1009, 1013 (json) |
+| HELD, 5 | 1002, 1005, 1012 (pdf), 1014, and 1004 revised (the original was already paid; $4,050.00 difference) |
+| REJECTED, 6 | 1003, 1007, 1008, 1009, 1013 (json), 1016 |
 | SKIPPED_DUPLICATE, 3 | 1011 (txt), 1012 (txt), 1013 (pdf) |
 
 Run it again and nothing is paid: 17 files are `ALREADY_PROCESSED` and the 3 second copies are

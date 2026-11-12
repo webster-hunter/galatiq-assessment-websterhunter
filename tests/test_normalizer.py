@@ -744,7 +744,7 @@ def test_missing_inventory_is_flagged():
     inv = normalizer.load(INVOICES / "invoice_1016.json")  # WidgetC: unknown product, but only an inventory can tell
     assert graded(inv) == [("REVIEW", "INVENTORY_NOT_CHECKED")]
     checked = normalizer.load(INVOICES / "invoice_1016.json", README_INVENTORY)
-    assert graded(checked) == [("REVIEW", "UNKNOWN_PRODUCT")]
+    assert graded(checked) == [("BLOCK", "UNKNOWN_PRODUCT")]
 
 
 def test_rounding_differences_are_not_mismatches(tmp_path):
