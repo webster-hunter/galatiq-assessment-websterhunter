@@ -26,6 +26,7 @@ import difflib
 import json
 
 from extraction.providers import ProviderError
+from ledger.ledger import identity
 
 from .policy import APPROVE, HOLD, REJECT, STRICTNESS, Decision
 
@@ -46,9 +47,10 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"name": {"type": "string", "description": "The unknown product name"}},
                     "required": ["name"], "additionalProperties": False}},
     {"name": "get_vendor_history",
-     "description": "List the invoices already on record from a vendor, with each one's number, revision, total and "
-                    "outcome (PAID, HELD, REJECTED, ...). Use it to see whether this is a vendor we have paid before, "
-                    "and whether this invoice relates to an earlier one. Returns an empty list for a vendor never seen.",
+     "description": "List the OTHER invoices on record from a vendor, with each one's number, revision, total and "
+                    "outcome (PAID, HELD, REJECTED, ...). The invoice under review is never in the list. Use it to see "
+                    "whether this is a vendor we have paid before, and whether this invoice relates to an earlier one. "
+                    "Returns an empty list for a vendor with no other invoices.",
      "parameters": {"type": "object", "properties": {"vendor": {"type": "string", "description": "Vendor name as on the invoice"}},
                     "required": ["vendor"], "additionalProperties": False}},
 ]
@@ -76,8 +78,11 @@ Your job:
   out where a lookup can answer it. Do not call a tool whose answer is already in the flags.
 - Give a recommendation: APPROVE, HOLD or REJECT.
 - Write a rationale of two to four sentences for a finance reviewer who has not seen the invoice.
-  Plain language. Say what the invoice is, what is wrong or notable, and what you found. Refer to
-  amounts and names, not flag codes. State only what the invoice, the flags or a tool result shows.
+  Plain language. Say what the invoice is, what is wrong or notable, and what you found. Describe
+  each problem in words: never write a flag code such as UNKNOWN_PRODUCT or NEAR_THRESHOLD.
+- State only what the invoice, the flags or a tool result shows. You cannot see any earlier
+  invoice's line items, so do not say what changed between an earlier invoice and this one beyond
+  the totals a flag or tool result gives you.
 - List open_questions: what a person should confirm before acting, each as one short question.
   An empty list if there is nothing.
 
@@ -86,13 +91,18 @@ Limits you cannot change:
 - If the floor is HOLD, a person makes the final decision. Your recommendation is advice to them."""
 
 
-def make_tools(inventory: dict | None, ledger) -> dict:
-    """The functions behind TOOLS, bound to the inventory and ledger. All read-only.
+def make_tools(inventory: dict | None, ledger, invoice=None) -> dict:
+    """The functions behind TOOLS, bound to the inventory, the ledger and the invoice under review. All read-only.
 
     Each returns plain JSON-ready data. A lookup that finds nothing says so in its result, in
     words the model can act on, instead of raising.
+
+    The invoice under review is already in the ledger by the time the agent runs (it is recorded
+    before it is decided). Vendor history leaves it out: listed, it reads as an earlier invoice
+    with the same number and total, and the model takes it for a duplicate.
     """
     stock = inventory or {}
+    current = identity(invoice) if invoice is not None else None
 
     def get_stock(item: str) -> dict:
         if item in stock:
@@ -105,9 +115,10 @@ def make_tools(inventory: dict | None, ledger) -> dict:
 
     def get_vendor_history(vendor: str) -> dict:
         rows = ledger.vendor_history(vendor) if ledger is not None else []
-        return {"vendor": vendor, "invoices_on_record": len(rows),
-                "invoices": [{"number": r["number_key"], "revision": r["revision"], "total": r["total"],
-                              "outcome": r["status"]} for r in rows]}
+        others = [r for r in rows if current is None or (r["number_key"], r["revision"]) != current[1:]]
+        return {"vendor": vendor, "other_invoices_on_record": len(others),
+                "other_invoices": [{"number": r["number_key"], "revision": r["revision"], "total": r["total"],
+                                    "outcome": r["status"]} for r in others]}
 
     return {"get_stock": get_stock, "find_similar_products": find_similar_products, "get_vendor_history": get_vendor_history}
 
@@ -171,7 +182,7 @@ def assess(invoice, decision: Decision, provider, inventory: dict | None = None,
     """
     if not needs_agent(decision):
         return decision, written_by_policy(decision)
-    tools = make_tools(inventory, ledger)
+    tools = make_tools(inventory, ledger, invoice)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _brief(invoice, decision)}]
     used = []
     try:
