@@ -130,23 +130,36 @@ it used:
 |---|---|
 | `llm` | A TXT or PDF |
 | `parser` | A JSON, CSV or XML file the parser recognises |
-| `llm_fallback` | A text file no parser can read: an unknown type (`.dat`), or a JSON, CSV or XML file in which the parser finds fewer than two of an invoice number, a vendor, a total and a line with anything on it |
+| `llm_fallback` | A text file no parser can read: a listed type (`.dat`, `.edi`, `.tsv`; `--fallback-types` changes the list), or a JSON, CSV or XML file in which the parser finds fewer than two of an invoice number, a vendor, a total and a line with anything on it |
 
 The fallback gives the model the file's text and builds the invoice from its reply, as for a
 PDF. Three things differ:
 
 - **Records stand in for rows.** A line item's values must sit together. In a text invoice that
-  means one printed line; in JSON, one innermost object; in XML, one element whose children are
-  all leaves. Either may span several lines of the file.
+  means one printed line; in JSON, any object that holds no array; in XML, any element under
+  which no tag repeats. Either may span several lines of the file and hold smaller objects of
+  its own (a price with an amount and a currency).
 - **A CSV is checked as cells.** In prose a comma before a digit makes it the tail of a longer
   number. In a CSV every value follows a comma, so the text is split into cells first. A
   comma-separated file of another type is treated the same if every row has the same number of cells.
 - **The result is always held,** by `UNFAMILIAR_FORMAT` (REVIEW).
 
-It is never used for an invoice in the usual layout with a field missing (1009 has no vendor and
-stays with the parser), for a file that isn't text, or for one over 200,000 bytes. If the model
-is unavailable or finds no invoice, the parser's result stands for a structured file, and an
-unknown type is an error.
+What is never sent to the model:
+
+- an invoice in the usual layout with a field missing (1009 has no vendor and stays with the parser);
+- a type that isn't listed, whether or not it is text: a folder holds notes, logs and source code too;
+- a file that isn't text. Text is UTF-8, UTF-16 with a byte-order mark, or Windows-1252;
+- a file over 200,000 bytes, structured or not;
+- a JSON file that is a list of several records. The model returns one invoice, so a batch would
+  lose the rest.
+
+A file the model does read that names other invoice numbers of the same form (INV-3004 read,
+INV-3005 also present) carries `POSSIBLY_SEVERAL_INVOICES` (REVIEW), listing them. If the model is
+unavailable or finds no invoice, the parser's result stands for a structured file, and an unknown
+type is an error.
+
+`python -m extraction` and `python -m extraction.report` read files through the same function, so
+they agree with `main.py`.
 
 On the four files in `data/unfamiliar/` the model read three correctly in one attempt each. On
 the fourth, a CSV, it put the repeated grand total into each line's amount. Grounding passed,

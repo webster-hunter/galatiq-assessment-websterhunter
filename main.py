@@ -30,6 +30,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from extraction import FALLBACK_SUFFIXES
 import normalizer
 from extraction.__main__ import emit, model_options, provider_from
 from ledger import Ledger
@@ -84,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--checkpoints", default="checkpoints.db",
                     help="SQLite file of saved runs, so a held invoice can be released later (default: checkpoints.db)")
     ap.add_argument("--trace", action="store_true", help="print each pipeline step to stderr as it happens")
+    ap.add_argument("--fallback-types", default=",".join(sorted(FALLBACK_SUFFIXES)),
+                    help="file types with no parser that are given to the model when they are text, comma-separated "
+                         "(default: %(default)s). Any other unknown type is reported and nothing of it is sent")
     model_options(ap)
     args = ap.parse_args(argv)
     path = Path(args.invoice_path)
@@ -108,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.fresh:
         set_aside(Path(args.ledger))
     ledger = Ledger(args.ledger)
-    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints), rates)
+    fallback_types = {t if t.startswith(".") else f".{t}" for t in (x.strip().lower() for x in args.fallback_types.split(",")) if t}
+    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints), rates, fallback_types)
     results = []
     # Every file in a folder, whatever its extension: one in a format nothing here reads ends as
     # an ERROR with its name, where a person will see it. Skipping it would lose an invoice quietly.

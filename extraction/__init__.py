@@ -30,11 +30,40 @@ from normalizer.parsing import LOADERS, UnfamiliarLayout, build_invoice, keep_un
 from .grounding import as_written, records, ungrounded
 from .providers import Grok, Provider, ProviderError, Replay
 
-__all__ = ["Grok", "Provider", "ProviderError", "Replay", "SCHEMA", "TEXT_SUFFIXES", "extract", "read",
+__all__ = ["Grok", "Provider", "ProviderError", "Replay", "SCHEMA", "FALLBACK_SUFFIXES", "TEXT_SUFFIXES", "extract", "read",
            "load", "normalize", "read_text"]
 
 TEXT_SUFFIXES = {".txt", ".pdf"}
 MAX_TEXT_BYTES = 200_000  # the most text of an unknown file type sent to the model: an invoice is a few thousand
+
+
+# File types with no parser that are given to the model when they are text. A list, not "anything
+# that is text": the model is an outside service, and a folder can hold notes, logs or source
+# code that are text and are nobody's invoice. main.py's --fallback-types changes it.
+FALLBACK_SUFFIXES = frozenset({".dat", ".edi", ".tsv"})
+
+
+def _decode(data: bytes) -> str:
+    """Bytes as text, by the encodings an invoice export is likely to be in."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")  # every byte maps to something; binary data is caught by its control characters
+
+
+def _other_invoice_numbers(number: str | None, text: str) -> list[str]:
+    """Invoice numbers in the text that look like the one read but aren't it: a sign the file holds more than one invoice.
+
+    Only for a number with a recognisable prefix (INV-3004 -> INV-3005). A bare number is too
+    easily a quantity or a date to mean anything.
+    """
+    m = re.fullmatch(r"(\D{2,}?)(\d+)", (number or "").strip())
+    if not m:
+        return []
+    others = dict.fromkeys(re.findall(r"(?<!\w)" + re.escape(m.group(1)) + r"\d+(?!\w)", text))
+    return [n for n in others if n != number.strip()]
 
 
 def no_reader(path: Path, why: str) -> str:
@@ -95,28 +124,22 @@ Rules:
 def read_text(path: str | Path) -> str:
     """The text of an invoice file: a PDF's text layer, or any other file that is text, read as it is.
 
-    A file of a type nothing here knows (.dat, .edi, no extension) is accepted if it is plain
-    text. A binary file (a Word or Excel document, an image) is not: there is no text to give
-    the model, and guessing at bytes is worse than saying so.
+    Text is UTF-8 (with or without a byte-order mark), UTF-16 with one, or failing those
+    Windows-1252, the usual encoding of an export from older software. A binary file (a Word or
+    Excel document, an image) is refused: there is no text to give the model, and guessing at
+    bytes is worse than saying so.
 
     Raises:
-        ValueError: A file that isn't text, one too large to send, or a PDF with no text layer
-            (a scan needs OCR first).
+        ValueError: A file that isn't text, or a PDF with no text layer (a scan needs OCR first).
         OSError: The file can't be read.
     """
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix != ".pdf":
-        data = path.read_bytes()
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = None
+        text = _decode(path.read_bytes())
         # Control characters other than tab, newline, form feed and carriage return mark a binary file.
-        if text is None or re.search(r"[\x00-\x08\x0b\x0e-\x1f]", text):
-            raise ValueError(no_reader(path, "It is not a text file, so it can't be given to the model either"))
-        if len(data) > MAX_TEXT_BYTES and suffix not in TEXT_SUFFIXES and suffix not in LOADERS:
-            raise ValueError(no_reader(path, f"At {len(data):,} bytes it is too large to give to the model"))
+        if re.search(r"[\x00-\x08\x0b\x0e-\x1f]", text):
+            raise ValueError(f"{path.name} is not a text file: it holds binary data, so there is nothing to read or to give the model")
         return text
     import pymupdf  # only PDFs need it
     with pymupdf.open(path) as doc:
@@ -291,17 +314,22 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
     return inv
 
 
-def read(path: str | Path, provider: Provider) -> tuple[Invoice, str]:
+def read(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMPTS,
+         fallback_types=FALLBACK_SUFFIXES) -> tuple[Invoice, str]:
     """Read one invoice file by the right means for its format, and say which was used.
 
     - A TXT or PDF is transcribed by the model ("llm").
     - A JSON, CSV or XML file is parsed ("parser"): exact, free, the same answer every time.
-    - A file no parser can read is given to the model as text ("llm_fallback"), if it is text:
-      a type nothing here knows (.dat, .edi, no extension), or a JSON, CSV or XML file the parser
-      finds nothing in because its field names aren't ours. The result is used only if the model
-      did find an invoice in it. It carries UNFAMILIAR_FORMAT, which holds it for a person: a
-      new format from a supplier is worth one look, and is the cue to write a reader for it.
-    - A file that isn't text (a Word or Excel document, an image) is not read at all.
+    - A file no parser can read is given to the model as text ("llm_fallback"): a type listed in
+      fallback_types (.dat, .edi, .tsv), or a JSON, CSV or XML file the parser finds nothing in
+      because its field names aren't ours. The result is used only if the model did find an
+      invoice in it. It carries UNFAMILIAR_FORMAT, which holds it for a person: a new format
+      from a supplier is worth one look, and is the cue to write a reader for it. If the file
+      names other invoice numbers too, it also carries POSSIBLY_SEVERAL_INVOICES: the model
+      returns one invoice, and a batch file must not pass as one.
+    - Any other file is not read at all and nothing of it is sent anywhere: a type not on the
+      list (notes, logs, source code are text too), a file that isn't text, one over
+      MAX_TEXT_BYTES, a JSON file that is a list of several records.
 
     If the model can't be reached or finds no invoice, nothing is made up. For an unknown type
     that is an error naming the file. For a structured file the parser's result stands, with
@@ -311,6 +339,8 @@ def read(path: str | Path, provider: Provider) -> tuple[Invoice, str]:
     Args:
         path: The invoice file.
         provider: The model, used only for text files and the fallback.
+        max_attempts: Model calls allowed for this file (see extract).
+        fallback_types: Extensions, lowercase with the dot, of the unknown types given to the model.
 
     Returns:
         (the Invoice, with no check flags yet; "llm", "parser" or "llm_fallback").
@@ -323,20 +353,44 @@ def read(path: str | Path, provider: Provider) -> tuple[Invoice, str]:
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix in TEXT_SUFFIXES:
-        return extract(path, provider), "llm"
-    if suffix not in LOADERS:   # a type with no parser: the model, if the file is text
+        return extract(path, provider, max_attempts), "llm"
+    size = path.stat().st_size
+    too_large = f"At {size:,} bytes it is too large to give to the model" if size > MAX_TEXT_BYTES else None
+
+    def by_model(invoice: Invoice, **evidence) -> tuple[Invoice, str]:
+        invoice.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", **evidence})
+        others = _other_invoice_numbers(invoice.invoice_number, read_text(path))
+        if others:
+            invoice.flags.append({"code": "POSSIBLY_SEVERAL_INVOICES", "read": invoice.invoice_number, "also_in_file": others[:10]})
+        return invoice, "llm_fallback"
+
+    if suffix not in LOADERS:   # a type with no parser: the model, if it is a listed type and is text
+        if suffix not in fallback_types:
+            listed = ", ".join(sorted(fallback_types)) or "none"
+            raise ValueError(no_reader(path, f"It is not a type that is given to the model ({listed}), so nothing of it was sent"))
+        if too_large:
+            raise ValueError(no_reader(path, too_large))
         try:
-            transcribed = extract(path, provider)   # ValueError here if it isn't text
+            transcribed = extract(path, provider, max_attempts)   # ValueError here if it isn't text
         except ProviderError as e:
             raise ValueError(no_reader(path, f"It is text, but the model was not available to read it ({e})")) from e
         if not layout_recognised(transcribed):
             raise ValueError(no_reader(path, "It is text, but the model found no invoice in it"))
-        transcribed.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", "file_type": suffix or "none"})
-        return transcribed, "llm_fallback"
+        return by_model(transcribed, file_type=suffix)
     try:
         parsed, refused = LOADERS[suffix](path), None
     except UnfamiliarLayout as e:   # well-formed, but not shaped like our invoices at all (another root element)
         parsed, refused = None, e
+        if suffix == ".json":
+            # A list of several records is a batch. The model returns one invoice, so giving it
+            # the file would read one and drop the rest: it stays an error, for a person to split.
+            try:
+                top = json.loads(read_text(path))
+            except ValueError:
+                top = None
+            if isinstance(top, list) and len(top) > 1:
+                raise ValueError(f"{e}. It is a list of {len(top)} records: one invoice per file is read, "
+                                 "so nothing of it was sent to the model") from e
     if parsed is not None and layout_recognised(parsed):
         return parsed, "parser"
     unrecognised = sorted(parsed.unexpected_fields)[:20] if parsed is not None else []
@@ -348,14 +402,15 @@ def read(path: str | Path, provider: Provider) -> tuple[Invoice, str]:
                              "model": model})
         return parsed, "parser"
 
+    if too_large:
+        return parsers_result(f"was not asked: {too_large[0].lower()}{too_large[1:]}")
     try:
-        transcribed = extract(path, provider)
+        transcribed = extract(path, provider, max_attempts)
     except ProviderError as e:
         return parsers_result(f"was not available ({e})")
     if not layout_recognised(transcribed):
         return parsers_result("found no invoice in it either")
-    transcribed.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", "unrecognised_fields": unrecognised})
-    return transcribed, "llm_fallback"
+    return by_model(transcribed, unrecognised_fields=unrecognised)
 
 
 def load(path: str | Path, provider: Provider, inventory: dict[str, int] | None = None) -> Invoice:
@@ -364,18 +419,15 @@ def load(path: str | Path, provider: Provider, inventory: dict[str, int] | None 
 
 
 def normalize(paths, provider: Provider, inventory: dict[str, int] | None = None) -> list[dict]:
-    """Load every invoice in paths: structured files by the normalizer, TXT and PDF by the model.
+    """Load every invoice in paths, each by the means read() chooses for it, then run every check.
 
     Same output shape as normalizer.normalize: {"file", "invoice"} or {"file", "error"} per file.
-    A failed model call is an error entry for that file; the batch continues.
+    A file that can't be read, or a failed model call, is an error entry; the batch continues.
     """
     results = []
-    for p in normalizer.expand(paths, LOADERS.keys() | TEXT_SUFFIXES):
+    for p in normalizer.expand(paths, None):
         try:
-            if p.suffix.lower() in TEXT_SUFFIXES:
-                inv = load(p, provider, inventory)
-            else:
-                inv = normalizer.load(p, inventory)
+            inv = normalizer.check(read(p, provider)[0], inventory)
             results.append({"file": str(p), "invoice": asdict(inv)})
         except (*normalizer.LOAD_ERRORS, ProviderError) as e:
             results.append({"file": str(p), "error": f"{type(e).__name__}: {e}"})

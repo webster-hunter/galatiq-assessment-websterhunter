@@ -155,7 +155,7 @@ def test_an_unreadable_file_goes_to_failed_and_never_reaches_approval(graph, tmp
     assert state["result"]["status"] == "ERROR" and state["error"].startswith("JSONDecodeError")
     (tmp_path / "notes.docx").write_bytes(b"PK\x03\x04\x00\x00 a zip archive, as Word files are")
     error = run(graph, tmp_path / "notes.docx")["error"]
-    assert error.startswith("ValueError: No reader for .docx files") and "not a text file" in error
+    assert error.startswith("ValueError: No reader for .docx files") and "nothing of it was sent" in error
     assert run(graph, tmp_path / "missing.json")["error"].startswith("FileNotFoundError")
 
 

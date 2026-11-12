@@ -130,14 +130,22 @@ def test_a_text_file_of_an_unknown_type_is_read_by_the_model_and_held():
     assert (decision.outcome, "UNFAMILIAR_FORMAT" in decision.because) == (HOLD, True)
 
 
-def test_a_file_that_is_not_text_is_never_given_to_the_model(tmp_path):
-    """A Word file, a spreadsheet, an image: bytes, not text. Each is refused with its name and the reason, and the model is not called."""
+def test_only_listed_types_are_given_to_the_model_and_only_if_they_are_text(tmp_path):
+    """The model is an outside service, and a folder holds more than invoices. A type that isn't on the list is refused unread, whether it is binary (a Word file, an image) or text (notes, a log, source code). A listed type that turns out to be binary is refused too. Nothing of any of them is sent."""
     model = Model(T3004)
-    for name, data in (("scan.png", b"\x89PNG\r\n\x1a\n\x00\x00"), ("invoice.docx", b"PK\x03\x04\x14\x00"), ("latin.dat", "Total: 1\xa3".encode("latin-1"))):
+    unlisted = {"scan.png": b"\x89PNG\r\n\x1a\n\x00\x00", "invoice.docx": b"PK\x03\x04\x14\x00", "notes.md": b"# Notes\nCall the bank.\n",
+                "server.log": b"12:00 started\n", "settings.env": b"API_KEY=secret\n", "README": b"Read me.\n"}
+    for name, data in unlisted.items():
         (tmp_path / name).write_bytes(data)
-        with pytest.raises(ValueError, match="No reader for .* files .*not a text file"):
+        with pytest.raises(ValueError, match="No reader for .* files .*not a type that is given to the model .*nothing of it was sent"):
             read(tmp_path / name, model)
+    (tmp_path / "blob.dat").write_bytes(b"\x00\x01\x02 binary")
+    with pytest.raises(ValueError, match="blob.dat is not a text file"):
+        read(tmp_path / "blob.dat", model)
     assert model.sent == []
+    # The list is the caller's to change: with .md on it, the notes file is sent (and here, found not to be an invoice).
+    with pytest.raises(ValueError, match="the model found no invoice in it"):
+        read(tmp_path / "notes.md", Model(transcription()), fallback_types={".md"})
 
 
 def test_an_unknown_type_the_model_cannot_help_with_is_an_error_not_a_guess(tmp_path):
@@ -169,11 +177,85 @@ def test_a_csv_is_checked_as_cells_so_a_value_after_a_comma_is_found():
 
 
 def test_a_record_is_one_json_object_or_one_xml_element():
-    """What counts as a row for a line item in a structured file: each innermost JSON object, each XML element whose children are all leaves."""
-    assert records('{"rows": [{"sku": "A",\n "qty": 3}, {"sku": "B", "qty": 2}], "n": 1}', ".json") == ['{"sku": "A", "qty": 3}', '{"sku": "B", "qty": 2}']
-    xml = "<Bill><Ref>R1</Ref><Positions><Position><Article>A</Article>\n<Count>4</Count></Position></Positions></Bill>"
-    assert records(xml, ".xml") == ["A 4"]
+    """What counts as a row for a line item in a structured file: any JSON object that holds no array, any XML element under which no tag repeats. A line item may hold smaller objects of its own; a list of line items is never one record."""
+    nested = '{"rows": [{"sku": "A",\n "qty": 3, "price": {"amount": 250.00, "currency": "USD"}}, {"sku": "B", "qty": 2}], "n": 1}'
+    assert records(nested, ".json") == ['{"amount": 250.00, "currency": "USD"}',
+                                        '{"sku": "A", "qty": 3, "price": {"amount": 250.00, "currency": "USD"}}', '{"sku": "B", "qty": 2}']
+    assert records('{"note": "a } and a [ in a string", "n": 1}', ".json") == ['{"note": "a } and a [ in a string", "n": 1}']
+    one = "<Bill><Ref>R1</Ref><Positions><Position><Article>A</Article>\n<Count>4</Count></Position></Positions></Bill>"
+    assert records(one, ".xml") == ["R1 A 4", "A 4", "A 4"]              # one position: the whole bill is one thing
+    two = "<Bill><Ref>R1</Ref><Positions><Position sku='A'><Count>4</Count></Position><Position sku='B'><Count>2</Count></Position></Positions></Bill>"
+    assert records(two, ".xml") == ["A 4", "B 2"]                        # two: only each position is
     assert records("<Bill><unclosed>", ".xml") == [] and records("a,b", ".csv") == []
+
+
+def test_a_line_item_with_a_nested_object_is_grounded():
+    """A price written as an object inside the line: the item, quantity and amount are still in one record, so a correct transcription passes."""
+    text = '{"no": "INV-9", "rows": [\n  {"sku": "WidgetA", "qty": 3,\n   "price": {"amount": 250.00, "currency": "USD"}},\n  {"sku": "WidgetB", "qty": 2,\n   "price": {"amount": 500.00, "currency": "USD"}}]}'
+    good = transcription(invoice_number="INV-9", lines=[("WidgetA", "3", "250.00"), ("WidgetB", "2", "500.00")])
+    assert ungrounded(good, text, records(text, ".json")) == []
+    crossed = transcription(invoice_number="INV-9", lines=[("WidgetA", "2", "250.00")])
+    assert [f.get("reason") for f in ungrounded(crossed, text, records(text, ".json"))] == ["NOT_ON_ONE_LINE"]
+
+
+# --- Fixes from the code review ----------------------------------------------------------------------
+
+def test_a_structured_file_too_large_to_send_keeps_the_parsers_result(tmp_path):
+    """The size limit holds for JSON, CSV and XML too: a large export in an unknown layout is not put into a model request. The parser's result stands, saying why the model was not asked."""
+    big = tmp_path / "export.json"
+    big.write_text('{"invoiceNo": "INV-1", "blob": "' + "x" * 200_000 + '"}')
+    model = Model(T3001)
+    invoice, method = read(big, model)
+    [flag] = [f for f in invoice.flags if f["code"] == "UNFAMILIAR_FORMAT"]
+    assert method == "parser" and model.sent == [] and flag["read_by"] == "parser"
+    assert "was not asked: at 200,0" in flag["model"] and "too large to give to the model" in flag["model"]
+
+
+def test_a_file_holding_several_invoices_is_not_passed_off_as_one(tmp_path):
+    """The model returns one invoice. A JSON list of several records is refused before anything is sent. A file the model does read that names other invoice numbers carries a flag listing them, so the person holding it knows only one was read."""
+    batch = tmp_path / "batch.json"
+    batch.write_text('[{"invoiceNo": "INV-1"}, {"invoiceNo": "INV-2"}, {"invoiceNo": "INV-3"}]')
+    model = Model(T3004)
+    with pytest.raises(ValueError, match="top level is a JSON list.*a list of 3 records.*nothing of it was sent"):
+        read(batch, model)
+    assert model.sent == []
+
+    dat = tmp_path / "batch.dat"
+    dat.write_text((UNFAMILIAR / "invoice_3004.dat").read_text() + "HDR|INV-3005|Coastal Bearings Co.|2026-02-07|2026-03-09|NET30\nLIN|WidgetB|1|500.00\nTOT|500.00\n")
+    invoice, method = read(dat, Model(T3004))
+    assert method == "llm_fallback"
+    assert [f for f in invoice.flags if f["code"] == "POSSIBLY_SEVERAL_INVOICES"] == [
+        {"code": "POSSIBLY_SEVERAL_INVOICES", "read": "INV-3004", "also_in_file": ["INV-3005"]}]
+    assert "POSSIBLY_SEVERAL_INVOICES" in decide(normalizer.check(invoice, INVENTORY).flags).because
+    single, _ = read(UNFAMILIAR / "invoice_3004.dat", Model(T3004))
+    assert "POSSIBLY_SEVERAL_INVOICES" not in codes(single)             # one number in the file: nothing to say
+
+
+def test_text_in_the_usual_windows_encodings_is_read(tmp_path):
+    """An export is not always UTF-8. UTF-16 with its byte-order mark, UTF-8 with one, and Windows-1252 are all text a person can read, and are read. A .txt that is really binary says so, without claiming .txt has no reader."""
+    from extraction import read_text
+    text = (UNFAMILIAR / "invoice_3004.dat").read_text() + "NOTE|Total due \u00a33000\n"
+    for name, data in (("utf16.dat", text.encode("utf-16")), ("bom.dat", text.encode("utf-8-sig")), ("win.dat", text.encode("cp1252"))):
+        (tmp_path / name).write_bytes(data)
+        assert read_text(tmp_path / name) == text, name
+        invoice, method = read(tmp_path / name, Model(T3004))
+        assert method == "llm_fallback" and "NOT_IN_SOURCE" not in codes(invoice), name
+    (tmp_path / "scan.txt").write_bytes(b"\x00\x01\x02\x03")
+    with pytest.raises(ValueError, match="^scan.txt is not a text file"):
+        read(tmp_path / "scan.txt", Model())
+
+
+def test_the_extraction_command_and_the_report_read_files_as_the_pipeline_does():
+    """One function decides how a file is read. extraction.normalize and the self-correction report go through it, so an unfamiliar format is read by the model there too, not parsed into an empty invoice or skipped."""
+    from extraction import Replay, normalize
+    from extraction.report import measure
+    replay = Replay(ROOT / "data" / "replays")
+    results = {Path(r["file"]).name: r for r in normalize([UNFAMILIAR], replay, INVENTORY)}
+    assert sorted(results) == ["invoice_3001.json", "invoice_3002.csv", "invoice_3003.xml", "invoice_3004.dat"]
+    assert results["invoice_3004.dat"]["invoice"]["invoice_number"] == "INV-3004"
+    assert results["invoice_3001.json"]["invoice"]["vendor_name"] == "Northwind Components"
+    rows = {r["file"]: r for r in measure([UNFAMILIAR], replay, INVENTORY)}
+    assert "error" not in rows["invoice_3003.xml"] and rows["invoice_3004.dat"]["after"]["holding"] == ["UNFAMILIAR_FORMAT"]
 
 
 # --- The real model on the four samples, from its recorded replies --------------------------------

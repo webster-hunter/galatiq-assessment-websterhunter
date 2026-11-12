@@ -35,6 +35,8 @@ SEVERITY = {
     # in an unknown layout), read by the model instead. Held so a person sees the first invoices
     # in a new format; change to WARN to let clean ones through.
     "UNFAMILIAR_FORMAT": "REVIEW",
+    # Read by the model from a file that names other invoice numbers too: it may be a batch, of which only one was read.
+    "POSSIBLY_SEVERAL_INVOICES": "REVIEW",
     "UNKNOWN_PRODUCT": "REVIEW",  # may be a misspelling of a real product, or something we don't stock
     "UNPARSEABLE": "REVIEW",  # value couldn't be read; the flag carries the raw value
     "QTY_NOT_WHOLE": "REVIEW",  # stock is counted in whole units
@@ -98,6 +100,8 @@ MEANING = {
     "TOTAL_MISMATCH": "the stated total is not the lines plus tax and shipping",
     "UNPARSEABLE": "a value could not be read as the kind of value its field needs; `value` is the text as written",
     "UNKNOWN_PRODUCT": "a line's product name is not in inventory",
+    "POSSIBLY_SEVERAL_INVOICES": "the model read one invoice (`read`) from a file that also names the invoice numbers in "
+                                 "`also_in_file`; the file may hold several invoices, and the others were not read",
     "UNFAMILIAR_FORMAT": "a file no parser can read: an unknown file type, or a JSON, CSV or XML file whose field names "
                          "are not the usual ones; `read_by` says whether the model read it instead (its values were then "
                          "checked against the file like any transcription)",

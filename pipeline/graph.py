@@ -68,7 +68,7 @@ from approval import APPROVE, HOLD, MAX_ROUNDS, REJECT, Decision, assess, critiq
 from ledger import Ledger
 from ledger import ledger as seen
 from ledger.ledger import currency_of
-from extraction import Provider, ProviderError, read
+from extraction import FALLBACK_SUFFIXES, Provider, ProviderError, read
 from normalizer.checks import usable_rate
 from normalizer.models import Invoice
 
@@ -127,7 +127,7 @@ def checkpointer(path: str | Path | None = None):
 
 
 def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledger | None = None, checkpoints=None,
-                rates=None):
+                rates=None, fallback_types=FALLBACK_SUFFIXES):
     """Build and compile the pipeline.
 
     The provider, inventory and ledger are not in the State. State is the data about one invoice, and it
@@ -143,6 +143,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         checkpoints: The checkpointer (see checkpointer()). Defaults to one in memory.
         rates: The rate service for invoices in another currency (see the rates package). None:
             such an invoice has no dollar estimate and is held as unsupported.
+        fallback_types: Extensions of the file types with no parser that are given to the model
+            when they are text (see extraction.read). Any other unknown type is reported unread.
 
     Returns:
         The compiled graph. Call .invoke({"path": ...}) for the final state, or .stream(...) to
@@ -161,7 +163,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         """
         path = Path(state["path"])
         try:
-            invoice, method = read(path, provider)
+            invoice, method = read(path, provider, fallback_types=fallback_types)
         except (*normalizer.LOAD_ERRORS, ProviderError) as e:
             # A node reports failure through the state, like any other result. The edge after
             # ingest reads `error` and routes to the `failed` node. Any other exception is a bug

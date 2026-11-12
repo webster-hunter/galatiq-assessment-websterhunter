@@ -213,7 +213,7 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
         with session() as (ledger, graph, rates):
             # The narrowing is done by the ledger, in SQL (Ledger.find_*): only matching rows are
             # read, and for a waiting invoice only then is its saved run loaded.
-            held, held_in_all = ledger.find_waiting(q) if outcome in ("", "waiting") else ([], ledger.find_waiting()[1])
+            held, held_in_all = ledger.find_waiting(q) if outcome in ("", "waiting") else ([], ledger.count_waiting())
             waiting = [_summary(e, saved(graph, e), rates) | {"stuck": bool(e["stuck"]) and {"action": e["action"], "reviewer": e["reviewer"]}}
                        for e in held]
             decided, decided_in_all = ledger.find_decided(q, outcome, limit)

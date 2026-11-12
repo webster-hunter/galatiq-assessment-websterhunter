@@ -18,19 +18,15 @@ import sqlite3
 import sys
 
 import normalizer
-from normalizer.parsing import LOADERS
 
-from . import MAX_ATTEMPTS, TEXT_SUFFIXES, ProviderError, Replay, extract
+from . import MAX_ATTEMPTS, ProviderError, Replay, read
 
 HOLDING = ("BLOCK", "REVIEW")
 _ORDER = ("BLOCK", "REVIEW", "WARN", "INFO", "NONE")
 
 
 def _run(path, provider, inventory, self_correct: bool):
-    if path.suffix.lower() in TEXT_SUFFIXES:
-        inv = extract(path, provider, max_attempts=MAX_ATTEMPTS if self_correct else 1)
-    else:
-        inv = LOADERS[path.suffix.lower()](path)
+    inv, _ = read(path, provider, max_attempts=MAX_ATTEMPTS if self_correct else 1)   # as the pipeline reads it
     return normalizer.check(inv, inventory, self_correct=self_correct)
 
 
@@ -57,7 +53,7 @@ def measure(paths, provider, inventory=None) -> list[dict]:
         A file that can't be loaded has file and error only.
     """
     rows = []
-    for p in normalizer.expand(paths, LOADERS.keys() | TEXT_SUFFIXES):
+    for p in normalizer.expand(paths, None):
         try:
             before, after = _run(p, provider, inventory, False), _run(p, provider, inventory, True)
         except (*normalizer.LOAD_ERRORS, ProviderError) as e:

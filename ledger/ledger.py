@@ -81,7 +81,9 @@ RUN_OUTCOMES = {"paid": "status = 'PAID'", "rejected": "status = 'REJECTED'", "s
                 "other": "status NOT IN ('PAID', 'REJECTED') AND status NOT LIKE 'SKIPPED%'", "waiting": "0"}
 # The same for a reviewer's decision: an approval counts as paid only if its payment confirmed.
 DECIDED_OUTCOMES = {"paid": "q.action = 'approve' AND p.status = 'PAID'", "rejected": "q.action = 'reject'",
-                    "other": "NOT (q.action = 'reject' OR (q.action = 'approve' AND p.status IS 'PAID'))",
+                    # IS / IS NOT, not = / !=: an entry closed as lost or superseded has no action, and a
+                    # comparison with NULL is neither true nor false, which would drop the row from every filter.
+                    "other": "NOT (q.action IS 'reject' OR (q.action IS 'approve' AND p.status IS 'PAID'))",
                     "skipped": "0", "waiting": "0"}
 # A queue entry with what the lists need from other tables: whether its decision was recorded but
 # never carried out (stuck), the payment made for it, and whether its finished run was logged.
@@ -200,12 +202,17 @@ class Ledger:
             self._db.execute("ALTER TABLE review_queue ADD COLUMN amount TEXT")
         if "currency" not in {row["name"] for row in self._db.execute("PRAGMA table_info(payments)")}:
             self._db.execute("ALTER TABLE payments ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'")
+        run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
         for column in ("source_path", "reasons", "note", "search"):  # added to runs after its first version
-            if column not in {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}:
+            if column not in run_columns:
                 self._db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
-        if "search" not in {row["name"] for row in self._db.execute("PRAGMA table_info(review_queue)")}:
+        queue_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(review_queue)")}
+        if "search" not in queue_columns:
             self._db.execute("ALTER TABLE review_queue ADD COLUMN search TEXT")
-        self._fill_search()
+        # Only a ledger that has just gained the column has rows without search text: every row
+        # written since has it. So the tables are scanned once, at the upgrade, not at every opening.
+        if "search" not in run_columns or "search" not in queue_columns:
+            self._fill_search()
         self._pay, self._now = pay, now
 
     def close(self) -> None:
@@ -504,7 +511,11 @@ class Ledger:
         """
         match, params = _matching(words, "q.search")
         rows = [dict(r) for r in self._db.execute(f"{_QUEUE} WHERE {_WAITING} AND {match} ORDER BY q.id", params)]
-        return rows, self._db.execute(f"SELECT COUNT(*) FROM ({_QUEUE} WHERE {_WAITING})").fetchone()[0]
+        return rows, self.count_waiting()
+
+    def count_waiting(self) -> int:
+        """How many queue entries need a person, without reading them."""
+        return self._db.execute(f"SELECT COUNT(*) FROM ({_QUEUE} WHERE {_WAITING})").fetchone()[0]
 
     def find_decided(self, words: str = "", outcome: str = "", limit: int = 200) -> tuple[list[dict], int]:
         """Queue entries a reviewer has dealt with (or that were closed as lost or superseded), newest first.

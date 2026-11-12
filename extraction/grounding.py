@@ -86,13 +86,44 @@ def as_written(text: str, suffix: str) -> str:
     return "\n".join("  ".join(cells) for cells in rows)
 
 
+def _json_objects(text: str) -> list[str]:
+    """Every JSON object in the text that holds no array, at any depth, as written.
+
+    Found by matching braces in the raw text (skipping strings), not by parsing: the check
+    compares what the model returned with the file's own characters, and a parser would rewrite
+    250.00 as 250.0.
+    """
+    found, open_objects, in_string, escaped = [], [], False, False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            open_objects.append([i, False])
+        elif ch == "[":
+            for obj in open_objects:  # every object this array sits inside holds an array
+                obj[1] = True
+        elif ch == "}" and open_objects:
+            start, holds_array = open_objects.pop()
+            if not holds_array:
+                found.append(_squash(text[start:i + 1]))
+    return found
+
+
 def records(text: str, suffix: str) -> list[str]:
     """The units of a structured file that play the part of a row: where one line item's values sit together.
 
     In a text invoice a line item is one printed line. In JSON it is one object, in XML one
-    element, and either may be spread over several lines of the file. So for those, each
-    innermost JSON object and each XML element whose children are all leaves is a record. A CSV
-    row is already a line.
+    element, and either may be spread over several lines of the file and may hold smaller
+    objects of its own (a price with an amount and a currency). So a record is any JSON object
+    that holds no array, and any XML element under which no tag repeats: the largest units that
+    are still one thing and not a list of things. A CSV row is already a line.
 
     Args:
         text: The file's text.
@@ -102,15 +133,19 @@ def records(text: str, suffix: str) -> list[str]:
         The records, each squashed to one line. Empty for a format with none, or a file that doesn't parse.
     """
     if suffix == ".json":
-        return [_squash(m) for m in re.findall(r"\{[^{}]*\}", text)]
+        return _json_objects(text)
     if suffix == ".xml":
         import xml.etree.ElementTree as ET
         try:
             root = ET.fromstring(text)
         except ET.ParseError:
             return []
-        return [_squash(" ".join([*e.attrib.values(), *(c.text or "" for c in e), *(v for c in e for v in c.attrib.values())]))
-                for e in root.iter() if len(e) and not any(len(c) for c in e)]
+
+        def is_one_thing(element) -> bool:
+            return not any(len({c.tag for c in e}) < len(e) for e in element.iter())
+
+        return [_squash(" ".join(v for e in element.iter() for v in (*e.attrib.values(), e.text or "")))
+                for element in root.iter() if len(element) and is_one_thing(element)]
     return []
 
 

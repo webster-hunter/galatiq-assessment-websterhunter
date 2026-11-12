@@ -432,8 +432,8 @@ def test_rows_from_before_the_search_column_are_given_their_search_text(paths):
     import sqlite3
     from ledger import Ledger
     db = sqlite3.connect(paths["ledger"])
-    db.execute("UPDATE runs SET search = NULL")
-    db.execute("UPDATE review_queue SET search = NULL")
+    db.execute("ALTER TABLE runs DROP COLUMN search")              # as a ledger from before the column was
+    db.execute("ALTER TABLE review_queue DROP COLUMN search")
     db.commit()
     db.close()
     ledger = Ledger(paths["ledger"])
@@ -459,3 +459,30 @@ def test_a_file_in_a_format_nothing_reads_is_reported_not_passed_over(paths, tmp
     client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
     other = client.get("/api/queue", params={"outcome": "other"}).json()["automatic"]
     assert sorted(a["file"] for a in other) == ["invoice_2001.docx", "invoice_2002.xlsx"] and other[0]["status"] == "ERROR"
+
+
+def test_an_entry_closed_as_lost_is_found_under_other(paths, tmp_path):
+    """An entry with no action recorded (closed as lost, or superseded) is neither paid nor rejected. It belongs to "other", and must not drop out of every filter."""
+    import sqlite3
+    sqlite3.connect(tmp_path / "other.db").close()
+    lost = browser(create_app(paths["ledger"], tmp_path / "other.db", paths["rates"]))
+    lost.post(f"/api/queue/{by_file(lost)['invoice_1005.json']['id']}/reopen")
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    client.post(f"/api/queue/{by_file(client)['invoice_1016.json']['id']}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
+    shown = {o: [(d["file"][8:], d["status"]) for d in client.get("/api/queue", params={"outcome": o}).json()["decided"]]
+             for o in ("other", "paid", "rejected")}
+    assert shown == {"other": [("1005.json", "LOST")], "paid": [("1016.json", "RESOLVED")], "rejected": []}
+
+
+def test_opening_the_ledger_does_not_scan_it_and_counting_does_not_read_rows(paths):
+    """Search text is filled in once, when a ledger gains the column. After that, opening the ledger runs no such scan, and the count of waiting invoices is a count."""
+    from ledger import Ledger
+    calls = []
+    original = Ledger._fill_search
+    Ledger._fill_search = lambda self: calls.append(1) or original(self)
+    try:
+        ledger = Ledger(paths["ledger"])
+    finally:
+        Ledger._fill_search = original
+    assert calls == [] and ledger.count_waiting() == 6 == ledger.find_waiting()[1]
+
