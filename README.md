@@ -35,9 +35,6 @@ Three things in that table are easy to get wrong, and each is a test in this rep
 - **1003's "URGENT - pay immediately" changes nothing.** It is one of four signals counted by
   code. No model is asked whether the invoice looks suspicious.
 
-[`docs/design-and-demo.pdf`](docs/design-and-demo.pdf) has the design decisions, a demo walkthrough,
-and how these 20 outcomes changed as each stage was built.
-
 ## Run it
 
 Requires Python 3.11 or later (tested on 3.11 and 3.13, on Linux and Windows).
@@ -256,15 +253,6 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | Processing invoices from the browser | The screen is for decisions. Invoices are still processed by `main.py` |
 | Deployment, logins, concurrency | Out of scope for a local prototype |
 
-## What I would not claim
-
-- **The percentages don't generalise.** Twenty files, built to be awkward.
-- **The model critic has not earned trust.** Across three recordings it found no real problem,
-  and raised four that weren't until its instructions were corrected. The checks in code are the
-  dependable part. [`docs/approval.md`](docs/approval.md) has the detail.
-- **Model output varies between runs,** even at temperature 0. The recordings pin one run, and
-  tests fail if a re-recording behaves differently.
-
 ## Where things are
 
 | Path | What |
@@ -277,6 +265,5 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `ledger/`, `rates/` | What has been seen and paid; the mock rate service. [Reference](docs/ledger-and-review.md) |
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/unfamiliar/`, `data/replays/` | The 20 sample invoices; four files in formats no parser knows; the model's recorded replies |
-| `docs/design-and-demo.pdf` | Design decisions, a demo walkthrough with the command for each step, how the outcomes changed as each stage was built, and what was left out. Built from `docs/design-and-demo.html` by `node docs/build-pdf.js` |
 | `tests/` | 341 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

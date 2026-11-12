@@ -14,3 +14,8 @@ prep/
 
 # The page is built with `npm run build` in web/frontend; the built web/static/app.js is committed
 node_modules/
+
+# Design and demo notes are kept locally, not in the repository
+docs/design-and-demo.pdf
+docs/design-and-demo.html
+docs/build-pdf.js

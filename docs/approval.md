@@ -160,8 +160,6 @@ Two faults were found earlier by reading recorded replies, and neither was the m
   the line said "rush order". The instructions now name Acme Corp as the buyer and say to read a
   line's note before asking about that line.
 
-[`design-and-demo.pdf`](design-and-demo.pdf) shows how the 20 outcomes changed as
-each stage was added, including the agent's mistaken hold.
 
 Limits:
 
