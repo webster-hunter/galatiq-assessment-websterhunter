@@ -44,13 +44,18 @@ def _amount(entry: dict, invoice, rates) -> str:
     return f"{total} {invoice.currency} " + (f"(~${estimate['usd_estimate']:,.2f})" if estimate else "(no rate)")
 
 
-def _table(entries: list[dict], invoices: dict, rates) -> str:
-    if not entries:
+def _table(entries: list[dict], invoices: dict, rates, stuck: list[dict] = ()) -> str:
+    """The review list. `stuck` are entries already decided whose run never finished; they are listed too, marked."""
+    if not entries and not stuck:
         return "Nothing is waiting for review."
     lines = [f"{'#':>3}  {'file':<28}{'vendor':<30}{'total':>28}  held for", "-" * 124]
     for e in entries:
         lines.append(f"{e['id']:>3}  {e['source_file']:<28}{(e['vendor'] or '-')[:28]:<30}"
                      f"{_amount(e, invoices.get(e['id']), rates):>28}  {e['reasons']}")
+    for e in stuck:
+        lines.append(f"{e['id']:>3}  {e['source_file']:<28}{(e['vendor'] or '-')[:28]:<30}"
+                     f"{_amount(e, invoices.get(e['id']), rates):>28}  DECIDED ({e['action']} by {e['reviewer']}) BUT NOT "
+                     f"CARRIED OUT: run `{e['action']} {e['id']} --by NAME` again to finish it")
     lines.append(f"\n{len(entries)} waiting. Decide one with: python review.py approve N --by NAME   or   reject N --by NAME --note WHY")
     return "\n".join(lines)
 
@@ -75,6 +80,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No ledger at {args.ledger}: nothing has been processed yet.", file=sys.stderr)
         return 1
     ledger = Ledger(args.ledger)
+    # The saved runs must already exist: opening a path that doesn't would create an empty file,
+    # and every held invoice would then look as if its run were lost.
+    if not Path(args.checkpoints).exists():
+        print(f"No saved runs at {args.checkpoints}. Held invoices can be listed from the ledger but not shown in full "
+              "or decided: pass --checkpoints with the file main.py used.", file=sys.stderr)
+        if args.command not in (None, "list"):
+            return 1
+        print(_table(ledger.queue(), {}, None, ledger.decided_not_finished()))
+        return 0
     try:
         rates = MockRates(args.rates)
     except sqlite3.Error:
@@ -87,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         return graph.get_state(_thread(entry["thread_id"])).values.get("invoice")
 
     if args.command in (None, "list"):
-        waiting = ledger.queue()
-        print(_table(waiting, {e["id"]: saved_invoice(e) for e in waiting}, rates))
+        waiting, stuck = ledger.queue(), ledger.decided_not_finished()
+        print(_table(waiting, {e["id"]: saved_invoice(e) for e in waiting + stuck}, rates, stuck))
         return 0
 
     if args.command == "show":

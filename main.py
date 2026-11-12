@@ -60,11 +60,11 @@ def set_aside(ledger_path: Path) -> Path | None:
     if not ledger_path.exists():
         return None
     old = Ledger(ledger_path)
-    count, total = len(old.payments()), old.total_paid()
+    count, totals = len(old.payments()), _sums(old.paid_totals())
     old.close()
     kept = ledger_path.with_name(f"{ledger_path.name}.{datetime.now():%Y%m%d-%H%M%S-%f}.bak")
     ledger_path.rename(kept)
-    print(f"--fresh: the ledger was set aside as {kept.name}. It recorded {count} payments, ${total:,.2f}; "
+    print(f"--fresh: the ledger was set aside as {kept.name}. It recorded {count} payments, {totals}; "
           "with an empty ledger those invoices are not recognised and will be paid again.", file=sys.stderr)
     return kept
 
@@ -125,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
             results.append({"file": str(file), "result": state["result"], "decision": decision,
                             "trail": state["trail"], "invoice": asdict(state["invoice"])})
     paid = [r["result"] for r in results if r.get("result", {}).get("status") == "PAID" and not r["result"]["repeated"]]
+    not_sent = [r["file"] for r in results if r.get("result", {}).get("status") == "PAYMENT_NOT_SENT"]
+    if not_sent:
+        print(f"{len(not_sent)} payment(s) could not be attempted and will be taken up again on the next run: "
+              f"{', '.join(Path(f).name for f in not_sent)}", file=sys.stderr)
     unconfirmed = [r["file"] for r in results if r.get("result", {}).get("status") == "PAYMENT_UNCONFIRMED"]
     if unconfirmed:
         print(f"{len(unconfirmed)} payment(s) sent but not confirmed; check with the bank before anything is "

@@ -4,8 +4,9 @@
 
 The brief rules out internet access, so, like the inventory database and mock_payment, the rate
 service is simulated locally. Everything that needs a rate asks for it through one method,
-usd_rate(currency, on). A real service is one more class with that method.
+usd_rate(currency, on). A real service is one more class with that method. This package imports
+nothing else from the project.
 """
-from .service import MAX_RATE_AGE_DAYS, MockRates, Rate, RateService, seed
+from .service import MockRates, Rate, RateService, seed
 
-__all__ = ["MAX_RATE_AGE_DAYS", "MockRates", "Rate", "RateService", "seed"]
+__all__ = ["MockRates", "Rate", "RateService", "seed"]

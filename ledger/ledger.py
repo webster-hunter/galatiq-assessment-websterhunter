@@ -14,6 +14,7 @@ PDF and a TXT of one invoice match although the PDF leaves out the subtotal line
 not in the fingerprint, so the same bill under a slightly different vendor name can be noticed.
 """
 import hashlib
+import inspect
 import re
 import sqlite3
 from contextlib import closing
@@ -80,6 +81,15 @@ def identity(inv: Invoice) -> tuple[str, str, int] | None:
         return None
     digits = re.sub(r"\D", "", inv.revision or "")
     return _alnum(inv.vendor_name), number, int(digits) if digits else 0
+
+
+def _takes_currency(pay) -> bool:
+    """Whether a payment function accepts a third argument, the currency (the brief's version takes two)."""
+    try:
+        params = list(inspect.signature(pay).parameters.values())
+    except (TypeError, ValueError):
+        return True  # can't tell (a builtin, say): let the call decide
+    return len(params) >= 3 or any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params)
 
 
 def currency_of(inv: Invoice) -> str:
@@ -245,9 +255,9 @@ class Ledger:
         payment costs one invoice and the rest of a batch carries on.
 
         Returns:
-            {"payment_key", "amount", "currency", "status", "repeated"}: status is PAID, or PENDING for a
-            payment that never confirmed (with "error" if it failed just now); repeated is True
-            if nothing was sent now.
+            {"payment_key", "amount", "currency", "status", "repeated"}: status is PAID; PENDING for
+            a payment that never confirmed (with "error" if it failed just now); or NOT_SENT, with
+            "error", if it couldn't be attempted. repeated is True if a payment was already on record.
 
         Raises:
             ValueError: The invoice has no identity or no positive total. Approval should never
@@ -259,6 +269,12 @@ class Ledger:
             raise ValueError(f"refusing to pay {inv.source_file}: no invoice number or no positive amount")
         pkey = payment_key(*key)
         currency = currency_of(inv)
+        if currency != "USD" and not _takes_currency(self._pay):
+            # Decided before anything is written: this payment can't be attempted at all, which is
+            # different from one that was sent and never confirmed. Nothing is locked, so it can
+            # be paid once the payment function supports the currency.
+            return {"payment_key": pkey, "amount": amount, "currency": currency, "status": "NOT_SENT", "repeated": False,
+                    "error": f"the payment function takes no currency, so {currency} can't be paid through it"}
         try:
             with self._db:  # the PRIMARY KEY on payment_key is the lock: only one insert can succeed
                 self._db.execute("INSERT INTO payments (payment_key, vendor, amount, status, created_at, currency) "
@@ -301,6 +317,37 @@ class Ledger:
     def queue_entry(self, queue_id: int) -> dict | None:
         row = self._db.execute("SELECT * FROM review_queue WHERE id=?", (queue_id,)).fetchone()
         return dict(row) if row else None
+
+    def decided_not_finished(self) -> list[dict]:
+        """Queue entries with a decision recorded whose invoice is still held: the run never finished.
+
+        A decision is written here first and carried out second. If the second step fails, this
+        is how the gap stays visible: the entry still shows in the review list, and repeating
+        the decision completes it.
+        """
+        return [dict(r) for r in self._db.execute(
+            "SELECT q.* FROM review_queue q JOIN invoices i ON i.vendor_key=q.vendor_key AND i.number_key=q.number_key "
+            "AND i.revision=q.revision WHERE q.status='RESOLVED' AND i.status='HELD' ORDER BY q.id")]
+
+    def reopen(self, entry: dict, why: str) -> bool:
+        """Give up on a queue entry whose saved run is gone, and put its invoice back to be processed again.
+
+        The entry is closed as LOST and the invoice's status returns to RECEIVED, so the next run
+        over its file treats it as unfinished: it is checked and decided afresh, and held again
+        under a new queue number if the policy still holds it.
+
+        Returns:
+            True if an invoice was put back; False if the entry had no invoice row of its own
+            (one with no invoice number, or a conflicting duplicate), which is processed again
+            anyway since nothing was recorded for it.
+        """
+        with self._db:
+            self._db.execute("UPDATE review_queue SET status='LOST', note=?, resolved_at=? WHERE id=?",
+                             (why, self._now().isoformat(), entry["id"]))
+            done = self._db.execute("UPDATE invoices SET status='RECEIVED', detail=?, updated_at=? "
+                                    "WHERE vendor_key=? AND number_key=? AND revision=? AND status='HELD'",
+                                    (why, self._now().isoformat(), entry["vendor_key"], entry["number_key"], entry["revision"]))
+        return done.rowcount > 0
 
     def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None, amount: Decimal | None = None) -> None:
         """Record a person's decision on a queued invoice: who, what, why, and any amount they set."""

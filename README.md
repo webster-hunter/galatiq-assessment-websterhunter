@@ -305,7 +305,9 @@ as PENDING before the payment function is called and marked PAID after it return
 fails or the process dies in between, the PENDING row stops a blind retry, since the first call
 may have gone through. The invoice is reported as `PAYMENT_UNCONFIRMED` for a person to check
 with the bank, a revision of it is treated like a revision of a paid invoice, and the rest of
-the batch carries on.
+the batch carries on. A payment that could not be attempted at all (a payment function with no
+currency argument, asked to pay euros) is different: nothing is locked, it is reported as
+`PAYMENT_NOT_SENT`, and the invoice is taken up again on the next run.
 
 ### The sample folder, in file order
 
@@ -366,6 +368,19 @@ python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send 
 The policy can never be loosened by a model. It can be overruled by a named person, and that is
 recorded.
 
+A held invoice lives in two files: its queue entry in the ledger, and its paused run in the
+checkpoints. Three things keep them from drifting apart:
+
+- **A decision that was recorded but not carried out stays in the list,** marked as such.
+  Repeating it finishes it, with the reviewer and note first recorded.
+- **A held invoice whose saved run is missing is put back.** Deciding it reports the loss, closes
+  the entry, and returns the invoice to unprocessed, so running its file again checks and queues
+  it afresh.
+- **`review.py` never creates a checkpoints file.** Pointed at a path with no saved runs it lists
+  from the ledger, says so, and decides nothing.
+
+Runs that reach an outcome have their saved states deleted; only paused runs are kept.
+
 ## Exchange rates
 
 An invoice billed in another currency (1014, in EUR) is paid in that currency: the vendor is owed
@@ -385,8 +400,11 @@ that method.
   estimate. The `$10,000` threshold and near-threshold checks run on the estimate, so 9,500 EUR
   is over the limit. The invoice is held so a person sees each foreign-currency payment; setting
   the flag to WARN in `severity.py` would let clean ones through on the estimate.
-- **Without a usable rate** (currency not carried, no rate that early, or one more than 7 days
-  old): `CURRENCY_UNSUPPORTED` (REVIEW) with the reason. No threshold check is possible.
+- **Without a usable rate** (currency not carried, no rate that early, one more than 7 days old,
+  or the service failing): `CURRENCY_UNSUPPORTED` (REVIEW) with the reason. No threshold check is
+  possible. A failing rate service costs that invoice its estimate; the batch carries on.
+- **An invoice with no date** is priced as of today, so an old rate is caught as stale and not
+  used on trust.
 - **Payment:** `mock_payment(vendor, amount, currency)`. Dollar payments still use the brief's
   two-argument call. The ledger records each payment's currency and never adds currencies together.
 
@@ -658,7 +676,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
 | `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
 | `CURRENCY_CONVERTED` | `currency`, with `usd_per_unit`, `rate_date`, `rate_source`, `usd_estimate` | REVIEW | Billed in another currency; the rate service gives a dollar estimate. Paid in its own currency |
-| `CURRENCY_UNSUPPORTED` | `currency`, with `reason` (`NO_RATE`, `STALE_RATE`, `NO_RATE_SERVICE`) | REVIEW | Billed in another currency and there is no usable rate, so its dollar cost isn't known |
+| `CURRENCY_UNSUPPORTED` | `currency`, with `reason` (`NO_RATE`, `STALE_RATE`, `NO_RATE_SERVICE`, `RATE_SERVICE_ERROR: ...`) | REVIEW | Billed in another currency and there is no usable rate, so its dollar cost isn't known |
 | `EXTRACTION_RETRIED` | `attempts`, `outcome` (`RESOLVED` or `UNRESOLVED`), `stopped` | INFO | LLM extraction only: the file needed more than one model attempt |
 | `SUPERSEDES_UNPAID` | `earlier_file`, `earlier_status` | INFO | From the ledger: this revision replaces an earlier one that had not been paid |
 | `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |

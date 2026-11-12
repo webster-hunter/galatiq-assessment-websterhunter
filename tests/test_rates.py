@@ -5,7 +5,8 @@ from decimal import Decimal
 
 import pytest
 
-from rates import MAX_RATE_AGE_DAYS, MockRates, Rate, seed
+from normalizer.checks import MAX_RATE_AGE_DAYS, usable_rate
+from rates import MockRates, Rate, seed
 
 
 @pytest.fixture
@@ -46,3 +47,35 @@ def test_seeding_is_repeatable_and_the_service_never_creates_a_file(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         MockRates(missing)
     assert not missing.exists()
+
+
+def test_an_undated_invoice_is_priced_as_of_today_so_an_old_rate_is_caught(rates):
+    """With no invoice date the rate is judged against today, not taken on trust: fresh on the day it was published, stale months later."""
+    rate, problem = usable_rate(rates, "EUR", None, today=date(2026, 1, 28))
+    assert (rate.as_of, problem) == (date(2026, 1, 26), None)
+    rate, problem = usable_rate(rates, "EUR", None, today=date(2026, 11, 12))
+    assert (rate.as_of, problem) == (date(2026, 1, 26), "STALE_RATE")
+    assert usable_rate(rates, "EUR", date(2026, 1, 26), today=date(2026, 11, 12)) == (rate, None)   # a dated invoice uses its own date
+
+
+def test_usable_rate_names_each_reason(rates):
+    """No service, no rate, a stale rate and a failing service each come back as a reason, never as an exception."""
+    class Down:
+        def usd_rate(self, currency, on=None):
+            raise ConnectionError("unreachable")
+
+    assert usable_rate(None, "EUR", date(2026, 1, 26)) == (None, "NO_RATE_SERVICE")
+    assert usable_rate(rates, "CHF", date(2026, 1, 26)) == (None, "NO_RATE")
+    assert usable_rate(rates, "EUR", date(2026, 2, 20))[1] == "STALE_RATE"
+    assert usable_rate(Down(), "EUR", date(2026, 1, 26)) == (None, "RATE_SERVICE_ERROR: ConnectionError: unreachable")
+
+
+def test_the_rates_package_stands_alone():
+    """rates/ imports nothing else from this project, so a real rate service can replace it without touching the checks."""
+    import ast
+    from pathlib import Path
+    ours = {"normalizer", "extraction", "approval", "ledger", "pipeline"}
+    for path in (Path(__file__).resolve().parent.parent / "rates").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0 else []
+            assert not any(n.split(".")[0] in ours for n in names), (path.name, names)

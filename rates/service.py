@@ -16,8 +16,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
-from normalizer.checks import MAX_RATE_AGE_DAYS  # noqa: F401  (how old a rate may be; the checks own the rule)
-
 # Made-up rates for the weeks the sample invoices fall in. NOT real market quotes: they exist so
 # the prototype has something to look up, exactly as the inventory seed is invented stock.
 SEED = [
@@ -79,7 +77,7 @@ class MockRates:
 
         Returns:
             The Rate, or None if the currency isn't in the table or has no rate that early.
-            Whether a rate is too old to use is the caller's decision: see Rate.age_days.
+            Whether a rate is too old to use is the caller's decision (normalizer.checks.usable_rate).
         """
         sql = "SELECT as_of, usd_per_unit FROM rates WHERE currency=?" + (" AND as_of<=?" if on else "") + \
               " ORDER BY as_of DESC LIMIT 1"

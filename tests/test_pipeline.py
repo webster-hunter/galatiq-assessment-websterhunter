@@ -540,3 +540,115 @@ def test_review_command_lists_shows_and_decides(capsys, tmp_path):
     assert out["result"]["usd_estimate"]["usd_estimate"] == "4480.16" and out["review"]["reviewer"] == "Dana"
     assert "Paid 4125.00 EUR to TechParts International" in captured.err
     assert review.main(where) == 0 and "Nothing is waiting" in capsys.readouterr().out
+
+
+# --- Fixes from the second code review ---------------------------------------------------------------
+
+def test_a_decision_recorded_but_not_carried_out_can_be_finished(graph, ledger, monkeypatch):
+    """The process dies after the decision is written and before the run resumes. The entry stays visible as decided-not-finished; repeating the decision completes it, as first recorded, and a different decision is refused."""
+    import pipeline.graph as g
+    queue_id, _ = held(graph, "invoice_1016.json")
+    real = g._stream
+    monkeypatch.setattr(g, "_stream", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("process died")))
+    with pytest.raises(RuntimeError):
+        release(graph, ledger, queue_id, "approve", "Dana Lee", "Confirmed with purchasing")
+    monkeypatch.setattr(g, "_stream", real)
+
+    assert ledger.queue() == [] and [e["id"] for e in ledger.decided_not_finished()] == [queue_id]
+    assert ledger.payments() == []
+    with pytest.raises(ValueError, match="already decided: approve by Dana Lee"):
+        release(graph, ledger, queue_id, "reject", "Someone Else", "no")
+    state = release(graph, ledger, queue_id, "approve", "Someone Else")
+    assert (state["result"]["status"], state["result"]["approved_by"]) == ("PAID", "Dana Lee")   # the recorded decision, not the retyped one
+    assert state["review"]["note"] == "Confirmed with purchasing"
+    assert ledger.decided_not_finished() == [] and len(ledger.payments()) == 1
+
+
+def test_a_held_invoice_whose_saved_run_is_lost_is_put_back(tmp_path):
+    """The checkpoints file is gone. Releasing says so, closes the entry as LOST and resets the invoice; running its file again checks it afresh and queues it under a new number, from which it can be released."""
+    ledger = Ledger(tmp_path / "l.db", pay=lambda vendor, amount: None)
+    first = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp1.db"))
+    lost, _ = held(first, "invoice_1016.json")
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp2.db"))   # other checkpoints
+    with pytest.raises(ValueError, match="no saved run to resume.*closed as LOST.*run main.py on invoice_1016.json again"):
+        release(graph, ledger, lost, "approve", "Dana Lee")
+    assert ledger.queue_entry(lost)["status"] == "LOST" and ledger.invoices()[0]["status"] == "RECEIVED"
+
+    state = run(graph, INVOICES / "invoice_1016.json")
+    assert state["trail"][2]["seen"] == "UNFINISHED" and state["result"]["status"] == "HELD"
+    again = state["result"]["queue_id"]
+    assert again != lost and [e["id"] for e in ledger.queue()] == [again]
+    assert release(graph, ledger, again, "approve", "Dana Lee")["result"]["status"] == "PAID"
+
+
+def test_a_payment_that_cannot_be_attempted_is_not_called_unconfirmed(tmp_path):
+    """A payment function with the brief's two arguments can't pay euros. Nothing is sent, nothing is locked, and the invoice is taken up again: with a function that takes a currency, it is paid."""
+    seed_rates(tmp_path / "rates.db")
+    rates = MockRates(tmp_path / "rates.db")
+    ledger = Ledger(":memory:", pay=lambda vendor, amount: pytest.fail("called with two arguments"))
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
+    queue_id, _ = held(graph, "invoice_1014.xml")
+    result = release(graph, ledger, queue_id, "approve", "Dana Lee")["result"]
+    assert result["status"] == "PAYMENT_NOT_SENT" and "takes no currency" in result["error"]
+    assert ledger.payments() == [] and ledger.invoices()[0]["status"] == "RECEIVED"
+
+    paid = []
+    ledger._pay = lambda vendor, amount, currency="USD": paid.append((amount, currency))
+    queue_id = run(graph, INVOICES / "invoice_1014.xml")["result"]["queue_id"]     # unfinished: checked and held again
+    assert release(graph, ledger, queue_id, "approve", "Dana Lee")["result"]["status"] == "PAID"
+    assert paid == [(Decimal("4125.00"), "EUR")]
+
+
+def test_a_failing_rate_service_costs_one_estimate_not_the_batch(ledger):
+    """The rate service raises. The EUR invoice is held as unsupported with the error as its reason, and the next file is processed normally."""
+    class Down:
+        def usd_rate(self, currency, on=None):
+            raise TimeoutError("rate service not answering")
+
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=Down())
+    state = run(graph, INVOICES / "invoice_1014.xml")
+    [f] = [f for f in state["invoice"].flags if f["code"] == "CURRENCY_UNSUPPORTED"]
+    assert f["reason"] == "RATE_SERVICE_ERROR: TimeoutError: rate service not answering" and state["result"]["status"] == "HELD"
+    assert run(graph, INVOICES / "invoice_1006.csv")["result"]["status"] == "PAID"
+
+
+def test_only_paused_runs_keep_their_saved_state(tmp_path):
+    """After the whole folder, the checkpoints file holds the seven held runs and nothing for the thirteen that finished."""
+    import sqlite3
+    ledger = Ledger(":memory:", pay=lambda vendor, amount: None)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(tmp_path / "cp.db"))
+    for p in sorted(INVOICES.iterdir()):
+        run(graph, p)
+    db = sqlite3.connect(tmp_path / "cp.db")
+    threads = {row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}
+    assert threads == {e["thread_id"] for e in ledger.queue()} and len(threads) == 7
+    release(graph, ledger, ledger.queue()[0]["id"], "approve", "Dana Lee")           # a released run finishes, and is cleared too
+    assert len({row[0] for row in db.execute("SELECT DISTINCT thread_id FROM checkpoints")}) == 6
+    db.close()
+
+
+def test_fresh_warning_reports_every_currency_paid(capsys, tmp_path):
+    """The --fresh warning names what the old ledger paid in each currency, not only the dollars."""
+    import review
+    where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
+    main.main([f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", *where])
+    main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
+    review.main([*where, "approve", "1", "--by", "Dana"])
+    capsys.readouterr()
+    main.main([f"--invoice_path={INVOICES / 'invoice_1001.txt'}", "--offline", "--fresh", *where])
+    assert "2 payments, $2,750.00 + 4,125.00 EUR" in capsys.readouterr().err
+
+
+def test_review_does_not_create_a_checkpoints_file_or_decide_without_one(capsys, tmp_path):
+    """Given a path with no saved runs, review.py lists from the ledger with a warning, refuses to decide, and leaves no new file behind. The held invoice is untouched."""
+    import review
+    good = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
+    main.main([f"--invoice_path={INVOICES / 'invoice_1016.json'}", "--offline", *good])
+    capsys.readouterr()
+    wrong = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "typo.db")]
+    assert review.main(wrong) == 0
+    out = capsys.readouterr()
+    assert "invoice_1016.json" in out.out and "No saved runs at" in out.err
+    assert review.main([*wrong, "approve", "1", "--by", "Dana"]) == 1
+    assert not (tmp_path / "typo.db").exists()
+    assert review.main([*good, "approve", "1", "--by", "Dana"]) == 0     # still there, and releasable with the right file

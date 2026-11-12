@@ -5,6 +5,7 @@ Each check adds a flag with a stable code and its evidence. Severity is graded s
 """
 import re
 import sqlite3
+from datetime import date
 from collections import defaultdict
 from contextlib import closing
 from decimal import ROUND_HALF_UP, ROUND_UP, Decimal
@@ -49,7 +50,41 @@ WIRE_WORDS = re.compile(r"\b(wire(d| transfers?)?|bank transfers?|(new|updated|c
 MAX_RATE_AGE_DAYS = 7
 
 
-def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None) -> list[dict]:
+def usable_rate(rates, currency: str, on: date | None, today: date | None = None):
+    """Ask the rate service for a rate that can be relied on. The one place this rule lives.
+
+    The rate wanted is the one in force on the invoice date. An invoice with no date is priced as
+    of today, so that an old rate is still caught as old. A rate more than MAX_RATE_AGE_DAYS
+    before that date is too stale to estimate with.
+
+    A rate service is something outside this program, and can fail. A failure here must cost one
+    invoice its estimate, not stop the batch, so any error from the lookup is reported as a reason.
+
+    Args:
+        rates: The rate service (anything with usd_rate(currency, on)), or None.
+        currency: The invoice's currency.
+        on: The invoice date, or None if it has none.
+        today: The date to price an undated invoice at; defaults to the system date.
+
+    Returns:
+        (rate, None) if there is a usable rate, else (rate or None, reason): NO_RATE_SERVICE,
+        NO_RATE, STALE_RATE, or RATE_SERVICE_ERROR with the error text after a colon.
+    """
+    if rates is None:
+        return None, "NO_RATE_SERVICE"
+    wanted = on or today or date.today()
+    try:
+        rate = rates.usd_rate(currency, wanted)
+    except Exception as e:  # whatever a rate service throws: a lookup that failed, not a bad invoice
+        return None, f"RATE_SERVICE_ERROR: {type(e).__name__}: {e}"
+    if rate is None:
+        return None, "NO_RATE"
+    if rate.age_days(wanted) > MAX_RATE_AGE_DAYS:
+        return rate, "STALE_RATE"
+    return rate, None
+
+
+def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None, today: date | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
     Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
@@ -64,6 +99,7 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None) -> l
         inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
         rates: A rate service: anything with usd_rate(currency, on) returning a rate (see the
             rates package). None means an invoice in another currency has no dollar estimate.
+        today: The date an undated foreign-currency invoice is priced at; defaults to the system date.
 
     Returns:
         New flag dicts (without severity; load() adds it), in check order.
@@ -153,13 +189,11 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None) -> l
         # paid so. The rate service supplies a dollar ESTIMATE, used to judge the invoice against
         # the dollar thresholds and to show a reviewer what it costs. Without a usable rate the
         # invoice can't be weighed at all.
-        rate = rates.usd_rate(inv.currency, inv.date) if rates is not None else None
-        age = rate.age_days(inv.date) if rate else None
-        if rate is None or (age is not None and age > MAX_RATE_AGE_DAYS):
+        rate, problem = usable_rate(rates, inv.currency, inv.date, today)
+        if problem:
             usd_total = None
-            flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency,
-                          "reason": "NO_RATE_SERVICE" if rates is None else "NO_RATE" if rate is None else "STALE_RATE",
-                          **({"rate_date": rate.as_of, "rate_age_days": age} if rate else {})})
+            flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency, "reason": problem,
+                          **({"rate_date": rate.as_of} if rate else {})})
         else:
             usd_total = rate.to_usd(inv.total) if inv.total is not None else None
             flags.append({"code": "CURRENCY_CONVERTED", "field": "currency", "value": inv.currency,

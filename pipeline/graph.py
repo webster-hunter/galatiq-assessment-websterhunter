@@ -56,7 +56,7 @@ from approval import APPROVE, HOLD, REJECT, Decision, decide
 from ledger import Ledger
 from ledger import ledger as seen
 from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
-from normalizer.checks import MAX_RATE_AGE_DAYS
+from normalizer.checks import usable_rate
 from normalizer.models import Invoice
 from normalizer.parsing import LOADERS
 
@@ -238,12 +238,14 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         payment = ledger.pay(state["invoice"], review.get("amount"))
         # PENDING means the payment was sent, now or earlier, and never confirmed. It is not PAID
         # and must not be retried: it is reported for a person to check.
-        status = "PAID" if payment["status"] == "PAID" else "PAYMENT_UNCONFIRMED"
+        # NOT_SENT means it couldn't be attempted. Nothing went out, so the invoice goes back to
+        # RECEIVED: the next run over its file takes it up again instead of treating it as done.
+        status = {"PAID": "PAID", "PENDING": "PAYMENT_UNCONFIRMED", "NOT_SENT": "PAYMENT_NOT_SENT"}[payment["status"]]
         # For another currency: what was paid is in that currency; the dollar figure is an estimate.
         estimate = review.get("converted") or conversion(state["invoice"])
         result = {**payment, "status": status, **({"approved_by": review["reviewer"]} if review else {}),
                   **({"usd_estimate": estimate} if estimate else {})}
-        settle(state, status, payment.get("error") or payment["payment_key"])
+        settle(state, seen.RECEIVED if status == "PAYMENT_NOT_SENT" else status, payment.get("error") or payment["payment_key"])
         return {"result": result, "trail": _step("pay", **result)}
 
     def hold(state: State, config) -> dict:
@@ -350,6 +352,10 @@ def _stream(graph, start, thread_id: str, on_step, seen: int = 0) -> State:
             if on_step:
                 on_step(step)
         seen = len(state.get("trail", []))
+    # A run that reached END will never be resumed, so its saved states are dead weight: a full
+    # copy of the invoice per step. Only a paused run (next is non-empty) is kept.
+    if not graph.get_state(_thread(thread_id)).next:
+        graph.checkpointer.delete_thread(thread_id)
     return state
 
 
@@ -420,9 +426,8 @@ def conversion(invoice: Invoice, rates=None) -> dict | None:
             return {k: f[k] for k in ("usd_estimate", "usd_per_unit", "rate_date", "rate_source")}
     if rates is None or not any(f["code"] == "CURRENCY_UNSUPPORTED" for f in invoice.flags) or invoice.total is None:
         return None
-    rate = rates.usd_rate(invoice.currency, invoice.date)
-    age = rate.age_days(invoice.date) if rate else None
-    if rate is None or (age is not None and age > MAX_RATE_AGE_DAYS):
+    rate, problem = usable_rate(rates, invoice.currency, invoice.date)  # the same rule the checks applied
+    if problem:
         return None
     return {"usd_estimate": rate.to_usd(invoice.total), "usd_per_unit": rate.usd_per_unit, "rate_date": rate.as_of,
             "rate_source": rate.source}
@@ -460,9 +465,17 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
             name or note, or an approval that isn't possible (see cannot_approve).
     """
     entry = ledger.queue_entry(queue_id)
-    if entry is None or entry["status"] != "WAITING":
+    # A decision is recorded first and carried out second. An entry that is RESOLVED while its run
+    # is still paused is one where the second step never happened: finish it now.
+    unfinished = entry is not None and entry["status"] == "RESOLVED" and bool(graph.get_state(_thread(entry["thread_id"])).next)
+    if entry is None or (entry["status"] != "WAITING" and not unfinished):
         raise ValueError(f"no invoice is waiting under queue number {queue_id}"
                          + (f" (it is {entry['status']})" if entry else ""))
+    if unfinished and action != entry["action"]:
+        raise ValueError(f"queue number {queue_id} was already decided: {entry['action']} by {entry['reviewer']}. "
+                         f"That decision was recorded but not carried out; repeat it ({entry['action']}) to finish it.")
+    if unfinished:  # carry out the decision as it was recorded, whoever is finishing it
+        reviewer, note = entry["reviewer"], entry["note"]
     if action not in ("approve", "reject"):
         raise ValueError(f"action must be approve or reject, not {action!r}")
     if not reviewer or not reviewer.strip():
@@ -472,7 +485,13 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
     # get_state() reads a thread's saved state without running anything.
     saved = graph.get_state(_thread(entry["thread_id"]))
     if not saved.next:
-        raise ValueError(f"queue number {queue_id} has no paused run to resume (was it held under other checkpoints?)")
+        # The saved run is gone (the checkpoints file was deleted or replaced). There is nothing
+        # to resume, and leaving the invoice HELD would strand it: put it back to be processed.
+        why = "its saved run was not found, so it could not be released"
+        again = ledger.reopen(entry, why)
+        raise ValueError(f"queue number {queue_id} ({entry['source_file']}) has no saved run to resume, so it can't be "
+                         f"decided here. It has been closed as LOST" + (" and the invoice put back as unprocessed" if again else "")
+                         + f": run main.py on {entry['source_file']} again and it will be checked and queued afresh.")
     invoice = saved.values["invoice"]
     amount, basis = None, None
     if action == "approve":
