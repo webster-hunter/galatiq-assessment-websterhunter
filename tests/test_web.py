@@ -118,6 +118,12 @@ def test_the_page_is_served_and_never_writes_vendor_text_as_html(client):
     assert "/api/queue" in script and "innerHTML" not in script and "insertAdjacentHTML" not in script
     source = (ROOT / "web" / "frontend" / "src" / "app.ts").read_text()
     assert "innerHTML" not in source
+    # Every id the script looks up exists once in the page: a repeated id silently answers with the wrong element.
+    import re
+    page = client.get("/").text
+    ids = re.findall(r'id="([^"]+)"', page)
+    assert len(ids) == len(set(ids)), sorted(i for i in set(ids) if ids.count(i) > 1)
+    assert set(re.findall(r'\$\("([a-z-]+)"\)', source)) <= set(ids)
 
 
 # --- Fixes from the code review ----------------------------------------------------------------------
@@ -280,3 +286,72 @@ def test_a_file_that_could_not_be_read_is_listed_too(paths, tmp_path, capsys):
     assert (newest["file"], newest["status"], newest["by"], newest["vendor"]) == ("broken.json", "ERROR", "none", None)
     shown = client.get(f"/api/runs/{newest['run']}").json()
     assert shown["resolved"]["error"] and shown["flags"] == [] and shown["line_items"] == []
+
+
+# --- Search and filters ------------------------------------------------------------------------------
+
+def files(rows):
+    return sorted(r["file"][8:] for r in rows)
+
+
+def test_search_narrows_all_three_lists_and_says_how_many_there_are(client):
+    """A vendor name finds its invoices wherever they are: one waiting, one resolved. Every word must match, case is ignored, and the counts before narrowing come back too."""
+    found = client.get("/api/queue", params={"q": "widgets inc"}).json()
+    assert (files(found["waiting"]), files(found["automatic"]), found["decided"]) == (["1016.json"], ["1001.txt"], [])
+    assert found["of"] == {"waiting": 6, "decided": 0, "automatic": 14}
+    assert files(client.get("/api/queue", params={"q": "WIDGETS gadgets"}).json()["waiting"]) == []      # no row has both words
+    everything = client.get("/api/queue").json()
+    assert (len(everything["waiting"]), len(everything["automatic"])) == (6, 14) and everything["of"]["automatic"] == 14
+
+
+def test_search_matches_file_names_reasons_and_notes(client):
+    """A reason is found as its flag code or in words; a file name and the note on a skipped copy are searched too."""
+    by_code = client.get("/api/queue", params={"q": "STOCK_EXCEEDED"}).json()
+    in_words = client.get("/api/queue", params={"q": "stock exceeded"}).json()
+    assert files(by_code["waiting"]) == files(in_words["waiting"]) == ["1002.txt", "1005.json"]
+    assert files(in_words["automatic"]) == ["1003.txt"]
+    assert files(client.get("/api/queue", params={"q": "1013"}).json()["automatic"]) == ["1013.json", "1013.pdf"]
+    assert files(client.get("/api/queue", params={"q": "copy of invoice_1011.pdf"}).json()["automatic"]) == ["1011.txt"]
+
+
+def test_the_outcome_filter_keeps_one_kind_and_combines_with_search(client):
+    """Each outcome keeps only its rows; "waiting" empties the resolved lists and the others empty the waiting list. With a search, both must hold."""
+    def shown(**params):
+        q = client.get("/api/queue", params=params).json()
+        return len(q["waiting"]), len(q["decided"]), files(q["automatic"])
+
+    assert shown(outcome="waiting") == (6, 0, [])
+    assert shown(outcome="paid") == (0, 0, ["1001.txt", "1004.json", "1006.csv", "1010.txt", "1011.pdf", "1015.csv"])
+    assert shown(outcome="rejected") == (0, 0, ["1003.txt", "1007.csv", "1008.txt", "1009.json", "1013.json"])
+    assert shown(outcome="skipped") == (0, 0, ["1011.txt", "1012.txt", "1013.pdf"])
+    assert shown(outcome="other") == (0, 0, [])
+    # Words match separately: 1009 has "total negative" and "subtotal mismatch", so it is found too.
+    assert shown(outcome="rejected", q="total mismatch") == (0, 0, ["1007.csv", "1009.json", "1013.json"])
+    assert shown(outcome="rejected", q="mismatch atlas") == (0, 0, ["1013.json"])
+    assert client.get("/api/queue", params={"outcome": "maybe"}).status_code == 400
+
+
+def test_a_reviewers_decisions_are_filtered_by_what_they_led_to(client):
+    """An approval that paid is "paid"; a rejection is "rejected"; and a reviewer's name finds their decisions."""
+    ids = {f: s["id"] for f, s in by_file(client).items()}
+    client.post(f"/api/queue/{ids['invoice_1016.json']}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
+    client.post(f"/api/queue/{ids['invoice_1002.txt']}/decision", json={"action": "reject", "reviewer": "Sam Ortiz", "note": "Over stock"})
+    assert files(client.get("/api/queue", params={"outcome": "paid"}).json()["decided"]) == ["1016.json"]
+    assert files(client.get("/api/queue", params={"outcome": "rejected"}).json()["decided"]) == ["1002.txt"]
+    assert files(client.get("/api/queue", params={"q": "sam ortiz"}).json()["decided"]) == ["1002.txt"]
+    assert client.get("/api/queue", params={"q": "over stock"}).json()["of"] == {"waiting": 4, "decided": 2, "automatic": 14}
+
+
+def test_an_unconfirmed_payment_is_filed_under_other_not_paid(paths, monkeypatch):
+    """An approval whose payment did not confirm must not turn up when someone filters for what was paid."""
+    import web.app as web_app
+    from ledger import Ledger
+
+    def timeout(*args):
+        raise TimeoutError("bank did not answer")
+
+    monkeypatch.setattr(web_app, "Ledger", lambda path: Ledger(path, pay=timeout))
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    client.post(f"/api/queue/{by_file(client)['invoice_1016.json']['id']}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
+    assert client.get("/api/queue", params={"outcome": "paid"}).json()["decided"] == []
+    assert files(client.get("/api/queue", params={"outcome": "other"}).json()["decided"]) == ["1016.json"]

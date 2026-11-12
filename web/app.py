@@ -1,6 +1,7 @@
 """The review queue over HTTP, for the page in web/static.
 
     GET  /api/queue                 what is waiting, what was decided, what was resolved without a person, and what has been paid
+                                    ?q=text narrows all three lists to rows that mention it; ?outcome= to one kind of outcome
     GET  /api/runs/{run}            one finished run in full: what the application or the agent did, and why
     GET  /api/queue/{id}            one held invoice in full
     POST /api/queue/{id}/decision   {"action": "approve" | "reject", "reviewer": "...", "note": "..."}
@@ -119,6 +120,37 @@ def _detail(entry: dict, state: dict, rates, stuck: bool) -> dict:
     }
 
 
+# The kinds of outcome the lists can be narrowed to. "other" is everything that is none of the
+# first four: a file that couldn't be read, a payment that didn't confirm, an entry closed as lost.
+OUTCOMES = ("waiting", "paid", "rejected", "skipped", "other")
+
+
+def _outcome_of(status: str) -> str:
+    """The kind of outcome a finished run's status belongs to."""
+    if status in ("PAID", "REJECTED"):
+        return status.lower()
+    return "skipped" if status.startswith("SKIPPED") else "other"
+
+
+def _decided_outcome(row: dict) -> str:
+    """The kind of outcome a reviewer's decision led to: an approval counts as paid only if its payment confirmed."""
+    if row["action"] == "reject":
+        return "rejected"
+    if row["action"] == "approve":
+        return "paid" if row["payment"] and row["payment"]["status"] == "PAID" else "other"
+    return "other"
+
+
+def _mentions(text: str, *fields) -> bool:
+    """Whether every word of a search appears somewhere in a row's fields, ignoring case.
+
+    A flag code matches as written and in words, so "stock exceeded" finds STOCK_EXCEEDED.
+    """
+    haystack = " ".join(str(f) for f in fields if f).lower()
+    haystack += " " + haystack.replace("_", " ")
+    return all(word in haystack for word in text.lower().split())
+
+
 WHO = {"policy": "The policy", "policy+agent": "The policy, with the reviewer agent's reason", "ledger": "The ledger",
        "person": "A reviewer", "none": "Nobody: the file could not be read"}
 
@@ -198,17 +230,37 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
         return graph.get_state(_thread(entry["thread_id"])).values
 
     @app.get("/api/queue")
-    def queue():
+    def queue(q: str = "", outcome: str = ""):
+        """The three lists, optionally narrowed.
+
+        Args:
+            q: Words to look for. A row is kept if every word appears in its file name, vendor,
+                total, reasons, note or reviewer. Empty: no narrowing.
+            outcome: One of OUTCOMES, to keep only rows of that kind. Empty: all kinds.
+        """
+        if outcome and outcome not in OUTCOMES:
+            raise HTTPException(400, f"outcome must be one of: {', '.join(OUTCOMES)}")
         with session() as (ledger, graph, rates):
             stuck = {e["id"] for e in ledger.decided_not_finished()}
             everything = ledger.queue(status=None)
+            held = [e for e in everything if e["status"] == "WAITING" or e["id"] in stuck]
+            # Narrowed on the queue row, before the saved run is read: a search that matches two
+            # invoices loads two runs, not all of them.
+            keep = [e for e in held if outcome in ("", "waiting")
+                    and _mentions(q, e["source_file"], e["vendor"], e["total"], e["reasons"])]
             waiting = [_summary(e, saved(graph, e), rates) | {"stuck": e["id"] in stuck and {"action": e["action"], "reviewer": e["reviewer"]}}
-                       for e in everything if e["status"] == "WAITING" or e["id"] in stuck]
+                       for e in keep]
             payments = {p["payment_key"]: p for p in ledger.payments()}
-            decided = [_decided(e, payments) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
-            automatic = [_run_summary(r) for r in ledger.runs() if r["resolved_by"] != "person"]
-            return _plain({"waiting": waiting, "decided": decided[::-1], "automatic": automatic, "paid": ledger.paid_totals(),
-                           "payments": len(ledger.payments())})
+            all_decided = [_decided(e, payments) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
+            decided = [d for d in all_decided if outcome in ("", _decided_outcome(d))
+                       and _mentions(q, d["file"], d["vendor"], d["total"], d["reviewer"], d["note"], d["status"])]
+            all_automatic = [_run_summary(r) for r in ledger.runs() if r["resolved_by"] != "person"]
+            automatic = [a for a in all_automatic if outcome in ("", _outcome_of(a["status"]))
+                         and _mentions(q, a["file"], a["vendor"], a["total"], " ".join(a["reasons"]), a["note"], a["who"], a["status"])]
+            return _plain({"waiting": waiting, "decided": decided[::-1], "automatic": automatic,
+                           # How many there are before narrowing, so the screen can say "2 of 14".
+                           "of": {"waiting": len(held), "decided": len(all_decided), "automatic": len(all_automatic)},
+                           "paid": ledger.paid_totals(), "payments": len(ledger.payments())})
 
     @app.get("/api/runs/{run}")
     def finished(run: str):

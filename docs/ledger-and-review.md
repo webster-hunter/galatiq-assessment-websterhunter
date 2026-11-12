@@ -76,7 +76,9 @@ An invoice resolved without a person, opened from the list:
 The left column lists what is waiting, what a reviewer has decided, and what was resolved
 without a person: paid or rejected by the policy (with the reviewer agent's reason where it wrote
 one), or skipped by the ledger as a second copy. Any of those can be opened to see the same
-evidence, read-only, with how it ended in place of the decision form. The right shows one invoice:
+evidence, read-only, with how it ended in place of the decision form. A search box and an outcome
+filter at the top narrow all three lists: the search matches vendor, file name, reason (as a flag
+code or in words), note and reviewer, and each list then shows "2 of 14". The right shows one invoice:
 why it is held, with each flag explained; the reviewer agent's advice, its questions and what it
 looked up; the lines; and what approving would pay. The reviewer enters their name, and a note if
 rejecting.
@@ -86,7 +88,7 @@ of its own: deciding calls `pipeline.release`, where everything below is enforce
 
 | Route | Does |
 |---|---|
-| `GET /api/queue` | What is waiting, what was decided, what was resolved without a person, and what has been paid |
+| `GET /api/queue` | What is waiting, what was decided, what was resolved without a person, and what has been paid. `?q=` searches; `?outcome=` keeps one of waiting, paid, rejected, skipped, other |
 | `GET /api/runs/{run}` | One finished run in full: the flags, the reason on record, and how it ended |
 | `GET /api/queue/{id}` | One held invoice in full |
 | `POST /api/queue/{id}/decision` | `{"action": "approve" or "reject", "reviewer", "note"}`. A refusal is a 400 with the reason |

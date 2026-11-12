@@ -42,11 +42,16 @@ interface Outcome {
   file: string; vendor: string | null;
   result: { status: string; amount?: string; currency?: string; error?: string; reasons?: string[] };
 }
-interface Queue { waiting: Summary[]; decided: Decided[]; automatic: Automatic[]; paid: Record<string, string>; payments: number; }
+interface Queue {
+  waiting: Summary[]; decided: Decided[]; automatic: Automatic[];
+  of: { waiting: number; decided: number; automatic: number };   // how many there are before narrowing
+  paid: Record<string, string>; payments: number;
+}
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 let selected: number | null = null;      // the waiting invoice shown, by queue number
 let selectedRun: string | null = null;   // or the finished run shown
+let listRequest = 0;                     // counts requests for the lists, so an answer to an earlier search is dropped
 let shownOnce = false;                   // the first invoice opens by itself; don't scroll the page for that one
 const OUTCOME: Record<string, string> = {
   PAID: "Paid", REJECTED: "Rejected", SKIPPED_DUPLICATE: "Skipped: duplicate", SKIPPED_SUPERSEDED: "Skipped: superseded",
@@ -100,18 +105,39 @@ function showProblem(message: string | null): void {
   $("problem").textContent = message ?? "";
 }
 
+/** The search text and outcome chosen, as the query string the list route takes. Empty when nothing narrows the lists. */
+function filters(): string {
+  const params = new URLSearchParams();
+  const q = ($("q") as HTMLInputElement).value.trim();
+  const outcome = ($("kind") as HTMLSelectElement).value;
+  if (q) params.set("q", q);
+  if (outcome) params.set("outcome", outcome);
+  return params.toString();
+}
+
+/** "3" when a list is whole, "2 of 14" when it is narrowed. */
+function countOf(shown: number, all: number, narrowed: boolean): string {
+  return narrowed ? `${shown} of ${all}` : String(shown);
+}
+
 async function loadQueue(openFirst = true): Promise<void> {
   let queue: Queue;
+  const request = ++listRequest;
+  const query = filters();
+  const narrowed = query !== "";
   try {
-    queue = await api<Queue>("/api/queue");
+    queue = await api<Queue>(`/api/queue${narrowed ? `?${query}` : ""}`);
+    if (request !== listRequest) return;   // a newer search has been sent: its answer is the one to show
     showProblem(null);
   } catch (e) {
-    showProblem((e as Error).message);
+    if (request === listRequest) showProblem((e as Error).message);
     return;
   }
+  const none = narrowed ? "No matches." : null;
   const paid = Object.entries(queue.paid).map(([currency, amount]) => money(amount, currency)).join(" + ") || "$0.00";
   $("totals").textContent = `${queue.payments} payment${queue.payments === 1 ? "" : "s"} made: ${paid}`;
-  $("count").textContent = String(queue.waiting.length);
+  $("count").textContent = countOf(queue.waiting.length, queue.of.waiting, narrowed);
+  $("decided-count").textContent = countOf(queue.decided.length, queue.of.decided, narrowed);
   waiting = queue.waiting;
 
   const rows = queue.waiting.map((s) => {
@@ -124,7 +150,7 @@ async function loadQueue(openFirst = true): Promise<void> {
     button.addEventListener("click", () => select(s.id));
     return el("li", {}, button);
   });
-  $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, "Nothing is waiting.")]));
+  $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, none ?? "Nothing is waiting.")]));
 
   const decided = queue.decided.map((d) => el("li", { class: "done" },
     el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"),
@@ -134,9 +160,9 @@ async function loadQueue(openFirst = true): Promise<void> {
     d.payment && d.payment.status !== "PAID"
       ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null,
     d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
-  $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, "No decisions yet.")]));
+  $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, none ?? "No decisions yet.")]));
 
-  $("automatic-count").textContent = String(queue.automatic.length);
+  $("automatic-count").textContent = countOf(queue.automatic.length, queue.of.automatic, narrowed);
   const automatic = queue.automatic.map((a) => {
     const button = el("button", { type: "button", "aria-current": String(a.run === selectedRun) },
       el("div", { class: "row" }, el("strong", {}, a.vendor ?? a.file), el("span", { class: `tag ${outcomeClass(a.status)}` }, OUTCOME[a.status] ?? a.status)),
@@ -146,9 +172,10 @@ async function loadQueue(openFirst = true): Promise<void> {
     button.addEventListener("click", () => selectRun(a.run));
     return el("li", {}, button);
   });
-  $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, "Nothing yet.")]));
+  $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, none ?? "Nothing yet.")]));
 
-  if (selected !== null && !queue.waiting.some((s) => s.id === selected)) selected = null;   // decided elsewhere
+  // Gone from the whole list: decided elsewhere. (Missing from a narrowed list only means it doesn't match.)
+  if (!narrowed && selected !== null && !queue.waiting.some((s) => s.id === selected)) selected = null;
   if (selected === null && selectedRun === null && openFirst && queue.waiting.length) await select(queue.waiting[0].id);
   if (selected === null && selectedRun === null && openFirst) $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
 }
@@ -358,5 +385,14 @@ function decisionForm(d: Detail, pays: string): HTMLElement {
   form.addEventListener("submit", (e) => e.preventDefault());
   return form;
 }
+
+// Narrowing the lists leaves the invoice on show where it is. Typing waits for a pause before asking.
+let typing: number | undefined;
+$("q").addEventListener("input", () => {
+  window.clearTimeout(typing);
+  typing = window.setTimeout(() => loadQueue(false), 200);
+});
+$("kind").addEventListener("change", () => loadQueue(false));
+$("filters").addEventListener("submit", (e) => { e.preventDefault(); loadQueue(false); });
 
 loadQueue();

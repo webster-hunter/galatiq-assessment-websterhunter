@@ -9,6 +9,7 @@
 const $ = (id) => document.getElementById(id);
 let selected = null; // the waiting invoice shown, by queue number
 let selectedRun = null; // or the finished run shown
+let listRequest = 0; // counts requests for the lists, so an answer to an earlier search is dropped
 let shownOnce = false; // the first invoice opens by itself; don't scroll the page for that one
 const OUTCOME = {
     PAID: "Paid", REJECTED: "Rejected", SKIPPED_DUPLICATE: "Skipped: duplicate", SKIPPED_SUPERSEDED: "Skipped: superseded",
@@ -60,19 +61,42 @@ function showProblem(message) {
     $("problem").hidden = message === null;
     $("problem").textContent = message ?? "";
 }
+/** The search text and outcome chosen, as the query string the list route takes. Empty when nothing narrows the lists. */
+function filters() {
+    const params = new URLSearchParams();
+    const q = $("q").value.trim();
+    const outcome = $("kind").value;
+    if (q)
+        params.set("q", q);
+    if (outcome)
+        params.set("outcome", outcome);
+    return params.toString();
+}
+/** "3" when a list is whole, "2 of 14" when it is narrowed. */
+function countOf(shown, all, narrowed) {
+    return narrowed ? `${shown} of ${all}` : String(shown);
+}
 async function loadQueue(openFirst = true) {
     let queue;
+    const request = ++listRequest;
+    const query = filters();
+    const narrowed = query !== "";
     try {
-        queue = await api("/api/queue");
+        queue = await api(`/api/queue${narrowed ? `?${query}` : ""}`);
+        if (request !== listRequest)
+            return; // a newer search has been sent: its answer is the one to show
         showProblem(null);
     }
     catch (e) {
-        showProblem(e.message);
+        if (request === listRequest)
+            showProblem(e.message);
         return;
     }
+    const none = narrowed ? "No matches." : null;
     const paid = Object.entries(queue.paid).map(([currency, amount]) => money(amount, currency)).join(" + ") || "$0.00";
     $("totals").textContent = `${queue.payments} payment${queue.payments === 1 ? "" : "s"} made: ${paid}`;
-    $("count").textContent = String(queue.waiting.length);
+    $("count").textContent = countOf(queue.waiting.length, queue.of.waiting, narrowed);
+    $("decided-count").textContent = countOf(queue.decided.length, queue.of.decided, narrowed);
     waiting = queue.waiting;
     const rows = queue.waiting.map((s) => {
         const button = el("button", { type: "button", "aria-current": String(s.id === selected) }, el("div", { class: "row" }, el("strong", {}, s.vendor ?? "No vendor named"), el("span", {}, money(s.total, s.currency))), el("div", { class: "small" }, s.file), el("div", { class: "small" }, s.stuck ? `Decided (${s.stuck.action} by ${s.stuck.reviewer}) but not carried out`
@@ -81,21 +105,22 @@ async function loadQueue(openFirst = true) {
         button.addEventListener("click", () => select(s.id));
         return el("li", {}, button);
     });
-    $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, "Nothing is waiting.")]));
+    $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, none ?? "Nothing is waiting.")]));
     const decided = queue.decided.map((d) => el("li", { class: "done" }, el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"), el("span", { class: `tag ${d.action ?? ""}` }, d.action === "approve" ? "Approved" : d.action === "reject" ? "Rejected" : d.status)), el("div", { class: "small" }, `${d.file} · ${d.reviewer ?? "nobody"}`
         + (d.payment?.status === "PAID" ? ` · paid ${money(d.payment.amount, d.payment.currency)}` : "")), d.payment && d.payment.status !== "PAID"
         ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null, d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
-    $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, "No decisions yet.")]));
-    $("automatic-count").textContent = String(queue.automatic.length);
+    $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, none ?? "No decisions yet.")]));
+    $("automatic-count").textContent = countOf(queue.automatic.length, queue.of.automatic, narrowed);
     const automatic = queue.automatic.map((a) => {
         const button = el("button", { type: "button", "aria-current": String(a.run === selectedRun) }, el("div", { class: "row" }, el("strong", {}, a.vendor ?? a.file), el("span", { class: `tag ${outcomeClass(a.status)}` }, OUTCOME[a.status] ?? a.status)), el("div", { class: "small" }, `${a.file} · ${money(a.total, a.currency)} · ${a.who}`), el("div", { class: "small" }, a.note ?? (a.reasons.length ? a.reasons.map(words).join(", ") : "Nothing to object to")));
         button.dataset.run = a.run;
         button.addEventListener("click", () => selectRun(a.run));
         return el("li", {}, button);
     });
-    $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, "Nothing yet.")]));
-    if (selected !== null && !queue.waiting.some((s) => s.id === selected))
-        selected = null; // decided elsewhere
+    $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, none ?? "Nothing yet.")]));
+    // Gone from the whole list: decided elsewhere. (Missing from a narrowed list only means it doesn't match.)
+    if (!narrowed && selected !== null && !queue.waiting.some((s) => s.id === selected))
+        selected = null;
     if (selected === null && selectedRun === null && openFirst && queue.waiting.length)
         await select(queue.waiting[0].id);
     if (selected === null && selectedRun === null && openFirst)
@@ -305,4 +330,12 @@ function decisionForm(d, pays) {
     form.addEventListener("submit", (e) => e.preventDefault());
     return form;
 }
+// Narrowing the lists leaves the invoice on show where it is. Typing waits for a pause before asking.
+let typing;
+$("q").addEventListener("input", () => {
+    window.clearTimeout(typing);
+    typing = window.setTimeout(() => loadQueue(false), 200);
+});
+$("kind").addEventListener("change", () => loadQueue(false));
+$("filters").addEventListener("submit", (e) => { e.preventDefault(); loadQueue(false); });
 loadQueue();

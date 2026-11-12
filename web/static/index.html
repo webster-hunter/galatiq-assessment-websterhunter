@@ -15,9 +15,22 @@
   <p id="outcome" role="status" hidden></p>
   <main>
     <nav aria-label="Invoices">
+      <form id="filters" role="search">
+        <label>Search<input id="q" type="search" placeholder="Vendor, file, reason or reviewer" autocomplete="off"></label>
+        <label>Outcome
+          <select id="kind">
+            <option value="">All</option>
+            <option value="waiting">Waiting</option>
+            <option value="paid">Paid</option>
+            <option value="rejected">Rejected</option>
+            <option value="skipped">Skipped</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+      </form>
       <h2>Waiting for a decision <span id="count" class="count"></span></h2>
       <ul id="waiting"></ul>
-      <h2>Decided by a reviewer</h2>
+      <h2>Decided by a reviewer <span id="decided-count" class="count"></span></h2>
       <ul id="decided"></ul>
       <h2>Resolved without a person <span id="automatic-count" class="count"></span></h2>
       <ul id="automatic"></ul>
