@@ -46,9 +46,12 @@ that pauses and is resumed later by a person. Both are built-in graph features, 
 into this file as new nodes and edges without changing the stages themselves.
 """
 import copy
+import dataclasses
+import json
 import operator
 import sqlite3
 import uuid
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, TypedDict
@@ -63,6 +66,7 @@ import normalizer
 from approval import APPROVE, HOLD, MAX_ROUNDS, REJECT, Decision, assess, critique, decide
 from ledger import Ledger
 from ledger import ledger as seen
+from ledger.ledger import currency_of
 from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
 from normalizer.checks import usable_rate
 from normalizer.models import Invoice
@@ -223,8 +227,9 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         ledger.record(invoice, seen.RECEIVED)
         return {"invoice": invoice, "recorded": True, "trail": _step("register", **step)}
 
-    def skip(state: State) -> dict:
+    def skip(state: State, config) -> dict:
         """The invoice was already handled, as this file or as another copy. Nothing is decided or paid."""
+        finish(state, config, state["result"])
         return {"trail": _step("skip", **state["result"])}
 
     def approve(state: State) -> dict:
@@ -272,7 +277,34 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         if state.get("recorded"):
             ledger.record(state["invoice"], status, detail)
 
-    def pay(state: State) -> dict:
+    def finish(state: State, config, result: dict) -> None:
+        """Log how this run ended, with the evidence, so it can be looked up after its saved state is gone.
+
+        Called by each node that ends a run. A file that was simply processed before
+        (ALREADY_PROCESSED) is not logged again: its first run is the record. Nor is a second
+        copy that is skipped again on a later run over the same folder.
+        """
+        if result["status"] == "ALREADY_PROCESSED":
+            return
+        invoice, review, assessment = state.get("invoice"), state.get("review"), state.get("assessment") or {}
+        if result["status"].startswith("SKIPPED") and ledger.has_run(invoice.source_file, result["status"]):
+            return
+        if review:
+            by = "person"
+        elif result["status"].startswith("SKIPPED"):
+            by = "ledger"
+        elif invoice is None:
+            by = "none"
+        else:
+            by = "policy+agent" if assessment.get("by") == "reviewer_agent" else "policy"
+        summary = {"invoice": invoice, "decision": state.get("decision"), "assessment": state.get("assessment"),
+                   "critique": state.get("critique"), "review": review, "result": result, "trail": state.get("trail", [])}
+        ledger.log_run(config["configurable"]["thread_id"], invoice.source_file if invoice else Path(state["path"]).name,
+                       invoice.vendor_name if invoice else None, invoice.total if invoice else None,
+                       currency_of(invoice) if invoice else None, result["status"], by, review["reviewer"] if review else None,
+                       json.dumps(summary, default=_plain))
+
+    def pay(state: State, config) -> dict:
         """Stage 4, approved branch. Pay through the ledger, which pays any one invoice only once.
 
         Reached two ways: straight from approve, or from await_review when a person released a
@@ -291,6 +323,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         result = {**payment, "status": status, **({"approved_by": review["reviewer"]} if review else {}),
                   **({"usd_estimate": estimate} if estimate else {})}
         settle(state, seen.RECEIVED if status == "PAYMENT_NOT_SENT" else status, payment.get("error") or payment["payment_key"])
+        finish(state, config, result)
         return {"result": result, "trail": _step("pay", **result)}
 
     def hold(state: State, config) -> dict:
@@ -324,7 +357,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
                             "held_for": state["result"]["for"]})
         return {"review": review, "trail": _step("await_review", **review)}
 
-    def reject(state: State) -> dict:
+    def reject(state: State, config) -> dict:
         """Rejected: logged with the reasons, to go back to the vendor. By the policy, or by a reviewer."""
         review = state.get("review")
         if review:
@@ -332,11 +365,13 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         else:
             result = {"status": "REJECTED", "reasons": list(state["decision"].because)}
         settle(state, "REJECTED", ", ".join(result["reasons"]))
+        finish(state, config, result)
         return {"result": result, "trail": _step("reject", **result)}
 
-    def failed(state: State) -> dict:
+    def failed(state: State, config) -> dict:
         """The file couldn't be read at all, so there is no invoice to decide on."""
         result = {"status": "ERROR", "error": state["error"]}
+        finish(state, config, result)
         return {"result": result, "trail": _step("failed", **result)}
 
     # --- Routers. A conditional edge calls one of these and goes to the node it names. --------
@@ -388,6 +423,17 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     # returns the runnable object. The checkpointer is what makes interrupt() possible: a run can
     # only be paused if there is somewhere to keep its state.
     return graph.compile(checkpointer=checkpoints if checkpoints is not None else checkpointer())
+
+
+def _plain(value):
+    """For json.dumps: the types in a run's state that JSON has no form for."""
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    raise TypeError(f"can't serialise {type(value).__name__}")
 
 
 def _thread(thread_id: str) -> dict:

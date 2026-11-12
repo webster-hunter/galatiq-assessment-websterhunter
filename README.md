@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
 python -m web                                                              # the review screen, at http://127.0.0.1:8000
-pytest                                                                     # 294 tests, about 10 seconds
+pytest                                                                     # 298 tests, about 12 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -74,7 +74,10 @@ Held invoices wait in a queue. The review screen lists them, and a named person 
 
 ![The review screen: the queue on the left, one held invoice with its flags, the agent's advice and the decision form on the right](docs/review-screen.png)
 
-Each invoice shows why it is held, the reviewer agent's advice and questions, and what approving
+The screen also lists every invoice resolved without a person (paid or rejected by the policy,
+skipped as a duplicate), each with who resolved it and why, and the same evidence when opened.
+
+Each held invoice shows why it is held, the reviewer agent's advice and questions, and what approving
 would pay: the $4,050.00 difference for 1004's revision, 4,125.00 EUR for 1014. A rejection needs
 a note. The screen is a FastAPI backend and a TypeScript page with no framework; it listens on
 this machine only and has no login.
@@ -228,5 +231,5 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/replays/` | The sample invoices; the model's recorded replies |
 | `demo/` | Numbers and examples for a walkthrough, each with the command that reproduces it |
-| `tests/` | 294 tests. Each one's first line says the behaviour it pins |
+| `tests/` | 298 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

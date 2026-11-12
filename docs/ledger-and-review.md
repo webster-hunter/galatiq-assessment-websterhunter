@@ -69,17 +69,25 @@ python -m web            # then open http://127.0.0.1:8000
 
 ![The review screen](review-screen.png)
 
-The left column lists what is waiting and what has been decided. The right shows one invoice:
+An invoice resolved without a person, opened from the list:
+
+![An invoice paid by the policy, with the reviewer agent's reason](review-screen-resolved.png)
+
+The left column lists what is waiting, what a reviewer has decided, and what was resolved
+without a person: paid or rejected by the policy (with the reviewer agent's reason where it wrote
+one), or skipped by the ledger as a second copy. Any of those can be opened to see the same
+evidence, read-only, with how it ended in place of the decision form. The right shows one invoice:
 why it is held, with each flag explained; the reviewer agent's advice, its questions and what it
 looked up; the lines; and what approving would pay. The reviewer enters their name, and a note if
 rejecting.
 
-**How it is built.** `web/app.py` is a FastAPI application with four routes, and it adds no rules
+**How it is built.** `web/app.py` is a FastAPI application with five routes, and it adds no rules
 of its own: deciding calls `pipeline.release`, where everything below is enforced.
 
 | Route | Does |
 |---|---|
-| `GET /api/queue` | What is waiting, what was decided, and what has been paid |
+| `GET /api/queue` | What is waiting, what was decided, what was resolved without a person, and what has been paid |
+| `GET /api/runs/{run}` | One finished run in full: the flags, the reason on record, and how it ended |
 | `GET /api/queue/{id}` | One held invoice in full |
 | `POST /api/queue/{id}/decision` | `{"action": "approve" or "reject", "reviewer", "note"}`. A refusal is a 400 with the reason |
 | `POST /api/queue/{id}/reopen` | Puts back an invoice whose saved run is gone, to be processed again |
@@ -125,7 +133,9 @@ checkpoints. Three things keep them from drifting apart:
 - **The review screen never creates a checkpoints file.** Started with a path that has no saved
   runs it says so, and decides nothing.
 
-Runs that reach an outcome have their saved states deleted; only paused runs are kept.
+Runs that reach an outcome have their saved states deleted; only paused runs are kept. What a
+finished run found and how it ended is written to the ledger's `runs` table as it ends, one row
+per file, which is what the screen reads for resolved invoices.
 
 ## Exchange rates
 

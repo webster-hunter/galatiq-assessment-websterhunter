@@ -1,11 +1,20 @@
 "use strict";
 // The review screen. Plain TypeScript, no framework: it lists the invoices held for a person,
-// shows one in full, and sends the decision to the API (web/app.py).
+// shows one in full, and sends the decision to the API (web/app.py). It also lists what was
+// resolved without a person (paid or rejected by the policy, skipped as a duplicate) and shows
+// each of those with the same evidence, read-only.
 //
 // Invoice text is written by the vendor. Everything is put on the page with textContent, never
 // as HTML, so nothing a vendor writes can become markup or script.
 const $ = (id) => document.getElementById(id);
-let selected = null;
+let selected = null; // the waiting invoice shown, by queue number
+let selectedRun = null; // or the finished run shown
+let shownOnce = false; // the first invoice opens by itself; don't scroll the page for that one
+const OUTCOME = {
+    PAID: "Paid", REJECTED: "Rejected", SKIPPED_DUPLICATE: "Skipped: duplicate", SKIPPED_SUPERSEDED: "Skipped: superseded",
+    ERROR: "Could not be read", PAYMENT_UNCONFIRMED: "Payment not confirmed", PAYMENT_NOT_SENT: "Payment not sent",
+};
+const outcomeClass = (status) => status === "PAID" ? "approve" : status.startsWith("SKIPPED") ? "" : "reject";
 let waiting = [];
 let latest = 0; // counts requests for an invoice's detail, so an answer that arrives late is dropped
 /** Create an element. Children that are strings become text nodes. */
@@ -24,8 +33,9 @@ function money(amount, currency = "USD") {
     const n = Number(amount);
     if (Number.isNaN(n))
         return amount;
-    const text = n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return currency === "USD" ? `$${text}` : `${text} ${currency}`;
+    const text = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const sign = n < 0 ? "-" : "";
+    return currency === "USD" ? `${sign}$${text}` : `${sign}${text} ${currency}`;
 }
 function amountOf(s) {
     const own = money(s.total, s.currency);
@@ -76,17 +86,46 @@ async function loadQueue(openFirst = true) {
         + (d.payment?.status === "PAID" ? ` · paid ${money(d.payment.amount, d.payment.currency)}` : "")), d.payment && d.payment.status !== "PAID"
         ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null, d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
     $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, "No decisions yet.")]));
+    $("automatic-count").textContent = String(queue.automatic.length);
+    const automatic = queue.automatic.map((a) => {
+        const button = el("button", { type: "button", "aria-current": String(a.run === selectedRun) }, el("div", { class: "row" }, el("strong", {}, a.vendor ?? a.file), el("span", { class: `tag ${outcomeClass(a.status)}` }, OUTCOME[a.status] ?? a.status)), el("div", { class: "small" }, `${a.file} · ${money(a.total, a.currency)} · ${a.who}`), el("div", { class: "small" }, a.note ?? (a.reasons.length ? a.reasons.map(words).join(", ") : "Nothing to object to")));
+        button.dataset.run = a.run;
+        button.addEventListener("click", () => selectRun(a.run));
+        return el("li", {}, button);
+    });
+    $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, "Nothing yet.")]));
     if (selected !== null && !queue.waiting.some((s) => s.id === selected))
         selected = null; // decided elsewhere
-    if (selected === null && openFirst && queue.waiting.length)
+    if (selected === null && selectedRun === null && openFirst && queue.waiting.length)
         await select(queue.waiting[0].id);
-    if (selected === null && openFirst)
+    if (selected === null && selectedRun === null && openFirst)
         $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
+}
+function highlight() {
+    document.querySelectorAll("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(selected))));
+    document.querySelectorAll("#automatic button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.run === selectedRun)));
+}
+/** Show a run that finished without a person: the same evidence as a held invoice, and how it ended in place of the form. */
+async function selectRun(run) {
+    selected = null;
+    selectedRun = run;
+    const request = ++latest;
+    highlight();
+    try {
+        const d = await api(`/api/runs/${encodeURIComponent(run)}`);
+        if (request === latest)
+            render(d);
+    }
+    catch (e) {
+        if (request === latest)
+            $("detail").replaceChildren(el("p", { class: "notice error" }, e.message));
+    }
 }
 async function select(id) {
     selected = id;
+    selectedRun = null;
     const request = ++latest;
-    document.querySelectorAll("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(id))));
+    highlight();
     const summary = waiting.find((s) => s.id === id);
     if (summary && !summary.has_saved_run) {
         renderLost(summary);
@@ -153,26 +192,45 @@ function describe(o) {
 function render(d) {
     const held = d.flags.filter((f) => f.severity !== "INFO");
     const notes = d.flags.filter((f) => f.severity === "INFO");
-    const flagList = (flags) => el("ul", { class: "flags" }, ...flags.map((f) => el("li", {}, el("span", { class: `tag ${f.severity}` }, f.severity === "REVIEW" ? "Held" : f.severity === "WARN" ? "Warning" : f.severity === "BLOCK" ? "Blocks" : "Note"), el("div", {}, el("strong", {}, words(f.code)), `: ${f.meaning}`, el("div", { class: "small" }, Object.entries(f.detail).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · "))))));
+    const flagList = (flags) => el("ul", { class: "flags" }, ...flags.map((f) => el("li", {}, el("span", { class: `tag ${f.severity}` }, f.severity === "REVIEW" ? (d.resolved ? "Review" : "Held") : f.severity === "WARN" ? "Warning" : f.severity === "BLOCK" ? "Blocks" : "Note"), el("div", {}, el("strong", {}, words(f.code)), `: ${f.meaning}`, el("div", { class: "small" }, Object.entries(f.detail).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · "))))));
     const lines = el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Item"), el("th", { class: "n" }, "Quantity"), el("th", { class: "n" }, "Unit price"), el("th", {}, "Note"))), el("tbody", {}, ...d.line_items.map((li) => el("tr", {}, el("td", {}, li.item ?? "–"), el("td", { class: "n" }, li.quantity ?? "–"), el("td", { class: "n" }, money(li.unit_price, d.currency)), el("td", {}, li.note ?? "")))));
     const a = d.advice;
     const advice = a === null ? null : el("div", { class: "advice" }, el("div", {}, el("span", { class: `tag ${a.recommendation ?? ""}` }, a.by === "reviewer_agent" ? `Agent recommends ${a.recommendation}` : "Written by the policy"), a.by === "reviewer_agent" && !a.verified ? el("span", { class: "tag WARN" }, "Not verified by the critic") : null), el("p", {}, a.rationale), a.open_questions.length ? el("div", {}, el("strong", {}, "To confirm before deciding"), el("ul", {}, ...a.open_questions.map((q) => el("li", {}, q)))) : null, a.lookups.length ? el("details", {}, el("summary", {}, `What the agent looked up (${a.lookups.length})`), el("pre", {}, a.lookups.map((l) => `${l.tool}(${JSON.stringify(l.arguments)})\n  → ${JSON.stringify(l.result)}`).join("\n"))) : null);
-    const pays = d.pays.already_paid !== null
+    const pays = d.pays === null ? "" : d.pays.already_paid !== null
         ? `Approving pays ${money(d.pays.amount, d.pays.currency)}: the difference. ${money(d.pays.already_paid, d.pays.currency)} was already paid on the earlier version.`
         : `Approving pays ${money(d.pays.amount, d.pays.currency)}${d.conversion ? `, about ${money(d.conversion.usd_estimate)} at the rate service's rate` : ""}.`;
     const parts = [
         el("h2", {}, d.vendor ?? "No vendor named"),
         el("div", { class: "amount" }, amountOf(d)),
         el("p", { class: "small" }, [d.file, d.invoice_number, d.date && `dated ${d.date}`, d.due_date && `due ${d.due_date}`, d.payment_terms].filter(Boolean).join(" · ")),
-        el("h3", {}, "Why it is held"), flagList(held),
-        advice ? el("h3", {}, "Advice (a recommendation, not a decision)") : null, advice,
+        d.resolved ? resolution(d.resolved) : null,
+        el("h3", {}, d.resolved ? "What the checks found" : "Why it is held"),
+        held.length ? flagList(held) : el("p", { class: "small" }, "Nothing that holds, warns or blocks."),
+        advice ? el("h3", {}, d.resolved ? "The reason on record" : "Advice (a recommendation, not a decision)") : null, advice,
         el("h3", {}, "Line items"), el("div", { class: "scroll" }, lines),
         d.notes ? el("p", { class: "small" }, `Vendor's notes: ${d.notes}`) : null,
         notes.length ? el("details", {}, el("summary", {}, `Other notes on this invoice (${notes.length})`), flagList(notes)) : null,
         el("details", {}, el("summary", {}, "Steps taken so far"), el("pre", {}, d.trail.map((t) => JSON.stringify(t)).join("\n"))),
-        decisionForm(d, pays)
+        d.resolved ? null : decisionForm(d, pays)
     ];
     $("detail").replaceChildren(...parts.filter((p) => p !== null));
+    // On a narrow screen the invoice sits below the lists: bring it into view when one is chosen.
+    if (window.matchMedia("(max-width: 760px)").matches && (selected !== null || selectedRun !== null) && shownOnce)
+        $("detail").scrollIntoView();
+    shownOnce = true;
+}
+/** How a finished run ended and who resolved it, in words. */
+function resolution(r) {
+    const amount = money(r.amount, r.currency ?? "USD");
+    const what = r.status === "PAID" ? `Paid ${amount}.`
+        : r.status === "REJECTED" ? "Rejected. Nothing was paid."
+            : r.status.startsWith("SKIPPED") ? "Skipped. Nothing was decided or paid for this file."
+                : r.status === "ERROR" ? "The file could not be read."
+                    : r.status === "PAYMENT_UNCONFIRMED" ? `A payment of ${amount} was sent but did not confirm: check with the bank.`
+                        : `${OUTCOME[r.status] ?? r.status}.`;
+    const who = r.by === "person" ? `Resolved by ${r.reviewer ?? "a reviewer"}.`
+        : r.by === "none" ? "" : `Resolved by ${r.who.charAt(0).toLowerCase()}${r.who.slice(1)}${r.rule ? ` (rule: ${words(r.rule).toLowerCase()})` : ""}. No person was involved.`;
+    return el("div", { class: `notice ${r.status === "PAID" ? "done" : r.status.startsWith("SKIPPED") ? "" : "error"}` }, el("strong", {}, what), ` ${who}`, r.note || r.error ? el("div", {}, r.note ?? r.error ?? "") : null);
 }
 /** For a decision that was recorded but never carried out: one button, which carries it out as recorded. */
 function finishForm(d, stuck) {
@@ -197,6 +255,8 @@ function finishForm(d, stuck) {
 function decisionForm(d, pays) {
     if (d.stuck)
         return finishForm(d, d.stuck);
+    if (d.id === null)
+        return el("p", {});
     let remembered = "";
     try {
         remembered = localStorage.getItem("reviewer") ?? "";

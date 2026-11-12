@@ -22,6 +22,8 @@ h3 { font-size: 14px; margin: 22px 0 8px; }
 .small.warn { color: var(--block); }
 main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 20px; padding: 4px 20px 40px; max-width: 1280px; }
 @media (max-width: 760px) { main { grid-template-columns: 1fr; padding: 4px 16px 32px; } }
+/* Side by side: the list scrolls on its own, so the invoice chosen from far down it is still in view. */
+@media (min-width: 761px) { nav { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto; padding: 0 4px 24px 0; } }
 nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 nav button, nav li.done { width: 100%; text-align: left; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; color: inherit; font: inherit; }
 nav button { cursor: pointer; }
@@ -59,6 +61,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .notice { padding: 10px 14px; border-radius: 6px; background: var(--hold-bg); color: var(--hold); }
 .notice.error { background: var(--block-bg); color: var(--block); }
 .notice.done { background: var(--ok-bg); color: var(--ok); }
+#detail > .notice { margin: 14px 0 0; }
 details { margin-top: 18px; }
 summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 pre { font-size: 12px; overflow-x: auto; background: var(--bg); padding: 10px; border-radius: 6px; }

@@ -223,3 +223,60 @@ def test_the_compiled_script_matches_its_source(tmp_path):
     assert (tmp_path / "app.js").read_text() == (ROOT / "web" / "static" / "app.js").read_text(), \
         "web/static/app.js is out of date: run `npm run build` in web/frontend"
 
+
+
+# --- Invoices resolved without a person --------------------------------------------------------------
+
+def test_what_the_application_and_the_agent_resolved_is_listed_with_who_and_why(client):
+    """Every file that reached an outcome with no person: paid or rejected by the policy (with the agent's reason where it wrote one), or skipped by the ledger as a copy. Held invoices are not in it."""
+    automatic = {a["file"][8:]: a for a in client.get("/api/queue").json()["automatic"]}
+    assert {f: (a["status"], a["by"]) for f, a in automatic.items()} == {
+        "1001.txt": ("PAID", "policy"), "1004.json": ("PAID", "policy"), "1006.csv": ("PAID", "policy"),
+        "1011.pdf": ("PAID", "policy"), "1015.csv": ("PAID", "policy"), "1010.txt": ("PAID", "policy+agent"),
+        "1003.txt": ("REJECTED", "policy"), "1007.csv": ("REJECTED", "policy"), "1008.txt": ("REJECTED", "policy"),
+        "1009.json": ("REJECTED", "policy"), "1013.json": ("REJECTED", "policy"),
+        "1011.txt": ("SKIPPED_DUPLICATE", "ledger"), "1012.txt": ("SKIPPED_DUPLICATE", "ledger"), "1013.pdf": ("SKIPPED_DUPLICATE", "ledger")}
+    assert automatic["1008.txt"]["reasons"] == ["PRODUCT_NOT_STOCKED"] and automatic["1001.txt"]["reasons"] == []
+    assert automatic["1010.txt"]["reasons"] == ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]         # paid with these warnings
+    assert automatic["1011.txt"]["note"] == "A copy of invoice_1011.pdf, which was paid"
+
+
+def test_a_resolved_invoice_is_shown_with_its_evidence_and_how_it_ended(client):
+    """Opened, a finished run has what a held invoice has (flags explained, the reason, the lines) and, in place of a decision, how it ended: 1010 paid on the policy's rule with the agent's reason; 1003 rejected on four fraud signals."""
+    runs = {a["file"]: a["run"] for a in client.get("/api/queue").json()["automatic"]}
+    paid = client.get(f"/api/runs/{runs['invoice_1010.txt']}").json()
+    assert paid["resolved"] == {"status": "PAID", "by": "policy+agent", "who": "The policy, with the reviewer agent's reason",
+                                "reviewer": None, "note": None, "rule": "NO_OBJECTION", "amount": "7185.00", "currency": "USD", "error": None}
+    assert paid["advice"]["by"] == "reviewer_agent" and "rush order" in paid["advice"]["rationale"] and paid["advice"]["verified"] is True
+    assert (paid["id"], paid["pays"], len(paid["line_items"])) == (None, None, 4)
+
+    rejected = client.get(f"/api/runs/{runs['invoice_1003.txt']}").json()
+    assert (rejected["resolved"]["status"], rejected["resolved"]["rule"], rejected["resolved"]["amount"]) == ("REJECTED", "FRAUD_SIGNALS", None)
+    assert rejected["advice"]["by"] == "policy" and "WIRE_REQUEST" in [f["code"] for f in rejected["flags"]]
+    assert client.get("/api/runs/nothing").status_code == 404
+
+
+def test_a_persons_decision_is_not_listed_as_automatic_and_a_rerun_adds_nothing(client, paths, capsys):
+    """An invoice a reviewer released is logged as theirs, so it stays out of the automatic list. Running the folder again logs no new runs: a file already processed keeps its first record."""
+    from ledger import Ledger
+    before = client.get("/api/queue").json()["automatic"]
+    queue_id = by_file(client)["invoice_1016.json"]["id"]
+    client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
+    main.main([f"--invoice_path={INVOICES}", "--offline", *[x for k, v in paths.items() for x in (f"--{k}", str(v))]])
+    capsys.readouterr()
+    assert client.get("/api/queue").json()["automatic"] == before
+    [mine] = [r for r in Ledger(paths["ledger"]).runs() if r["resolved_by"] == "person"]
+    assert (mine["source_file"], mine["status"], mine["reviewer"]) == ("invoice_1016.json", "PAID", "Dana Lee")
+
+
+def test_a_file_that_could_not_be_read_is_listed_too(paths, tmp_path, capsys):
+    """An unreadable file has no invoice, but it is still an outcome someone should see."""
+    bad = tmp_path / "broken.json"
+    bad.write_text("{not json")
+    main.main([f"--invoice_path={bad}", "--offline", *[x for k, v in paths.items() for x in (f"--{k}", str(v))]])
+    capsys.readouterr()
+    client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
+    newest = client.get("/api/queue").json()["automatic"][0]
+    assert (newest["file"], newest["status"], newest["by"], newest["vendor"]) == ("broken.json", "ERROR", "none", None)
+    shown = client.get(f"/api/runs/{newest['run']}").json()
+    assert shown["resolved"]["error"] and shown["flags"] == [] and shown["line_items"] == []

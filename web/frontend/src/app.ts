@@ -1,5 +1,7 @@
 // The review screen. Plain TypeScript, no framework: it lists the invoices held for a person,
-// shows one in full, and sends the decision to the API (web/app.py).
+// shows one in full, and sends the decision to the API (web/app.py). It also lists what was
+// resolved without a person (paid or rejected by the policy, skipped as a duplicate) and shows
+// each of those with the same evidence, read-only.
 //
 // Invoice text is written by the vendor. Everything is put on the page with textContent, never
 // as HTML, so nothing a vendor writes can become markup or script.
@@ -14,11 +16,20 @@ interface Advice {
   by: string; recommendation: string | null; rationale: string; open_questions: string[]; note: string | null;
   lookups: { tool: string; arguments: unknown; result: unknown }[]; verified: boolean;
 }
-interface Detail extends Summary {
+interface Resolved {
+  status: string; by: string; who: string; reviewer: string | null; note: string | null; rule: string | null;
+  amount: string | null; currency: string | null; error: string | null;
+}
+interface Automatic {
+  run: string; file: string; vendor: string | null; total: string | null; currency: string; status: string;
+  by: string; who: string; reasons: string[]; note: string | null;
+}
+interface Detail extends Omit<Summary, "id"> {
+  id: number | null; resolved: Resolved | null;
   status: string; invoice_number: string | null; date: string | null; due_date: string | null;
   payment_terms: string | null; notes: string | null; subtotal: string | null; tax_amount: string | null; shipping: string | null;
   line_items: { item: string | null; quantity: string | null; unit_price: string | null; note: string | null }[];
-  flags: Flag[]; pays: { amount: string | null; currency: string; already_paid: string | null };
+  flags: Flag[]; pays: { amount: string | null; currency: string; already_paid: string | null } | null;
   cannot_approve: string | null; conversion: { usd_estimate: string; as_of?: string } | null;
   advice: Advice | null; trail: unknown[];
 }
@@ -31,10 +42,17 @@ interface Outcome {
   file: string; vendor: string | null;
   result: { status: string; amount?: string; currency?: string; error?: string; reasons?: string[] };
 }
-interface Queue { waiting: Summary[]; decided: Decided[]; paid: Record<string, string>; payments: number; }
+interface Queue { waiting: Summary[]; decided: Decided[]; automatic: Automatic[]; paid: Record<string, string>; payments: number; }
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
-let selected: number | null = null;
+let selected: number | null = null;      // the waiting invoice shown, by queue number
+let selectedRun: string | null = null;   // or the finished run shown
+let shownOnce = false;                   // the first invoice opens by itself; don't scroll the page for that one
+const OUTCOME: Record<string, string> = {
+  PAID: "Paid", REJECTED: "Rejected", SKIPPED_DUPLICATE: "Skipped: duplicate", SKIPPED_SUPERSEDED: "Skipped: superseded",
+  ERROR: "Could not be read", PAYMENT_UNCONFIRMED: "Payment not confirmed", PAYMENT_NOT_SENT: "Payment not sent",
+};
+const outcomeClass = (status: string) => status === "PAID" ? "approve" : status.startsWith("SKIPPED") ? "" : "reject";
 let waiting: Summary[] = [];
 let latest = 0;   // counts requests for an invoice's detail, so an answer that arrives late is dropped
 
@@ -50,8 +68,9 @@ function money(amount: string | null, currency = "USD"): string {
   if (amount === null || amount === "") return "–";
   const n = Number(amount);
   if (Number.isNaN(n)) return amount;
-  const text = n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return currency === "USD" ? `$${text}` : `${text} ${currency}`;
+  const text = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const sign = n < 0 ? "-" : "";
+  return currency === "USD" ? `${sign}$${text}` : `${sign}${text} ${currency}`;
 }
 
 function amountOf(s: { total: string | null; currency: string; usd_estimate: string | null }): string {
@@ -117,15 +136,47 @@ async function loadQueue(openFirst = true): Promise<void> {
     d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
   $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, "No decisions yet.")]));
 
+  $("automatic-count").textContent = String(queue.automatic.length);
+  const automatic = queue.automatic.map((a) => {
+    const button = el("button", { type: "button", "aria-current": String(a.run === selectedRun) },
+      el("div", { class: "row" }, el("strong", {}, a.vendor ?? a.file), el("span", { class: `tag ${outcomeClass(a.status)}` }, OUTCOME[a.status] ?? a.status)),
+      el("div", { class: "small" }, `${a.file} · ${money(a.total, a.currency)} · ${a.who}`),
+      el("div", { class: "small" }, a.note ?? (a.reasons.length ? a.reasons.map(words).join(", ") : "Nothing to object to")));
+    button.dataset.run = a.run;
+    button.addEventListener("click", () => selectRun(a.run));
+    return el("li", {}, button);
+  });
+  $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, "Nothing yet.")]));
+
   if (selected !== null && !queue.waiting.some((s) => s.id === selected)) selected = null;   // decided elsewhere
-  if (selected === null && openFirst && queue.waiting.length) await select(queue.waiting[0].id);
-  if (selected === null && openFirst) $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
+  if (selected === null && selectedRun === null && openFirst && queue.waiting.length) await select(queue.waiting[0].id);
+  if (selected === null && selectedRun === null && openFirst) $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
+}
+
+function highlight(): void {
+  document.querySelectorAll<HTMLElement>("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(selected))));
+  document.querySelectorAll<HTMLElement>("#automatic button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.run === selectedRun)));
+}
+
+/** Show a run that finished without a person: the same evidence as a held invoice, and how it ended in place of the form. */
+async function selectRun(run: string): Promise<void> {
+  selected = null;
+  selectedRun = run;
+  const request = ++latest;
+  highlight();
+  try {
+    const d = await api<Detail>(`/api/runs/${encodeURIComponent(run)}`);
+    if (request === latest) render(d);
+  } catch (e) {
+    if (request === latest) $("detail").replaceChildren(el("p", { class: "notice error" }, (e as Error).message));
+  }
 }
 
 async function select(id: number): Promise<void> {
   selected = id;
+  selectedRun = null;
   const request = ++latest;
-  document.querySelectorAll<HTMLElement>("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(id))));
+  highlight();
   const summary = waiting.find((s) => s.id === id);
   if (summary && !summary.has_saved_run) { renderLost(summary); return; }
   let d: Detail;
@@ -189,7 +240,7 @@ function render(d: Detail): void {
   const held = d.flags.filter((f) => f.severity !== "INFO");
   const notes = d.flags.filter((f) => f.severity === "INFO");
   const flagList = (flags: Flag[]) => el("ul", { class: "flags" }, ...flags.map((f) => el("li", {},
-    el("span", { class: `tag ${f.severity}` }, f.severity === "REVIEW" ? "Held" : f.severity === "WARN" ? "Warning" : f.severity === "BLOCK" ? "Blocks" : "Note"),
+    el("span", { class: `tag ${f.severity}` }, f.severity === "REVIEW" ? (d.resolved ? "Review" : "Held") : f.severity === "WARN" ? "Warning" : f.severity === "BLOCK" ? "Blocks" : "Note"),
     el("div", {}, el("strong", {}, words(f.code)), `: ${f.meaning}`,
       el("div", { class: "small" }, Object.entries(f.detail).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join(" · "))))));
 
@@ -208,7 +259,7 @@ function render(d: Detail): void {
     a.lookups.length ? el("details", {}, el("summary", {}, `What the agent looked up (${a.lookups.length})`),
       el("pre", {}, a.lookups.map((l) => `${l.tool}(${JSON.stringify(l.arguments)})\n  → ${JSON.stringify(l.result)}`).join("\n"))) : null);
 
-  const pays = d.pays.already_paid !== null
+  const pays = d.pays === null ? "" : d.pays.already_paid !== null
     ? `Approving pays ${money(d.pays.amount, d.pays.currency)}: the difference. ${money(d.pays.already_paid, d.pays.currency)} was already paid on the earlier version.`
     : `Approving pays ${money(d.pays.amount, d.pays.currency)}${d.conversion ? `, about ${money(d.conversion.usd_estimate)} at the rate service's rate` : ""}.`;
 
@@ -216,14 +267,34 @@ function render(d: Detail): void {
     el("h2", {}, d.vendor ?? "No vendor named"),
     el("div", { class: "amount" }, amountOf(d)),
     el("p", { class: "small" }, [d.file, d.invoice_number, d.date && `dated ${d.date}`, d.due_date && `due ${d.due_date}`, d.payment_terms].filter(Boolean).join(" · ")),
-    el("h3", {}, "Why it is held"), flagList(held),
-    advice ? el("h3", {}, "Advice (a recommendation, not a decision)") : null, advice,
+    d.resolved ? resolution(d.resolved) : null,
+    el("h3", {}, d.resolved ? "What the checks found" : "Why it is held"),
+    held.length ? flagList(held) : el("p", { class: "small" }, "Nothing that holds, warns or blocks."),
+    advice ? el("h3", {}, d.resolved ? "The reason on record" : "Advice (a recommendation, not a decision)") : null, advice,
     el("h3", {}, "Line items"), el("div", { class: "scroll" }, lines),
     d.notes ? el("p", { class: "small" }, `Vendor's notes: ${d.notes}`) : null,
     notes.length ? el("details", {}, el("summary", {}, `Other notes on this invoice (${notes.length})`), flagList(notes)) : null,
     el("details", {}, el("summary", {}, "Steps taken so far"), el("pre", {}, d.trail.map((t) => JSON.stringify(t)).join("\n"))),
-    decisionForm(d, pays)];
+    d.resolved ? null : decisionForm(d, pays)];
   $("detail").replaceChildren(...parts.filter((p): p is HTMLElement => p !== null));
+  // On a narrow screen the invoice sits below the lists: bring it into view when one is chosen.
+  if (window.matchMedia("(max-width: 760px)").matches && (selected !== null || selectedRun !== null) && shownOnce) $("detail").scrollIntoView();
+  shownOnce = true;
+}
+
+/** How a finished run ended and who resolved it, in words. */
+function resolution(r: Resolved): HTMLElement {
+  const amount = money(r.amount, r.currency ?? "USD");
+  const what = r.status === "PAID" ? `Paid ${amount}.`
+    : r.status === "REJECTED" ? "Rejected. Nothing was paid."
+    : r.status.startsWith("SKIPPED") ? "Skipped. Nothing was decided or paid for this file."
+    : r.status === "ERROR" ? "The file could not be read."
+    : r.status === "PAYMENT_UNCONFIRMED" ? `A payment of ${amount} was sent but did not confirm: check with the bank.`
+    : `${OUTCOME[r.status] ?? r.status}.`;
+  const who = r.by === "person" ? `Resolved by ${r.reviewer ?? "a reviewer"}.`
+    : r.by === "none" ? "" : `Resolved by ${r.who.charAt(0).toLowerCase()}${r.who.slice(1)}${r.rule ? ` (rule: ${words(r.rule).toLowerCase()})` : ""}. No person was involved.`;
+  return el("div", { class: `notice ${r.status === "PAID" ? "done" : r.status.startsWith("SKIPPED") ? "" : "error"}` },
+    el("strong", {}, what), ` ${who}`, r.note || r.error ? el("div", {}, r.note ?? r.error ?? "") : null);
 }
 
 /** For a decision that was recorded but never carried out: one button, which carries it out as recorded. */
@@ -250,6 +321,7 @@ function finishForm(d: Detail, stuck: { action: string; reviewer: string; note?:
 
 function decisionForm(d: Detail, pays: string): HTMLElement {
   if (d.stuck) return finishForm(d, d.stuck);
+  if (d.id === null) return el("p", {});
   let remembered = "";
   try { remembered = localStorage.getItem("reviewer") ?? ""; } catch { /* storage unavailable: start empty */ }
   const name = el("input", { name: "reviewer", required: "", autocomplete: "name", value: remembered }) as HTMLInputElement;

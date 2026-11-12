@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS review_queue (
     status TEXT NOT NULL, action TEXT, reviewer TEXT, note TEXT,
     created_at TEXT NOT NULL, resolved_at TEXT
 );
+-- One row per run that reached an outcome: what happened to the file, who resolved it, and the
+-- evidence (flags, decision, the agent's reason) as JSON. The invoices table says where an invoice
+-- stands; this says how each file got there, including second copies that have no row of their own.
+CREATE TABLE IF NOT EXISTS runs (
+    thread_id TEXT PRIMARY KEY, source_file TEXT NOT NULL, vendor TEXT, total TEXT, currency TEXT,
+    status TEXT NOT NULL, resolved_by TEXT NOT NULL, reviewer TEXT, summary TEXT NOT NULL, finished_at TEXT NOT NULL
+);
 """
 
 
@@ -370,6 +377,36 @@ class Ledger:
         rows = self._db.execute("SELECT number_key, revision, total, status, source_file FROM invoices "
                                 "WHERE vendor_key=? ORDER BY number_key, revision", (_alnum(vendor_name),))
         return [dict(r) for r in rows]
+
+    def log_run(self, thread_id: str, source_file: str, vendor: str | None, total, currency: str | None, status: str,
+                resolved_by: str, reviewer: str | None, summary: str) -> None:
+        """Record how one run ended. Safe to repeat: a run is one row, replaced if written again.
+
+        Args:
+            thread_id: The run's name. A held invoice released later finishes under the same one.
+            status: The outcome: PAID, REJECTED, SKIPPED_DUPLICATE, ERROR and so on.
+            resolved_by: "policy", "policy+agent" (the reviewer agent wrote the reason), "ledger"
+                (a duplicate or superseded copy), "person" (released or rejected on review), or
+                "none" for a file that couldn't be read.
+            reviewer: The person's name, when resolved_by is "person".
+            summary: The evidence as a JSON object, for showing the run later.
+        """
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)",
+                             (thread_id, source_file, vendor, _plain(total) if total is not None else None, currency, status,
+                              resolved_by, reviewer, summary, self._now().isoformat()))
+
+    def has_run(self, source_file: str, status: str) -> bool:
+        """Whether a run of this file already ended this way."""
+        return self._db.execute("SELECT 1 FROM runs WHERE source_file=? AND status=? LIMIT 1", (source_file, status)).fetchone() is not None
+
+    def runs(self) -> list[dict]:
+        """Every finished run, newest first."""
+        return [dict(r) for r in self._db.execute("SELECT * FROM runs ORDER BY finished_at DESC, rowid DESC")]
+
+    def run_record(self, thread_id: str) -> dict | None:
+        row = self._db.execute("SELECT * FROM runs WHERE thread_id=?", (thread_id,)).fetchone()
+        return dict(row) if row else None
 
     def invoices(self) -> list[dict]:
         """Every invoice on record, oldest identity first."""

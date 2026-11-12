@@ -1,6 +1,7 @@
 """The review queue over HTTP, for the page in web/static.
 
-    GET  /api/queue                 what is waiting, what was decided, and what has been paid
+    GET  /api/queue                 what is waiting, what was decided, what was resolved without a person, and what has been paid
+    GET  /api/runs/{run}            one finished run in full: what the application or the agent did, and why
     GET  /api/queue/{id}            one held invoice in full
     POST /api/queue/{id}/decision   {"action": "approve" | "reject", "reviewer": "...", "note": "..."}
     POST /api/queue/{id}/reopen     put back an invoice whose saved run is gone, to be processed again
@@ -17,6 +18,7 @@ There is no login. The server listens on this machine only, and a reviewer is wh
 their name. Requests addressed to any other host name are refused: without that check, a web
 page the reviewer has open could point its own domain at 127.0.0.1 and post decisions here.
 """
+import dataclasses
 import json
 import sqlite3
 import threading
@@ -85,31 +87,74 @@ def _decided(entry: dict, payments: dict) -> dict:
                 "amount": payment["amount"], "currency": payment["currency"], "status": payment["status"]} or None}
 
 
-def _detail(entry: dict, state: dict, rates, stuck: bool) -> dict:
-    """Everything a reviewer needs to decide one invoice."""
-    invoice = state["invoice"]
-    advice = state.get("assessment")
+def _evidence(invoice: dict, assessment: dict | None, critique: dict | None, trail: list) -> dict:
+    """What was found on an invoice and what was said about it. `invoice` is the invoice as plain JSON."""
     flags = [{"code": f["code"], "severity": f["severity"], "meaning": MEANING.get(f["code"], ""),
-              "detail": {k: v for k, v in f.items() if k not in ("code", "severity")}} for f in invoice.flags]
+              "detail": {k: v for k, v in f.items() if k not in ("code", "severity")}} for f in invoice["flags"]]
+    return {
+        "invoice_number": invoice["invoice_number"], "date": invoice["date"], "due_date": invoice["due_date"],
+        "payment_terms": invoice["payment_terms"], "notes": invoice["notes"],
+        "line_items": [{k: li[k] for k in ("item", "quantity", "unit_price", "note")} for li in invoice["line_items"]],
+        "flags": flags,
+        "advice": assessment and {
+            "by": assessment["by"], "recommendation": assessment.get("recommendation"), "rationale": assessment["rationale"],
+            "open_questions": assessment.get("open_questions", []), "note": assessment.get("note"),
+            "lookups": [{"tool": t["tool"], "arguments": t["arguments"], "result": t["result"]} for t in assessment.get("tools_used", [])],
+            "verified": (critique or {}).get("verdict") == "ACCEPT",
+        },
+        "trail": trail,
+    }
+
+
+def _detail(entry: dict, state: dict, rates, stuck: bool) -> dict:
+    """Everything a reviewer needs to decide one held invoice."""
+    invoice = state["invoice"]
     return {
         **_summary(entry, state, rates),
         # Decided, but the run never resumed: the decision as recorded, to be carried out again.
         "stuck": stuck and {"action": entry["action"], "reviewer": entry["reviewer"], "note": entry["note"]},
-        "status": entry["status"], "invoice_number": invoice.invoice_number, "date": invoice.date, "due_date": invoice.due_date,
-        "payment_terms": invoice.payment_terms, "notes": invoice.notes,
-        "subtotal": invoice.subtotal, "tax_amount": invoice.tax_amount, "shipping": invoice.shipping,
-        "line_items": [{"item": li.item, "quantity": li.quantity, "unit_price": li.unit_price, "note": li.note}
-                       for li in invoice.line_items],
-        "flags": flags, "pays": _pays(invoice), "cannot_approve": cannot_approve(invoice, rates),
-        "conversion": conversion(invoice, rates),
-        "advice": advice and {
-            "by": advice["by"], "recommendation": advice.get("recommendation"), "rationale": advice["rationale"],
-            "open_questions": advice.get("open_questions", []), "note": advice.get("note"),
-            "lookups": [{"tool": t["tool"], "arguments": t["arguments"], "result": t["result"]} for t in advice.get("tools_used", [])],
-            "verified": (state.get("critique") or {}).get("verdict") == "ACCEPT",
-        },
-        "trail": state["trail"],
+        "status": entry["status"], "pays": _pays(invoice), "cannot_approve": cannot_approve(invoice, rates),
+        "conversion": conversion(invoice, rates), "resolved": None,
+        **_evidence(_plain(dataclasses.asdict(invoice)), state.get("assessment"), state.get("critique"), state["trail"]),
     }
+
+
+WHO = {"policy": "The policy", "policy+agent": "The policy, with the reviewer agent's reason", "ledger": "The ledger",
+       "person": "A reviewer", "none": "Nobody: the file could not be read"}
+
+
+def _run_summary(run: dict) -> dict:
+    """One row of the list of finished runs: what happened to a file, who resolved it and why."""
+    summary = json.loads(run["summary"])
+    result, decision = summary["result"], summary.get("decision") or {}
+    note = None
+    if run["status"].startswith("SKIPPED"):
+        note = f"A copy of {result['earlier_file']}, which was {result['earlier_status'].lower()}"
+    elif run["status"] == "ERROR":
+        note = result["error"]
+    elif run["resolved_by"] == "person":
+        note = (summary.get("review") or {}).get("note")
+    return {"run": run["thread_id"], "file": run["source_file"], "vendor": run["vendor"], "total": run["total"],
+            "currency": run["currency"] or "USD", "status": run["status"], "by": run["resolved_by"], "who": WHO[run["resolved_by"]],
+            "reviewer": run["reviewer"], "reasons": list(decision.get("because") or decision.get("warnings") or []), "note": note}
+
+
+def _run_detail(run: dict) -> dict:
+    """One finished run in full, in the shape of a held invoice's detail, with how it ended in place of the decision form."""
+    summary = json.loads(run["summary"])
+    invoice, result = summary.get("invoice"), summary["result"]
+    row = _run_summary(run)
+    estimate = result.get("usd_estimate") or next(
+        (f for f in (invoice or {}).get("flags", []) if f["code"] == "CURRENCY_CONVERTED"), None)
+    base = {"id": None, **row, "usd_estimate": estimate and estimate["usd_estimate"], "recommendation": None,
+            "has_saved_run": True, "stuck": False, "pays": None, "cannot_approve": None, "conversion": None,
+            "resolved": {"status": run["status"], "by": run["resolved_by"], "who": row["who"], "reviewer": run["reviewer"],
+                         "note": row["note"], "rule": (summary.get("decision") or {}).get("rule"),
+                         "amount": result.get("amount"), "currency": result.get("currency"), "error": result.get("error")}}
+    if invoice is None:   # the file could not be read: there is no invoice to show
+        return base | {"invoice_number": None, "date": None, "due_date": None, "payment_terms": None, "notes": None,
+                       "line_items": [], "flags": [], "advice": None, "trail": summary.get("trail", [])}
+    return base | _evidence(invoice, summary.get("assessment"), summary.get("critique"), summary.get("trail", []))
 
 
 def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates_path="rates.db",
@@ -161,8 +206,17 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
                        for e in everything if e["status"] == "WAITING" or e["id"] in stuck]
             payments = {p["payment_key"]: p for p in ledger.payments()}
             decided = [_decided(e, payments) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
-            return _plain({"waiting": waiting, "decided": decided[::-1], "paid": ledger.paid_totals(),
+            automatic = [_run_summary(r) for r in ledger.runs() if r["resolved_by"] != "person"]
+            return _plain({"waiting": waiting, "decided": decided[::-1], "automatic": automatic, "paid": ledger.paid_totals(),
                            "payments": len(ledger.payments())})
+
+    @app.get("/api/runs/{run}")
+    def finished(run: str):
+        with session() as (ledger, graph, rates):
+            record = ledger.run_record(run)
+            if record is None:
+                raise HTTPException(404, "No finished run under that name.")
+            return _plain(_run_detail(record))
 
     @app.get("/api/queue/{queue_id}")
     def one(queue_id: int):
