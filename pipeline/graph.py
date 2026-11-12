@@ -10,10 +10,18 @@ LangGraph runs a program as a graph. Three things define one:
 
 This graph, with the decision the policy made choosing the branch after approve:
 
-    START -> ingest -> validate -> register -> approve -> reviewer -+-> pay ------------------> END
-                 |                     |                            +-> reject ---------------> END
-                 +-> failed -> END     +-> skip -> END              +-> hold -> await_review -+-> pay
-                                                                                              +-> reject
+    START -> ingest -> validate -> register -> approve -> reviewer -> critic -+-> pay ------------------> END
+                 |                     |                     ^           |    +-> reject ---------------> END
+                 +-> failed -> END     +-> skip -> END       +--revise---+    +-> hold -> await_review -+-> pay
+                                                                                                        +-> reject
+
+A loop. `critic -> reviewer` is an edge that points backwards: the critic checks the reviewer's
+assessment, and if it finds problems the run goes round again with the complaints attached. In
+LangGraph a cycle is nothing special, just a conditional edge whose target is an earlier node.
+What a cycle needs is a way to stop. Here that is a counter in the state, `critic_rounds`,
+which the routing function reads: after MAX_ROUNDS the run goes forward whatever the verdict.
+(LangGraph also has its own backstop, a recursion limit that aborts a run after too many steps.
+That is a crash guard, not a design: the counter is what ends this loop on purpose.)
 
 Pausing for a person. A held invoice is a run that stops and waits. Two LangGraph features do it:
 
@@ -52,7 +60,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 import normalizer
-from approval import APPROVE, HOLD, REJECT, Decision, assess, decide
+from approval import APPROVE, HOLD, MAX_ROUNDS, REJECT, Decision, assess, critique, decide
 from ledger import Ledger
 from ledger import ledger as seen
 from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
@@ -78,6 +86,8 @@ class State(TypedDict, total=False):
     recorded: bool  # True once this invoice has its own row in the ledger, so later nodes may update it
     decision: Decision
     assessment: dict  # the reason for the decision: {"by", "recommendation", "rationale", "open_questions", "tools_used"}
+    critique: dict    # the critic's last verdict on it: {"verdict", "problems", "model"}
+    critic_rounds: int  # how many times the critic has run for this invoice; what ends the loop
     review: dict    # a person's decision on a held invoice: {"action", "reviewer", "note", "amount"[, "converted"]}
                     # amount: set only for a revision of a paid invoice (the difference). converted: the dollar
                     # estimate, for an invoice in another currency.
@@ -231,10 +241,30 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         clean approval it calls nothing and the reason is written from the flags. If the model
         can't be reached, the policy's decision stands as it is.
         """
-        decision, assessment = assess(state["invoice"], state["decision"], provider, inventory, ledger)
+        # On the way back round, the state holds the critic's complaints about the last assessment.
+        # The decision is always worked out from the policy floor, never from an earlier round's
+        # result, so a hold the reviewer withdraws on revision really is withdrawn.
+        floor = decide(state["invoice"].flags)
+        revising = state.get("critique", {}).get("verdict") == "REVISE"
+        decision, assessment = assess(state["invoice"], floor, provider, inventory, ledger,
+                                      previous=state["assessment"] if revising else None,
+                                      problems=state["critique"]["problems"] if revising else None)
         step = {"by": assessment["by"], "recommendation": assessment["recommendation"], "outcome": decision.outcome,
-                "tools": [t["tool"] for t in assessment["tools_used"]], **({"note": assessment["note"]} if "note" in assessment else {})}
+                "tools": [t["tool"] for t in assessment["tools_used"]], **({"revision": True} if revising else {}),
+                **({"note": assessment["note"]} if "note" in assessment else {})}
         return {"decision": decision, "assessment": assessment, "trail": _step("reviewer", **step)}
+
+    def critic(state: State) -> dict:
+        """Check the reviewer's assessment: in code, then with a second model call.
+
+        Returns the verdict and counts the round. It decides nothing about where the run goes
+        next; the routing function after it reads the verdict and the count.
+        """
+        rounds = state.get("critic_rounds", 0) + 1
+        found = critique(state["invoice"], decide(state["invoice"].flags), state["assessment"], provider)
+        step = {"round": rounds, "verdict": found["verdict"], "model": found["model"],
+                "problems": [p["check"] for p in found["problems"]]}
+        return {"critique": found, "critic_rounds": rounds, "trail": _step("critic", **step)}
 
     def settle(state: State, status: str, detail: str) -> None:
         """Write the outcome to the invoice's ledger row, if it has one of its own."""
@@ -325,10 +355,18 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     def by_outcome(state: State) -> str:
         return {APPROVE: "pay", HOLD: "hold", REJECT: "reject"}[state["decision"].outcome]
 
+    def after_critic(state: State) -> str:
+        # Back to the reviewer while there are problems and rounds left; otherwise on to the outcome.
+        # An assessment that still has problems after the last round goes forward marked as such
+        # (critique.verdict stays REVISE): the outcome is the policy's or stricter either way.
+        if state["critique"]["verdict"] == "REVISE" and state["critic_rounds"] < MAX_ROUNDS:
+            return "reviewer"
+        return by_outcome(state)
+
     # --- Wiring. --------------------------------------------------------------------------------
     graph = StateGraph(State)  # the State type tells LangGraph the keys and their reducers
 
-    for node in (ingest, validate, register, skip, approve, reviewer, pay, hold, await_review, reject, failed):
+    for node in (ingest, validate, register, skip, approve, reviewer, critic, pay, hold, await_review, reject, failed):
         graph.add_node(node.__name__, node)
 
     graph.add_edge(START, "ingest")  # START and END are LangGraph's own entry and exit markers
@@ -338,7 +376,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     graph.add_edge("validate", "register")
     graph.add_conditional_edges("register", after_register, ["approve", "skip"])
     graph.add_edge("approve", "reviewer")
-    graph.add_conditional_edges("reviewer", by_outcome, ["pay", "hold", "reject"])
+    graph.add_edge("reviewer", "critic")
+    graph.add_conditional_edges("critic", after_critic, ["reviewer", "pay", "hold", "reject"])
     graph.add_edge("hold", "await_review")
     graph.add_conditional_edges("await_review", by_review, ["pay", "reject"])
     for last in ("pay", "reject", "skip", "failed"):

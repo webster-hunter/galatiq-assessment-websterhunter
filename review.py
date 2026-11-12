@@ -109,7 +109,10 @@ def main(argv: list[str] | None = None) -> int:
             print("\nThe reviewer agent's advice (a recommendation, not a decision):")
             for queue_id, a in advice:
                 if a and a["by"] == "reviewer_agent":
-                    print(f"{queue_id:>3}  {a['recommendation']}: {a['rationale']}")
+                    checked = states[queue_id].get("critique", {}).get("verdict")
+                    print(f"{queue_id:>3}  {a['recommendation']}"
+                          + ("" if checked == "ACCEPT" else " (NOT VERIFIED: the critic's objections were not all resolved)")
+                          + f": {a['rationale']}")
                     for q in a["open_questions"]:
                         print(f"       ? {q}")
         return 0
@@ -124,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
         if state:
             out |= {"cannot_approve_because": cannot_approve(state["invoice"], rates),
                     "usd_estimate": conversion(state["invoice"], rates), "decision": asdict(state["decision"]),
-                    "assessment": state.get("assessment"), "trail": state["trail"], "invoice": asdict(state["invoice"])}
+                    "assessment": state.get("assessment"), "critique": state.get("critique"), "trail": state["trail"],
+                    "invoice": asdict(state["invoice"])}
         print(json.dumps(out, indent=2, default=_json_default))
         return 0
     try:

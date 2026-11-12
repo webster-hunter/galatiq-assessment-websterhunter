@@ -5,6 +5,9 @@ here runs offline from the recordings in `data/replays`, with no API key.
 
 This is a collection of material, not the demo script. Add to it as stages are built.
 
+See also [`approvals-over-time.md`](approvals-over-time.md): how the 20 sample outcomes changed as
+each stage was added, from flags only to the critic.
+
 ## Self-correction: the headline numbers
 
 ```bash
@@ -159,8 +162,28 @@ Two true stories worth telling, both found by reading real output and not by tes
 
 Both are the same lesson: when an agent gets something wrong, look first at what it was given.
 
-What not to claim: that its reasoning is checked. The fixes are better tools and instructions;
-nothing in code yet verifies a rationale against the invoice. That check is the critic, next.
+## The critic: checking the reasons a reviewer reads
+
+```bash
+python main.py --invoice_path=data/invoices --offline --ledger demo.db --trace 2>&1 >/dev/null | grep '"critic"'
+```
+
+One line per critic pass: the round, the verdict, whether the model took part, and what kind of
+problem was found. An invoice with two lines went round the loop.
+
+What to point at:
+
+- **1016 and 1014** were sent back by a check in code: a flag code had been written into the
+  text. The revision describes it in words. No model was needed to catch it.
+- **The loop ends on a counter,** two passes at most. Show `after_critic` in `pipeline/graph.py`:
+  it is five lines, and it is the graph's only backward edge.
+- **No outcome changed.** The critic checks the reason, not the decision.
+
+How to say it: the agent writes for a person, so what it writes is checked before a person sees
+it. Figures must come from the invoice, the flags or a lookup; anything else goes back.
+
+What not to claim: that the model critic is reliable. On these files its two objections were
+debatable (the detail is in `approvals-over-time.md`). The checks in code are the dependable part.
 
 ## Watching one invoice move through the pipeline
 

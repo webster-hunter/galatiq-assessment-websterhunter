@@ -163,9 +163,11 @@ graph TD;
     register -.-> approve;
     register -.-> skip;
     approve --> reviewer;
-    reviewer -.-> pay;
-    reviewer -.-> hold;
-    reviewer -.-> reject;
+    reviewer --> critic;
+    critic -.-> reviewer;
+    critic -.-> pay;
+    critic -.-> hold;
+    critic -.-> reject;
     hold --> await_review;
     await_review -.-> pay;
     await_review -.-> reject;
@@ -179,6 +181,7 @@ graph TD;
 |---|---|---|
 | `ingest` | Reads the file into an `Invoice`: a parser for JSON, CSV and XML, the model for TXT and PDF | `normalizer`, `extraction` |
 | `validate` | Repairs what the invoice proves, runs every check against the inventory, grades each flag | `normalizer.check` |
+| `critic` | Checks the agent's assessment, in code and with a second model call. Problems send it back to `reviewer`, two rounds at most | `approval.critique` |
 | `register` | Asks the ledger whether this invoice was seen before, and records it if new | `ledger.Ledger` |
 | `skip` | The invoice was already handled, as this file or another copy: nothing is decided or paid | |
 | `approve` | The policy floor: the minimum outcome the flags require | `approval.decide` |
@@ -304,22 +307,55 @@ the vendor, and is sent as delimited data with an instruction to treat pressure 
 care; if that fails entirely, the worst outcome is an extra hold. If the model can't be reached,
 or answers unusably, the policy's decision stands and says so.
 
-### What it did on the samples
+### The critic
 
-From recorded replies (`grok-4`), on the folder run in order. It reviewed eight invoices: the
-seven policy holds, and 1010. On all eight it agreed with the policy's outcome.
+`approval/critic.py` checks each assessment the agent writes before it stands, in two layers.
 
-- **1010: it agreed the invoice is payable, and said why.** The policy approves 1010 with two
-  warnings. The agent read them: the second WidgetA line's higher price carries the vendor's
-  "rush order" note, and the Bill To line names an Acme division, which is expected. No hold.
-- **1016:** it looked for products like WidgetC (WidgetA and WidgetB) and checked the vendor's
-  history (one earlier invoice, paid), and asks whether WidgetC is a product Acme means to buy.
-- **1008:** it found no other invoices from the vendor, and asks whether the two unknown items
-  were ordered.
-- **1004 revised:** it explains that $1,890 was already paid and $4,050 is the difference, and
-  asks whether the PO amendment the vendor cites can be confirmed.
+**Checks in code**, which give the same verdict every time:
 
-Two faults were found by reading its recorded replies, and neither was the model's:
+| Check | Catches |
+|---|---|
+| `UNGROUNDED_NUMBER` | A figure in the rationale or a question that is nowhere in the invoice, the flags or a lookup result: an invented amount, or a sum or percentage the agent worked out |
+| `FLAG_CODE_IN_TEXT` | A flag code in text a person reads |
+| `FLAG_NOT_ADDRESSED` | A flag the checks raised that the agent's `flags_addressed` list leaves out |
+
+**A second model call**, for what code can't judge: a statement the evidence doesn't support, a
+question the evidence already answers, a hold whose only reasons the invoice explains. It must
+quote the words it objects to; a complaint about text that isn't in the assessment is dropped.
+
+Any problem sends the assessment back to the agent with the specific complaints. In the graph
+that is the `critic -> reviewer` edge, the one edge that points backwards. A counter in the
+state ends the loop after two critic passes; an assessment still not accepted goes forward
+marked as unverified, and `review.py` says so.
+
+The critic changes no outcome itself. It can lead the agent to withdraw a hold it can't justify,
+and the policy floor still holds underneath. A model checking a model tends to agree with it,
+which is why the code checks come first and count on their own.
+
+### What they did on the samples
+
+From recorded replies (`grok-4`), on the folder run in order. The agent reviewed eight invoices:
+the seven policy holds, and 1010. On all eight it agreed with the policy's outcome.
+
+- **1010: it agreed the invoice is payable, and said why.** The second WidgetA line's higher
+  price carries the vendor's "rush order" note, and it is billed to an Acme division. No hold.
+- **1016:** it looked for products like WidgetC (WidgetA and WidgetB), and asks whether to accept
+  WidgetC as a new product.
+- **1008:** it looked up both unknown items, found nothing similar, and asks whether they were
+  ordered.
+- **1004 revised:** it found the original in the vendor's history, paid $1,890, explains that
+  this revision adds $4,050, and asks whether the PO amendment authorises it.
+
+The critic sent four of the eight back once, and accepted all eight on its last pass:
+
+- **Two for a flag code in the text** (1014, 1016), caught by the check in code. The revisions
+  describe the problem in words.
+- **Two on the model critic's objection** (1002, 1010). Both objections were debatable: on 1010
+  it called "the bill-to field is an expected Acme division name" a contradiction of the
+  unexpected-fields flag, which only means the field is unmapped. The agent dropped the sentence
+  either way. The code checks are the part to rely on.
+
+Two faults were found earlier by reading recorded replies, and neither was the model's:
 
 - **A tool misled it.** Vendor history listed the invoice under review, which is in the ledger
   by then, and the model took it for an earlier duplicate on four invoices. The tool now returns
@@ -329,12 +365,15 @@ Two faults were found by reading its recorded replies, and neither was the model
   the line said "rush order". The instructions now name Acme Corp as the buyer and say to read a
   line's note before asking about that line.
 
+[`demo/approvals-over-time.md`](demo/approvals-over-time.md) shows how the 20 outcomes changed as
+each stage was added, including the agent's mistaken hold.
+
 Limits:
 
-- Nothing in code checks a rationale's claims, or that a question isn't already answered by the
-  invoice. The fixes above are instructions, which reduce a lapse without preventing it. That
-  check is the critic's job, not built.
-- Two rationales still use a flag code, against the instructions.
+- The model critic is not dependable: see above. What is dependable is narrow: figures, flag
+  codes, and the flag checklist.
+- A statement with no figure in it ("the vendor is well established") is checked only by the
+  model critic.
 - The model's choices vary between recordings: which tools it calls changed with each prompt
   edit. The tests pin the recorded behaviour, so a change shows up as a failure to look at.
 - Recordings cover the folder run. An invoice run on its own gets a different history from the

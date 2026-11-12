@@ -61,8 +61,10 @@ ANSWER = {
         "recommendation": {"type": "string", "enum": [APPROVE, HOLD, REJECT]},
         "rationale": {"type": "string"},
         "open_questions": {"type": "array", "items": {"type": "string"}},
+        # The one place flag codes belong: a checklist the critic can compare with the flags raised.
+        "flags_addressed": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["recommendation", "rationale", "open_questions"],
+    "required": ["recommendation", "rationale", "open_questions", "flags_addressed"],
     "additionalProperties": False,
 }
 
@@ -97,6 +99,10 @@ Your job:
   the totals a flag or tool result gives you.
 - List open_questions: what a person should confirm before acting, each as one short question.
   An empty list if there is nothing.
+- List flags_addressed: the code of every flag your rationale accounts for. This list is the only
+  place a flag code may appear. Every flag raised should be in it.
+- Give figures exactly as the invoice, a flag or a tool result states them. Do not add, subtract
+  or work out percentages: a number that appears nowhere in what you were given will be rejected.
 
 Limits you cannot change:
 - The floor is the minimum. You may recommend something stricter, never something looser.
@@ -171,12 +177,25 @@ def written_by_policy(decision: Decision) -> dict:
             HOLD: f"Held for review by policy ({decision.rule}): {because}.",
             APPROVE: "Approved by policy: nothing to object to"
                      + (f"; warnings on record: {', '.join(decision.warnings)}." if decision.warnings else ".")}[decision.outcome]
-    return {"by": "policy", "recommendation": decision.outcome, "rationale": text, "open_questions": [], "tools_used": []}
+    return {"by": "policy", "recommendation": decision.outcome, "rationale": text, "open_questions": [],
+            "flags_addressed": [], "tools_used": []}
+
+
+def _revision_request(previous: dict, problems: list[dict]) -> str:
+    """What the reviewer is sent when the critic returns its assessment: its lookups so far, and each complaint."""
+    lines = [f"- {p['problem']}" + (f' (in: "{p["quote"]}")' if p.get("quote") else "") for p in problems]
+    return ("A second reviewer checked your assessment against the invoice, the flags and your lookups, and found problems:\n"
+            + "\n".join(lines) + "\n\nThe lookups you have already made:\n" + json.dumps(previous["tools_used"], indent=1, default=str)
+            + "\n\nGive the assessment again with these corrected. Keep what was right. If a problem shows your "
+              "recommendation no longer has a reason, change the recommendation. You may make further lookups.")
 
 
 def assess(invoice, decision: Decision, provider, inventory: dict | None = None, ledger=None,
-           max_rounds: int = MAX_TOOL_ROUNDS) -> tuple[Decision, dict]:
+           max_rounds: int = MAX_TOOL_ROUNDS, previous: dict | None = None, problems: list[dict] | None = None) -> tuple[Decision, dict]:
     """Have the agent look into an invoice the policy held or approved with warnings.
+
+    Called again with `previous` and `problems`, it revises: the model sees its earlier
+    assessment and the critic's complaints, and answers afresh.
 
     Args:
         invoice: The checked Invoice.
@@ -185,6 +204,8 @@ def assess(invoice, decision: Decision, provider, inventory: dict | None = None,
         inventory: Item name -> stock, for the stock tools.
         ledger: The ledger, for vendor history.
         max_rounds: Turns in which the model may ask for tools before it must answer.
+        previous: The assessment being revised, if this is a revision.
+        problems: The critic's complaints about it, each {"problem", "quote"?}.
 
     Returns:
         (decision, assessment). The decision is the floor, or a HOLD at stage REVIEWER_AGENT if
@@ -197,6 +218,11 @@ def assess(invoice, decision: Decision, provider, inventory: dict | None = None,
     tools = make_tools(inventory, ledger, invoice)
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": _brief(invoice, decision)}]
     used = []
+    if previous is not None and previous.get("by") == "reviewer_agent":
+        earlier = {k: previous[k] for k in ("recommendation", "rationale", "open_questions", "flags_addressed") if k in previous}
+        messages += [{"role": "assistant", "content": json.dumps(earlier)},
+                     {"role": "user", "content": _revision_request(previous, problems or [])}]
+        used = list(previous["tools_used"])
     try:
         for _ in range(max_rounds + 1):
             reply = provider.chat(messages, ANSWER, TOOLS)
@@ -227,7 +253,8 @@ def assess(invoice, decision: Decision, provider, inventory: dict | None = None,
                                                          "tools_used": used}
 
     assessment = {"by": "reviewer_agent", "recommendation": recommendation, "rationale": answer.get("rationale", ""),
-                  "open_questions": list(answer.get("open_questions") or []), "tools_used": used}
+                  "open_questions": list(answer.get("open_questions") or []),
+                  "flags_addressed": list(answer.get("flags_addressed") or []), "tools_used": used}
     stricter = STRICTNESS.index(recommendation) > STRICTNESS.index(decision.outcome)
     if STRICTNESS.index(recommendation) < STRICTNESS.index(decision.outcome):
         assessment["note"] = f"recommended {recommendation}, below the policy floor of {decision.outcome}; the floor stands"

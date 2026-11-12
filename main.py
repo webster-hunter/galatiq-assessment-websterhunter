@@ -6,6 +6,7 @@ Runs one invoice file, or every invoice in a folder, through the pipeline graph 
     validate   repairs, then every check against the inventory, each flag graded
     approve    the policy floor turns the flags into APPROVE, HOLD or REJECT
     reviewer   the reviewer agent looks into holds and warned approvals, and writes the reason
+    critic     checks that assessment, in code and with a second model call; problems send it back
 
     register   the ledger: is this a duplicate, or a revision of one already handled?
     pay / hold / reject, or skip for an invoice that was already handled
@@ -124,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
             # A skipped invoice has no decision: it was already handled.
             decision = asdict(state["decision"]) if "decision" in state else None
             results.append({"file": str(file), "result": state["result"], "decision": decision,
-                            "assessment": state.get("assessment"), "trail": state["trail"],
+                            "assessment": state.get("assessment"), "critique": state.get("critique"),
+                            "trail": state["trail"],
                             "invoice": asdict(state["invoice"])})
     paid = [r["result"] for r in results if r.get("result", {}).get("status") == "PAID" and not r["result"]["repeated"]]
     not_sent = [r["file"] for r in results if r.get("result", {}).get("status") == "PAYMENT_NOT_SENT"]
