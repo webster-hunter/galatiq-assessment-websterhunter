@@ -486,3 +486,64 @@ def test_opening_the_ledger_does_not_scan_it_and_counting_does_not_read_rows(pat
         Ledger._fill_search = original
     assert calls == [] and ledger.count_waiting() == 6 == ledger.find_waiting()[1]
 
+
+
+# --- Fixes from the final code review ----------------------------------------------------------------
+
+def test_subfolders_are_named_not_passed_over_and_recursive_includes_them(paths, tmp_path, capsys):
+    """An inbox kept in monthly folders. Run on the top folder, nothing is processed and the summary says which folders were not looked in. With --recursive their files are processed, in path order; a hidden folder is still left alone."""
+    inbox = tmp_path / "inbox"
+    for month, name in (("2026-01", "invoice_1004.json"), ("2026-02", "invoice_1006.csv"), (".cache", "invoice_1015.csv")):
+        (inbox / month).mkdir(parents=True)
+        (inbox / month / name).write_bytes((INVOICES / name).read_bytes())
+    where = [x for k, v in paths.items() for x in (f"--{k}", str(v))]
+    assert main.main([f"--invoice_path={inbox}", "--offline", "--fresh", *where]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out) == [] and "0 files:" in out.err
+    assert "2 subfolder(s) of" in out.err and "were not looked in: 2026-01, 2026-02. Add --recursive" in out.err
+
+    assert main.main([f"--invoice_path={inbox}", "--offline", "--recursive", *where]) == 0
+    out = capsys.readouterr()
+    assert [(Path(r["file"]).parent.name, r["result"]["status"]) for r in json.loads(out.out)] == [("2026-01", "PAID"), ("2026-02", "PAID")]
+    assert "2 files: paid 2 now" in out.err and "not looked in" not in out.err
+
+
+def test_summary_and_a_trace_of_chosen_steps_need_no_shell_redirection(paths, capsys):
+    """--summary prints the summary lines and no JSON list; --trace with step names prints only those steps. Together they give the demo commands the same form in every shell."""
+    where = [x for k, v in paths.items() for x in (f"--{k}", str(v))]
+    assert main.main([f"--invoice_path={INVOICES / 'invoice_1010.txt'}", "--offline", "--fresh", "--summary", "--trace", "reviewer,critic", *where]) == 0
+    out = capsys.readouterr()
+    steps = [json.loads(line) for line in out.err.splitlines() if line.startswith("{")]
+    assert out.out == "" and "1 files: paid 1 now ($7,185.00)" in out.err
+    assert [s["node"] for s in steps] == ["reviewer", "critic", "reviewer", "critic"]
+    main.main([f"--invoice_path={INVOICES / 'invoice_1004.json'}", "--offline", "--trace", *where])
+    every = [json.loads(line)["node"] for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
+    assert every[0] == "ingest" and every[-1] == "pay" and len(every) == 7          # --trace alone: every step
+
+
+def test_the_header_figures_come_from_the_database_and_match_the_rows(client, paths):
+    """How many payments, and how much per currency, are a COUNT and a SUM. They equal what reading every row gives, to the cent, including a payment that did not confirm (counted, not totalled)."""
+    from decimal import Decimal
+    from ledger import Ledger
+    client.post(f"/api/queue/{by_file(client)['invoice_1014.xml']['id']}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
+    ledger = Ledger(paths["ledger"])
+    assert ledger.payment_summary() == (len(ledger.payments()), ledger.paid_totals()) == (7, {"USD": Decimal("26325"), "EUR": Decimal("4125")})
+    with ledger._db:
+        ledger._db.execute("INSERT INTO payments (payment_key, vendor, amount, status, created_at, currency) VALUES ('k','V','0.07','PAID','2026-01-01','USD')")
+        ledger._db.execute("INSERT INTO payments (payment_key, vendor, amount, status, created_at, currency) VALUES ('p','V','99.99','PENDING','2026-01-01','USD')")
+    assert ledger.payment_summary() == (9, ledger.paid_totals()) and ledger.paid_totals()["USD"] == Decimal("26325.07")
+    assert client.get("/api/queue").json()["paid"] == {"USD": "26325.07", "EUR": "4125"}
+
+
+def test_a_list_cut_short_says_so_and_the_rest_can_be_asked_for(client):
+    """With more finished invoices than the limit, the answer says there are more, so the screen can offer them; asking for a larger limit returns them, and then says there are no more."""
+    first = client.get("/api/queue", params={"limit": 5}).json()
+    assert (len(first["automatic"]), first["more"]) == (5, {"decided": False, "automatic": True})
+    rest = client.get("/api/queue", params={"limit": 14}).json()
+    assert (len(rest["automatic"]), rest["more"]["automatic"]) == (14, False)
+    assert [a["run"] for a in rest["automatic"][:5]] == [a["run"] for a in first["automatic"]]       # the same rows, then more
+    narrowed = client.get("/api/queue", params={"limit": 2, "outcome": "rejected"}).json()
+    assert (len(narrowed["automatic"]), narrowed["more"]["automatic"]) == (2, True)                   # more matches, not more rows in all
+    assert client.get("/api/queue", params={"limit": 5000}).status_code == 200
+    script = client.get("/static/app.js").text
+    assert "Show ${PAGE} more" in script and "limit += PAGE" in script

@@ -319,3 +319,25 @@ def test_a_path_in_a_run_log_reads_the_same_on_every_system():
     from pathlib import PureWindowsPath
     from pipeline.graph import _plain
     assert json.loads(json.dumps({"p": PureWindowsPath("x\\y.txt"), "q": Path("x") / "y.txt"}, default=_plain)) == {"p": "x/y.txt", "q": "x/y.txt"}
+
+
+# --- Fixes from the final code review ----------------------------------------------------------------
+
+def test_a_text_invoice_that_names_another_invoice_number_is_held_not_paid(tmp_path):
+    """One text file holding two invoices. The model returns the first; every value is in the file and its arithmetic reconciles, so without this check it would be paid and the second never mentioned. It is flagged with the other number and held. The 20 samples are unaffected: none names a second invoice."""
+    from extraction import Replay
+    two = tmp_path / "two.txt"
+    two.write_text("INVOICE INV-2001\nVendor: Widgets Inc.\nWidgetA  2  $250.00\nTotal: $500.00\n\n"
+                   "INVOICE INV-2002\nVendor: Widgets Inc.\nWidgetB  1  $500.00\nTotal: $500.00\n", encoding="utf-8")
+    first = transcription(invoice_number="INV-2001", vendor_name="Widgets Inc.", total="$500.00", lines=[("WidgetA", "2", "$250.00")])
+    invoice, method = read(two, Model(first))
+    assert method == "llm" and "NOT_IN_SOURCE" not in codes(invoice)
+    assert [f for f in invoice.flags if f["code"] == "POSSIBLY_SEVERAL_INVOICES"] == [
+        {"code": "POSSIBLY_SEVERAL_INVOICES", "read": "INV-2001", "also_in_file": ["INV-2002"]}]
+    decision = decide(normalizer.check(invoice, INVENTORY).flags)
+    assert decision.outcome == HOLD and "POSSIBLY_SEVERAL_INVOICES" in decision.because
+
+    replay = Replay(ROOT / "data" / "replays")
+    for path in sorted(INVOICES.iterdir()):
+        if path.suffix in (".txt", ".pdf"):
+            assert "POSSIBLY_SEVERAL_INVOICES" not in codes(read(path, replay)[0]), path.name

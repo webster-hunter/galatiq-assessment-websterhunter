@@ -73,7 +73,13 @@ def check(inv: Invoice, inventory: dict[str, int] | None = None, self_correct: b
     return inv
 
 
-def expand(paths, suffixes=LOADERS) -> list[Path]:
+def subfolders(path) -> list[Path]:
+    """The folders directly inside a folder, hidden ones (names starting with a dot) left out. Empty for a file."""
+    p = Path(path)
+    return sorted(d for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")) if p.is_dir() else []
+
+
+def expand(paths, suffixes=LOADERS, recursive: bool = False) -> list[Path]:
     """Turn a mix of files and folders into the list of files to load.
 
     Args:
@@ -82,14 +88,18 @@ def expand(paths, suffixes=LOADERS) -> list[Path]:
             every file except hidden ones (names starting with a dot), so that a file in a format
             nothing here reads is reported by whoever loads it, not passed over in silence.
 
+        recursive: Also take the files in a folder's subfolders, at any depth, hidden folders
+            left out. Off by default: see subfolders() for saying what was not looked in.
+
     Returns:
-        Files as given, in order; each folder replaced by its files, sorted by name (not recursive).
+        Files as given, in order; each folder replaced by its files, sorted by path.
     """
     out = []
     for p in map(Path, paths):
         if p.is_dir():
-            out += sorted(f for f in p.iterdir() if f.is_file() and (
-                not f.name.startswith(".") if suffixes is None else f.suffix.lower() in suffixes))
+            inside = p.rglob("*") if recursive else p.iterdir()
+            out += sorted(f for f in inside if f.is_file() and not any(part.startswith(".") for part in f.relative_to(p).parts[:-1])
+                          and (not f.name.startswith(".") if suffixes is None else f.suffix.lower() in suffixes))
         else:
             out.append(p)
     return out

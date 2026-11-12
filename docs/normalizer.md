@@ -138,7 +138,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `TAX_NEGATIVE` | `tax_amount` or `tax_rate` | BLOCK | Tax below zero; same risk as negative shipping |
 | `CONFLICTING_ROWS` | the field, with `row`, `value`, `first_value` | BLOCK | CSV rows disagree on an invoice-level field such as invoice number or vendor |
 | `UNFAMILIAR_FORMAT` | none; `read_by`, and `file_type` or `unrecognised_fields` | REVIEW | No parser could read the file, so the model did (`read_by: model`), or could not (`read_by: parser`, with why). Held so a person sees a new format |
-| `POSSIBLY_SEVERAL_INVOICES` | none; `read`, `also_in_file` | REVIEW | The model read one invoice from a file that names other invoice numbers too: it may be a batch, and the others were not read |
+| `POSSIBLY_SEVERAL_INVOICES` | none; `read`, `also_in_file` | REVIEW | The model read one invoice from a file (a PDF, a text file, an unfamiliar format) that names other invoice numbers too: it may hold several, and the others were not read |
 | `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match). Possibly a misspelling, so a person decides |
 | `PRODUCT_NOT_STOCKED` | `line_items[i].item` | BLOCK | Raised with `UNKNOWN_PRODUCT` when the name also resembles no inventory product: close spelling (`WidgtA`, `WidgetC`) or containing a product's whole name (`WidgetA (rush order)`) counts as resembling |
 | `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |

@@ -40,14 +40,14 @@ and how these 20 outcomes changed as each stage was built.
 
 ## Run it
 
-Requires Python 3.10 or later.
+Requires Python 3.11 or later (tested on 3.11 and 3.13, on Linux and Windows).
 
 ```bash
 pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
 python -m web                                                              # the review screen, at http://127.0.0.1:8000
-pytest                                                                     # 336 tests, about 20 seconds
+pytest                                                                     # 341 tests, about 20 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -61,7 +61,11 @@ steps taken, and the invoice as read) and a summary on stderr:
 20 files: paid 6 now ($26,325.00). Ledger ledger.db: 6 payments ($26,325.00) in all.
 ```
 
-Add `--trace` to watch an invoice move through the stages, one JSON line per step:
+`--summary` prints only those summary lines, without the JSON list. A folder's own files are
+processed; its subfolders are named in the summary and included with `--recursive`.
+
+Add `--trace` to watch an invoice move through the stages, one JSON line per step
+(`--trace reviewer,critic` prints only those steps):
 
 ```
 {"file": "invoice_1003.txt", "node": "ingest", "method": "llm", "model_attempts": 1}
@@ -166,7 +170,9 @@ guessed: the file is rejected or reported, with what it held kept.
 The model is an outside service, so what reaches it is limited. Only the listed types are sent
 (`--fallback-types` changes the list), never a file over 200,000 bytes, and never a JSON file
 that is a list of several records: the model returns one invoice, and a batch must not pass as
-one. A file it does read that names other invoice numbers is flagged as possibly several.
+one. Any file the model reads, a PDF included, that names other invoice numbers is flagged as
+possibly several and held, so a second invoice in the same file is never lost behind a payment
+of the first.
 
 `data/unfamiliar/` has four such files, with the model's replies recorded:
 
@@ -271,6 +277,6 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `ledger/`, `rates/` | What has been seen and paid; the mock rate service. [Reference](docs/ledger-and-review.md) |
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/unfamiliar/`, `data/replays/` | The 20 sample invoices; four files in formats no parser knows; the model's recorded replies |
-| `docs/design-and-demo.pdf` | Design decisions, a demo walkthrough with the command for each step, how the outcomes changed as each stage was built, and what was left out |
-| `tests/` | 336 tests. Each one's first line says the behaviour it pins |
+| `docs/design-and-demo.pdf` | Design decisions, a demo walkthrough with the command for each step, how the outcomes changed as each stage was built, and what was left out. Built from `docs/design-and-demo.html` by `node docs/build-pdf.js` |
+| `tests/` | 341 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

@@ -29,6 +29,7 @@ nav button, nav li.done { width: 100%; text-align: left; padding: 10px 12px; bac
 nav button { cursor: pointer; }
 nav button:hover, nav button[aria-current="true"] { border-color: var(--accent); }
 nav button[aria-current="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+nav button.more { text-align: center; color: var(--accent); font-weight: 600; }
 .row { display: flex; justify-content: space-between; gap: 10px; }
 .row strong { overflow-wrap: anywhere; }
 .small { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }

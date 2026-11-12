@@ -9,6 +9,8 @@
 const $ = (id) => document.getElementById(id);
 let selected = null; // the waiting invoice shown, by queue number
 let selectedRun = null; // or the finished run shown
+const PAGE = 200; // finished invoices shown per list, and how many more each "Show more" adds
+let limit = PAGE;
 let listRequest = 0; // counts requests for the lists, so an answer to an earlier search is dropped
 let shownOnce = false; // the first invoice opens by itself; don't scroll the page for that one
 const OUTCOME = {
@@ -72,6 +74,12 @@ function filters() {
         params.set("outcome", outcome);
     return params.toString();
 }
+/** The last row of a finished list that was cut short: asks for the next PAGE of both lists. */
+function showMore() {
+    const button = el("button", { type: "button", class: "more" }, `Show ${PAGE} more`);
+    button.addEventListener("click", () => { limit += PAGE; loadQueue(false); });
+    return el("li", {}, button);
+}
 /** "3" when the whole list is shown, "2 of 14" when it is narrowed or cut short. */
 function countOf(shown, all, narrowed) {
     return narrowed || shown !== all ? `${shown} of ${all}` : String(shown);
@@ -81,8 +89,9 @@ async function loadQueue(openFirst = true) {
     const request = ++listRequest;
     const query = filters();
     const narrowed = query !== "";
+    const asked = [query, limit === PAGE ? "" : `limit=${limit}`].filter(Boolean).join("&");
     try {
-        queue = await api(`/api/queue${narrowed ? `?${query}` : ""}`);
+        queue = await api(`/api/queue${asked ? `?${asked}` : ""}`);
         if (request !== listRequest)
             return; // a newer search has been sent: its answer is the one to show
         showProblem(null);
@@ -123,6 +132,8 @@ async function loadQueue(openFirst = true) {
         button.addEventListener("click", () => selectRun(run));
         return el("li", {}, button);
     });
+    if (queue.more.decided)
+        decided.push(showMore());
     $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, none ?? "No decisions yet.")]));
     $("automatic-count").textContent = countOf(queue.automatic.length, queue.of.automatic, narrowed);
     const automatic = queue.automatic.map((a) => {
@@ -131,6 +142,8 @@ async function loadQueue(openFirst = true) {
         button.addEventListener("click", () => selectRun(a.run));
         return el("li", {}, button);
     });
+    if (queue.more.automatic)
+        automatic.push(showMore());
     $("automatic").replaceChildren(...(automatic.length ? automatic : [el("li", { class: "empty" }, none ?? "Nothing yet.")]));
     // Gone from the whole list: decided elsewhere. (Missing from a narrowed list only means it doesn't match.)
     if (!narrowed && selected !== null && !queue.waiting.some((s) => s.id === selected))
@@ -352,8 +365,8 @@ function decisionForm(d, pays) {
 let typing;
 $("q").addEventListener("input", () => {
     window.clearTimeout(typing);
-    typing = window.setTimeout(() => loadQueue(false), 200);
+    typing = window.setTimeout(() => { limit = PAGE; loadQueue(false); }, 200); // a new search starts from the first page
 });
-$("kind").addEventListener("change", () => loadQueue(false));
+$("kind").addEventListener("change", () => { limit = PAGE; loadQueue(false); });
 $("filters").addEventListener("submit", (e) => { e.preventDefault(); loadQueue(false); });
 loadQueue();

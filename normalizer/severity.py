@@ -35,7 +35,8 @@ SEVERITY = {
     # in an unknown layout), read by the model instead. Held so a person sees the first invoices
     # in a new format; change to WARN to let clean ones through.
     "UNFAMILIAR_FORMAT": "REVIEW",
-    # Read by the model from a file that names other invoice numbers too: it may be a batch, of which only one was read.
+    # Read by the model from a file (a PDF, a text file, an unfamiliar format) that names other invoice
+    # numbers too: it may hold several invoices, of which only one was read. Held, so it is never paid unseen.
     "POSSIBLY_SEVERAL_INVOICES": "REVIEW",
     "UNKNOWN_PRODUCT": "REVIEW",  # may be a misspelling of a real product, or something we don't stock
     "UNPARSEABLE": "REVIEW",  # value couldn't be read; the flag carries the raw value

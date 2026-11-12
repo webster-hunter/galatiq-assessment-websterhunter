@@ -153,8 +153,9 @@ What is never sent to the model:
 - a JSON file that is a list of several records. The model returns one invoice, so a batch would
   lose the rest.
 
-A file the model does read that names other invoice numbers of the same form (INV-3004 read,
-INV-3005 also present) carries `POSSIBLY_SEVERAL_INVOICES` (REVIEW), listing them. If the model is
+Any file the model reads, a TXT or PDF as much as a fallback, that names other invoice numbers
+of the same form (INV-3004 read, INV-3005 also present) carries `POSSIBLY_SEVERAL_INVOICES`
+(REVIEW), listing them. It is held, so the first invoice is not paid while the second goes unseen. If the model is
 unavailable or finds no invoice, the parser's result stands for a structured file, and an unknown
 type is an error.
 

@@ -80,8 +80,8 @@ one), or skipped by the ledger as a second copy. Any of those can be opened to s
 evidence, read-only, with how it ended in place of the decision form. A search box and an outcome
 filter at the top narrow all three lists: the search matches vendor, file name, reason (as a flag
 code or in words), note, reviewer and amount (as stored or as shown, so `15,000` finds
-$15,000.00), and each list then shows "2 of 14". The two lists of finished invoices send at most
-200 rows each, newest first. The narrowing is done by the ledger in SQL (`Ledger.find_runs`,
+$15,000.00), and each list then shows "2 of 14". The two lists of finished invoices show 200
+rows each, newest first, with a "Show 200 more" row when there are more. The narrowing is done by the ledger in SQL (`Ledger.find_runs`,
 `find_waiting`, `find_decided`): each row has a `search` column written with it, a search is one
 `LIKE` per word, and the outcome and the limit are part of the same query. The right shows one invoice:
 why it is held, with each flag explained; the reviewer agent's advice, its questions and what it

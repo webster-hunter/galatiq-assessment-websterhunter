@@ -2,7 +2,9 @@
 
 Runs one invoice file, or every invoice in a folder, through the pipeline graph (pipeline/graph.py):
 
-    ingest     structured files by the deterministic normalizer, TXT and PDF by LLM extraction
+    ingest     JSON, CSV and XML by the deterministic normalizer; TXT and PDF by LLM extraction; a
+               file no parser can read (a listed type such as .dat, or a structured file in an
+               unknown layout) by LLM extraction too, and then always held (extraction.read)
     validate   repairs, then every check against the inventory, each flag graded
     approve    the policy floor turns the flags into APPROVE, HOLD or REJECT
     reviewer   the reviewer agent looks into holds and warned approvals, and writes the reason
@@ -16,7 +18,12 @@ what is waiting and resumes a run with a person's decision.
 
 Prints a JSON list on stdout, one {"file", "result", "decision", "assessment", "trail", "invoice"} entry per
 file ({"file", "error"} for a file that can't be read); exits 1 if any file is an error. With
---trace, each step is also printed to stderr as it happens, one JSON line per node.
+--trace, each step is also printed to stderr as it happens, one JSON line per node; --trace
+reviewer,critic prints only those steps. --summary leaves the JSON list out and prints only the
+summary lines, so no shell redirection is needed to read them.
+
+A folder's own files are processed, whatever their type. Its subfolders are not, and are named
+on stderr; --recursive includes them.
 
 The ledger (ledger.db) persists between runs, so running a file twice pays it once. --fresh
 sets it aside (kept, renamed) and starts with an empty one, which means invoices it had paid
@@ -84,7 +91,12 @@ def main(argv: list[str] | None = None) -> int:
                          "made-up seed rates if missing)")
     ap.add_argument("--checkpoints", default="checkpoints.db",
                     help="SQLite file of saved runs, so a held invoice can be released later (default: checkpoints.db)")
-    ap.add_argument("--trace", action="store_true", help="print each pipeline step to stderr as it happens")
+    ap.add_argument("--trace", nargs="?", const="", default=None, metavar="STEPS",
+                    help="print each pipeline step to stderr as it happens; give step names, comma-separated, "
+                         "to print only those (e.g. --trace reviewer,critic)")
+    ap.add_argument("--summary", action="store_true",
+                    help="print only the summary lines on stderr, not the JSON list of results on stdout")
+    ap.add_argument("--recursive", action="store_true", help="also process the files in subfolders of --invoice_path")
     ap.add_argument("--fallback-types", default=",".join(sorted(FALLBACK_SUFFIXES)),
                     help="file types with no parser that are given to the model when they are text, comma-separated "
                          "(default: %(default)s). Any other unknown type is reported and nothing of it is sent")
@@ -113,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         set_aside(Path(args.ledger))
     ledger, saved_runs = Ledger(args.ledger), checkpointer(args.checkpoints)
     try:
-        return emit(process(args, path, inventory, rates, ledger, saved_runs))
+        results = process(args, path, inventory, rates, ledger, saved_runs)
+        return (1 if any("error" in r for r in results) else 0) if args.summary else emit(results)
     finally:
         # Closed whatever happens. An open SQLite file can't be renamed or deleted on Windows, so
         # a ledger left open here could not be set aside by --fresh later in the same process.
@@ -128,11 +141,13 @@ def process(args, path: Path, inventory: dict, rates, ledger: Ledger, saved_runs
     results = []
     # Every file in a folder, whatever its extension: one in a format nothing here reads ends as
     # an ERROR with its name, where a person will see it. Skipping it would lose an invoice quietly.
-    for file in normalizer.expand([path], None):
+    only = {s.strip() for s in (args.trace or "").split(",") if s.strip()}   # empty: every step
+    for file in normalizer.expand([path], None, recursive=args.recursive):
         on_step = None
-        if args.trace:
+        if args.trace is not None:
             def on_step(step, file=file):
-                print(json.dumps({"file": file.name, **step}, default=_json_default), file=sys.stderr)
+                if not only or step["node"] in only:
+                    print(json.dumps({"file": file.name, **step}, default=_json_default), file=sys.stderr)
         state = run(graph, file, on_step)
         if "error" in state:
             results.append({"file": str(file), "error": state["error"]})
@@ -157,6 +172,10 @@ def process(args, path: Path, inventory: dict, rates, ledger: Ledger, saved_runs
     if held:
         print(f"{len(held)} held for review. Open the review screen with: python -m web --ledger {args.ledger} "
               f"--checkpoints {args.checkpoints}", file=sys.stderr)
+    skipped = [] if args.recursive else normalizer.subfolders(path)
+    if skipped:
+        print(f"{len(skipped)} subfolder(s) of {path} were not looked in: {', '.join(d.name for d in skipped)}. "
+              "Add --recursive to process the files in them.", file=sys.stderr)
     now: dict = {}
     for p in paid:  # per currency: euros and dollars are never added together
         now[p["currency"]] = now.get(p["currency"], 0) + p["amount"]

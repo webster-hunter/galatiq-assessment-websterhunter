@@ -198,7 +198,7 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
         return graph.get_state(_thread(entry["thread_id"])).values
 
     @app.get("/api/queue")
-    def queue(q: str = "", outcome: str = "", limit: int = Query(LIST_LIMIT, ge=1, le=1000)):
+    def queue(q: str = "", outcome: str = "", limit: int = Query(LIST_LIMIT, ge=1, le=10_000)):
         """The three lists, optionally narrowed.
 
         Args:
@@ -206,7 +206,8 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
                 total, reasons, note or reviewer. Empty: no narrowing.
             outcome: One of OUTCOMES, to keep only rows of that kind. Empty: all kinds.
             limit: The most rows to send for each of the two lists of finished invoices, newest
-                first. Every waiting invoice is always sent: those are the ones needing action.
+                first. `more` in the answer says whether a list was cut short, so the screen can
+                offer the rest. Every waiting invoice is always sent: those are the ones needing action.
         """
         if outcome and outcome not in OUTCOMES:
             raise HTTPException(400, f"outcome must be one of: {', '.join(OUTCOMES)}")
@@ -216,14 +217,17 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
             held, held_in_all = ledger.find_waiting(q) if outcome in ("", "waiting") else ([], ledger.count_waiting())
             waiting = [_summary(e, saved(graph, e), rates) | {"stuck": bool(e["stuck"]) and {"action": e["action"], "reviewer": e["reviewer"]}}
                        for e in held]
-            decided, decided_in_all = ledger.find_decided(q, outcome, limit)
-            automatic, automatic_in_all = ledger.find_runs(q, outcome, limit)
-            return _plain({"waiting": waiting, "decided": [_decided(e) for e in decided],
-                           "automatic": [_run_summary(r) for r in automatic],
+            # One row more than asked for: if it comes back, there are more matches than are shown.
+            decided, decided_in_all = ledger.find_decided(q, outcome, limit + 1)
+            automatic, automatic_in_all = ledger.find_runs(q, outcome, limit + 1)
+            payments, paid = ledger.payment_summary()
+            return _plain({"waiting": waiting, "decided": [_decided(e) for e in decided[:limit]],
+                           "automatic": [_run_summary(r) for r in automatic[:limit]],
+                           "more": {"decided": len(decided) > limit, "automatic": len(automatic) > limit},
                            # How many there are in all, so the screen can say "2 of 14" when a list
                            # is narrowed or cut short.
                            "of": {"waiting": held_in_all, "decided": decided_in_all, "automatic": automatic_in_all},
-                           "paid": ledger.paid_totals(), "payments": len(ledger.payments())})
+                           "paid": paid, "payments": payments})
 
     @app.get("/api/runs/{run}")
     def finished(run: str):

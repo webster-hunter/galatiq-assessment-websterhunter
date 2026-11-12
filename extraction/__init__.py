@@ -325,7 +325,8 @@ def read(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMPTS,
          fallback_types=FALLBACK_SUFFIXES) -> tuple[Invoice, str]:
     """Read one invoice file by the right means for its format, and say which was used.
 
-    - A TXT or PDF is transcribed by the model ("llm").
+    - A TXT or PDF is transcribed by the model ("llm"). Like anything the model reads, it carries
+      POSSIBLY_SEVERAL_INVOICES if the file names other invoice numbers too.
     - A JSON, CSV or XML file is parsed ("parser"): exact, free, the same answer every time.
     - A file no parser can read is given to the model as text ("llm_fallback"): a type listed in
       fallback_types (.dat, .edi, .tsv), or a JSON, CSV or XML file the parser finds nothing in
@@ -359,17 +360,23 @@ def read(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMPTS,
     """
     path = Path(path)
     suffix = path.suffix.lower()
+    def one_of_several(invoice: Invoice) -> Invoice:
+        # The model returns one invoice whatever the file holds. If the file names other invoice
+        # numbers of the same form, say so: the flag holds the invoice, so a second invoice in
+        # the same PDF is seen by a person and not lost behind an automatic payment of the first.
+        others = _other_invoice_numbers(invoice.invoice_number, read_text(path))
+        if others:
+            invoice.flags.append({"code": "POSSIBLY_SEVERAL_INVOICES", "read": invoice.invoice_number, "also_in_file": others[:10]})
+        return invoice
+
     if suffix in TEXT_SUFFIXES:
-        return extract(path, provider, max_attempts), "llm"
+        return one_of_several(extract(path, provider, max_attempts)), "llm"
     size = path.stat().st_size
     too_large = f"At {size:,} bytes it is too large to give to the model" if size > MAX_TEXT_BYTES else None
 
     def by_model(invoice: Invoice, **evidence) -> tuple[Invoice, str]:
         invoice.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", **evidence})
-        others = _other_invoice_numbers(invoice.invoice_number, read_text(path))
-        if others:
-            invoice.flags.append({"code": "POSSIBLY_SEVERAL_INVOICES", "read": invoice.invoice_number, "also_in_file": others[:10]})
-        return invoice, "llm_fallback"
+        return one_of_several(invoice), "llm_fallback"
 
     if suffix not in LOADERS:   # a type with no parser: the model, if it is a listed type and is text
         if suffix not in fallback_types:

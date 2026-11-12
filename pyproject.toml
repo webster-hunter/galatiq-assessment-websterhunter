@@ -2,7 +2,7 @@
 name = "acme-invoice-normalizer"
 version = "0.1.0"
 description = "Deterministic invoice normalizer: invoice files in, standard invoices with graded flags out."
-requires-python = ">=3.10"  # X | None type unions in the dataclasses
+requires-python = ">=3.11"  # the tests are run on 3.11 and 3.13; 3.10 has not been tried
 dependencies = []  # standard library only
 
 [project.optional-dependencies]

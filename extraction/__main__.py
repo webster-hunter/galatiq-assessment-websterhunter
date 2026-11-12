@@ -1,6 +1,8 @@
 """CLI: python -m extraction <files-or-folders> [--inventory inventory.db] [--model M] [--offline]
 
-Like python -m normalizer, but TXT and PDF files are transcribed by the model. Every model reply is
+Like python -m normalizer, but files are read as the pipeline reads them (extraction.read): TXT
+and PDF files are transcribed by the model, and so is a file no parser can read (a listed type
+such as .dat, or a JSON, CSV or XML file in an unknown layout). Every model reply is
 recorded under --replays. XAI_API_KEY and LLM_MODEL come from the environment or a .env
 file (see .env.example). With no API key (or --offline) only recordings are used, so a reviewer
 can run it without a key. Prints a JSON list on stdout; exits 1 if any entry is an error.
@@ -48,7 +50,7 @@ def process(argv: list[str] | None = None) -> list[dict]:
     An unreadable inventory DB is returned as a single error entry, in the same shape.
     """
     ap = argparse.ArgumentParser(prog="python -m extraction",
-                                 description="Normalize invoices, transcribing TXT and PDF with an LLM.")
+                                 description="Normalize invoices. TXT and PDF, and files no parser can read, are transcribed by an LLM.")
     ap.add_argument("paths", nargs="+", help="invoice files and/or directories")
     ap.add_argument("--inventory", help="SQLite inventory DB; enables unknown-product and stock checks")
     model_options(ap)

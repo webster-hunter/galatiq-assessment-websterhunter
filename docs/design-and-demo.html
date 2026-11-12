@@ -1,0 +1,350 @@
+<!doctype html>
+<!--
+  Source of docs/design-and-demo.pdf. Edit this file, then rebuild the PDF:
+
+      node docs/build-pdf.js
+
+  That needs Node with Playwright and its Chromium (npm install playwright; npx playwright install chromium).
+  Without them: open this file in any browser and print it to PDF (A4, background graphics on).
+
+  The figures are the system's own. If one changes (python main.py --invoice_path=data/invoices --offline --summary),
+  change it here. The two screenshots are docs/review-screen.png and docs/review-screen-resolved.png.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invoice processing for Acme Corp: design and demo notes</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body { font: 10.2pt/1.5 "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1c2330; margin: 0; }
+  h1 { font-size: 23pt; line-height: 1.15; margin: 0 0 6pt; }
+  h2 { font-size: 15pt; margin: 0 0 8pt; padding-bottom: 4pt; border-bottom: 1.5pt solid #2456c9; break-before: page; }
+  h2.first { break-before: auto; }
+  h3 { font-size: 11.5pt; margin: 14pt 0 4pt; break-after: avoid; }
+  p { margin: 0 0 7pt; }
+  ul { margin: 0 0 7pt; padding-left: 15pt; }
+  li { margin-bottom: 3pt; }
+  .lede { font-size: 12pt; color: #3a4558; margin-bottom: 12pt; }
+  .meta { color: #5d6778; font-size: 9pt; margin-bottom: 16pt; }
+  .principle { border-left: 3pt solid #2456c9; padding: 6pt 0 6pt 12pt; margin: 10pt 0 12pt; font-size: 12.5pt; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 4pt 0 10pt; font-size: 9.2pt; break-inside: auto; }
+  tr { break-inside: avoid; }
+  th, td { text-align: left; vertical-align: top; padding: 4pt 6pt; border-bottom: 0.6pt solid #d5dae3; }
+  th { background: #eef1f6; font-weight: 600; }
+  td.n, th.n { text-align: right; white-space: nowrap; }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 8.6pt; }
+  pre { background: #f3f5f8; border-radius: 3pt; padding: 6pt 8pt; margin: 4pt 0 8pt; white-space: pre-wrap; break-inside: avoid; }
+  code { background: #f3f5f8; padding: 0 2pt; border-radius: 2pt; }
+  pre code { background: none; padding: 0; }
+  .say { background: #e9f4ee; border-radius: 3pt; padding: 6pt 9pt; margin: 6pt 0; break-inside: avoid; }
+  .dont { background: #fdf1e3; border-radius: 3pt; padding: 6pt 9pt; margin: 6pt 0 10pt; break-inside: avoid; }
+  .say b, .dont b { display: block; font-size: 8.4pt; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 1pt; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8pt; margin: 10pt 0 14pt; }
+  .tile { border: 0.8pt solid #d5dae3; border-radius: 4pt; padding: 8pt 10pt; }
+  .tile b { display: block; font-size: 19pt; line-height: 1.1; }
+  .tile span { font-size: 8.6pt; color: #5d6778; }
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 4pt; margin: 8pt 0 12pt; font-size: 8.8pt; }
+  .flow div { border: 0.8pt solid #9aa7bd; border-radius: 3pt; padding: 4pt 7pt; background: #f7f9fc; }
+  .flow div.m { border-color: #2456c9; background: #eaf0fd; }
+  .flow div.p { border-color: #9a5b00; background: #fff4dd; }
+  .flow i { color: #7b8698; font-style: normal; }
+  img { display: block; max-width: 100%; max-height: 118mm; margin-left: auto; margin-right: auto; border: 0.8pt solid #d5dae3; border-radius: 3pt; margin: 4pt 0 4pt; }
+  .cap { font-size: 8.6pt; color: #5d6778; margin-bottom: 10pt; }
+  .toc { columns: 2; font-size: 9.6pt; margin: 0 0 4pt; padding-left: 15pt; }
+  .keep { break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>Invoice processing for Acme Corp</h1>
+<p class="lede">Design decisions, a demo walkthrough, how the outcomes changed as each stage was built, and what was left out.</p>
+<p class="meta">Companion to the repository's README. Every figure here is reproduced offline from the recorded model replies, with no API key, and each command is written to run unchanged in PowerShell, Command Prompt or a Unix shell. To rebuild this PDF after a change, see the comment at the top of <code>docs/design-and-demo.html</code>.</p>
+
+<div class="tiles">
+  <div class="tile"><b>6</b><span>paid without a person, $26,325.00</span></div>
+  <div class="tile"><b>6</b><span>held for a named person</span></div>
+  <div class="tile"><b>5</b><span>rejected, each with reasons</span></div>
+  <div class="tile"><b>3</b><span>skipped as second copies</span></div>
+</div>
+<p>That is what the system does with the brief's 20 sample files. Run the folder again and it pays nothing: <b>$0.00</b>.</p>
+
+<ol class="toc">
+  <li>Design decisions</li>
+  <li>Demo walkthrough</li>
+  <li>How the outcomes changed over time</li>
+  <li>What was left out, and why</li>
+  <li>What not to claim</li>
+  <li>Facts to have to hand</li>
+</ol>
+
+<h2 class="first">1. Design decisions</h2>
+
+<p>One principle decides where everything goes.</p>
+<div class="principle">Code decides what is true. The model handles what is unclear. A person owns what is risky.</div>
+
+<div class="flow">
+  <div class="m">Ingest</div><i>&rarr;</i><div>Validate</div><i>&rarr;</i><div>Register</div><i>&rarr;</i><div>Approve (policy)</div><i>&rarr;</i>
+  <div class="m">Reviewer agent</div><i>&harr;</i><div class="m">Critic</div><i>&rarr;</i><div>Pay</div><i>/</i><div class="p">Hold &rarr; person</div><i>/</i><div>Reject</div>
+</div>
+<p class="cap">The stages are nodes in a LangGraph graph. Blue: a model takes part. Amber: a person decides. Everything else is code.</p>
+
+<h3>The decisions, and why</h3>
+<table>
+  <tr><th style="width:27%">Decision</th><th>Why</th></tr>
+  <tr><td>The model <b>transcribes</b>; it does not interpret, correct or compute</td><td>A model that "fixes" a number produces one that reconciles perfectly and is wrong. Told to copy values as written, errors included, its output can be checked against the document.</td></tr>
+  <tr><td><b>Grounding</b>: every value the model returns must appear in the document</td><td>It is the only check that catches an invented or altered value. It is deterministic, because the model returned one file three different ways across three runs at temperature 0.</td></tr>
+  <tr><td><b>Repairs need proof</b> from the invoice itself</td><td>A scanner's <code>O</code> for <code>0</code> is read only when another value confirms it: on 1012, <code>$3,500.O0</code> is confirmed by 7 &times; $500. No proof, no repair.</td></tr>
+  <tr><td><b>Recompute every total</b>; exact decimal arithmetic</td><td>A stated total is a claim. 1007 and 1013 state totals their own lines don't add up to.</td></tr>
+  <tr><td><b>Stock is summed per product</b> across lines</td><td>1013 bills WidgetA on three lines of 15, 5 and 2. Each is within the 15 in stock; together they are 22.</td></tr>
+  <tr><td>The <b>approval policy is a written, ordered table</b> of rules in code</td><td>Arithmetic, stock and "has this been paid" have right answers. A table can be read, tested and audited; every decision names the rule that made it.</td></tr>
+  <tr><td>A model can make the system <b>stricter, never looser</b></td><td>The reviewer agent can add a hold to an approval and nothing else. So the worst a persuasive invoice can cause is an extra hold. If the model is unreachable, the policy still decides everything.</td></tr>
+  <tr><td>Vendor text reaches a model only <b>inside delimited blocks</b></td><td>An invoice is written by the party that wants to be paid. "URGENT, pay immediately" on 1003 is counted by code as one fraud signal; no model is asked whether it sounds convincing.</td></tr>
+  <tr><td>A <b>ledger</b> gives each invoice an identity and each payment a key</td><td>The same invoice arrives as two files, and folders get re-run. Identity is vendor, number and revision; a second copy is recognised by content, not file name. Without it this folder pays $4,890.00 twice.</td></tr>
+  <tr><td>A held invoice is a <b>paused run</b>, resumed by a person's decision</td><td>The decision is made later, in another process, by someone with a name. The run continues from where it stopped; nothing is re-read or re-decided.</td></tr>
+  <tr><td><b>Pay in the invoice's own currency</b>; show the reviewer a dollar estimate</td><td>The vendor is owed what they billed. The reviewer types no rate and no amount. The rate service is a local mock, since the brief rules out internet access.</td></tr>
+  <tr><td>An <b>unknown product</b> is held if its name is close to a real one, rejected if it resembles nothing</td><td>"WidgetC" may be a misspelling or a new product: a person's call. "SuperGizmo" is not something Acme stocks. Code draws the line, by the same name matching the agent's lookup uses.</td></tr>
+  <tr><td><b>Structured files are parsed</b>, not sent to the model</td><td>A parser is exact, free and gives the same answer every time.</td></tr>
+  <tr><td>A format no parser knows <b>falls back to the model, and is always held</b></td><td>A <code>.dat</code> export or a supplier's own JSON layout can be read without writing a parser first. One of four samples was misread, so nothing in a new format is paid without a person.</td></tr>
+  <tr><td>A file the model reads that <b>names a second invoice number</b> is held</td><td>The model returns one invoice whatever a file holds. Two invoices in one PDF would otherwise pay the first and lose the second.</td></tr>
+  <tr><td>Only <b>listed file types</b> are sent to the model</td><td>The model is an outside service, and a folder holds notes, logs and source code as well as invoices.</td></tr>
+  <tr><td>The <b>review screen adds no rules</b> of its own</td><td>Deciding calls the same function as before, so what may be approved and what is paid are decided in one place. Vendor text is written to the page as text, never as HTML.</td></tr>
+  <tr><td>Model replies are <b>recorded and replayed</b></td><td>The whole system runs offline with no key, tests are repeatable, and a re-recording that behaves differently fails a test.</td></tr>
+</table>
+
+<h3>Where the model is used, and what stops it going wrong</h3>
+<table>
+  <tr><th style="width:17%">Use</th><th style="width:36%">What it does</th><th>What fences it</th></tr>
+  <tr><td>Extraction</td><td>Transcribes a TXT, PDF or unfamiliar file into a fixed JSON schema</td><td>Grounding. A value not in the document is sent back with the specific complaint, three attempts at most. A retry that drops data is never used.</td></tr>
+  <tr><td>Reviewer agent</td><td>Chooses lookups (stock, similar products, a vendor's history), recommends, writes the reason a person reads</td><td>Its authority is fixed in code: it can add a hold. It cannot approve, reject or pay. A hold it adds can only be released by a person.</td></tr>
+  <tr><td>Critic</td><td>Looks for claims in that reason the evidence doesn't support</td><td>Checks in code run first and stand on their own: every figure must be in the invoice, the flags or a lookup result. Two rounds at most.</td></tr>
+</table>
+
+<h2>2. Demo walkthrough</h2>
+<p>Each step has the command, what to point at, how to say it, and what not to claim. Use a ledger of its own for the demo (<code>demo.db</code>; delete it to start over).</p>
+
+<h3>The whole folder, and that it is paid once</h3>
+<pre><code>python main.py --invoice_path=data/invoices --offline --ledger demo.db --checkpoints demo-cp.db --summary
+python main.py --invoice_path=data/invoices --offline --ledger demo.db --checkpoints demo-cp.db --summary</code></pre>
+<p>The same command twice. <code>--summary</code> prints the summary lines and leaves out the JSON list of results.</p>
+<table class="keep">
+  <tr><th></th><th>First run</th><th>Second run</th></tr>
+  <tr><td>Paid</td><td>6 invoices, $26,325.00 (1001, 1004, 1006, 1010, 1011, 1015)</td><td>0</td></tr>
+  <tr><td>Held</td><td>6 (1002, 1004 revised, 1005, 1012, 1014, 1016)</td><td></td></tr>
+  <tr><td>Rejected</td><td>5 (1003, 1007, 1008, 1009, 1013)</td><td></td></tr>
+  <tr><td>Skipped as a duplicate</td><td>3 (second copies of 1011, 1012, 1013)</td><td>3</td></tr>
+  <tr><td>Already processed</td><td></td><td>17</td></tr>
+</table>
+<ul>
+  <li><b>Duplicates.</b> 1011, 1012 and 1013 each arrive in two formats. The second copy is recognised by content and skipped. Without that, 1011 would be paid twice.</li>
+  <li><b>1004's revision is held.</b> The original ($1,890.00) is paid first; the revision ($5,940.00) then arrives and is held for the $4,050.00 difference.</li>
+  <li><b>1003 is rejected on four fraud signals,</b> each from a check in code: an item with no stock, a due date of "yesterday", "URGENT... penalties", a request for a wire.</li>
+  <li><b>1012 is held although nothing on it is wrong any more.</b> It is $25 under the $10,000 limit and carries repairs and other warnings.</li>
+</ul>
+<div class="say"><b>How to say it</b>Nothing is paid twice, whether the same invoice arrives as a second file or the whole folder is run again.</div>
+<div class="dont"><b>What not to claim</b>That payments are real or retried. The mock payment always succeeds. What is tested is that a payment which never confirmed is not blindly sent again.</div>
+
+<h3>Three invoices that tell the story</h3>
+<p><b>1002: the model made a mistake, was told, and fixed it.</b> <code>python main.py --invoice_path=data/invoices/invoice_1002.txt --offline</code></p>
+<ul>
+  <li>Attempt 1 put the invoice total ($15,000.00) on the line item and was rejected by the grounding check. Attempt 2 is fully grounded.</li>
+  <li>The judge is code. It is still held, for the right reasons: 20 GadgetX against 5 in stock, and over $10,000.</li>
+</ul>
+<p><b>1012: scanner damage, read only where the invoice proves it.</b> <code>...invoice_1012.txt --offline</code></p>
+<ul>
+  <li>The model copied <code>$3,500.O0</code> and <code>26-Jan-2O26</code> exactly as written. Code read both, each with its proof on the flag.</li>
+  <li>"Widget A" and "Gadget X" were matched to the inventory's names, so stock was checked.</li>
+</ul>
+<p><b>1013: every line passes, the invoice does not.</b> <code>...invoice_1013.pdf --offline</code></p>
+<ul>
+  <li>Summed per product: 22 WidgetA against 15, 18 WidgetB against 10, 9 GadgetX against 5.</li>
+  <li>The stated total is $22,562.80; lines plus tax come to $22,512.80. Self-correction left it alone: the model copied the document faithfully, and the document is wrong.</li>
+</ul>
+
+<h3>Self-correction, measured</h3>
+<pre><code>python -m extraction.report data/invoices</code></pre>
+<table class="keep">
+  <tr><th></th><th class="n">Without</th><th class="n">With</th></tr>
+  <tr><td>Flags that would hold an invoice, across the 20 files</td><td class="n">41</td><td class="n">32</td></tr>
+  <tr><td>Model calls, for the 10 TXT and PDF files</td><td class="n">10</td><td class="n">11</td></tr>
+  <tr><td>Files improved / worse / unchanged</td><td class="n"></td><td class="n">3 / 0 / 17</td></tr>
+</table>
+<div class="say"><b>How to say it</b>Self-correction removed nine problems that were the model's or the scanner's, for one extra model call, and changed nothing on the invoices that are wrong in themselves.</div>
+<div class="dont"><b>What not to claim</b>A success rate. Ten text files with one real retry shows it worked here and did no harm.</div>
+
+<h3>The review screen: a person decides</h3>
+<pre><code>python -m web --ledger demo.db --checkpoints demo-cp.db      # then open http://127.0.0.1:8000</code></pre>
+<img src="review-screen.png" alt="The review screen">
+<p class="cap">The queue on the left; one held invoice with its flags explained, the agent's advice and the decision form on the right.</p>
+<ul>
+  <li><b><code>main.py</code> has exited.</b> Each held invoice is a run saved mid-flight; the screen is a separate process that picks one up and lets it finish.</li>
+  <li><b>Approve Precision Parts Ltd. (1004 revised):</b> it pays $4,050.00, the difference, because $1,890.00 already went out.</li>
+  <li><b>Approve TechParts International (1014):</b> listed as 4,125.00 EUR (about $4,480.16); it pays 4,125.00 EUR. The reviewer types nothing but a name.</li>
+  <li><b>Reject one with no note</b> to show the refusal: a rejection's note is what goes back to the vendor.</li>
+  <li><b>Search and filter.</b> Type <code>15,000</code> or <code>stock exceeded</code>; set the outcome to Rejected. The lists show "5 of 14".</li>
+</ul>
+<div class="say"><b>How to say it</b>The system never asks a person to do what it can do, and never does what a person should decide. A model can make it stricter; only a named person can release a hold.</div>
+
+<h3>What the application resolved by itself</h3>
+<img src="review-screen-resolved.png" alt="An invoice resolved without a person">
+<p class="cap">The "Resolved without a person" list, with 1010 open: paid by the policy, with the reviewer agent's reason on record.</p>
+<ul>
+  <li>Every invoice paid, rejected or skipped without a person is listed with who resolved it (the policy, the policy with the agent's reason, or the ledger) and why.</li>
+  <li>Opening one shows the same evidence as a held invoice, read-only, and how it ended.</li>
+</ul>
+
+<h3>The reviewer agent: looks things up, can only add caution</h3>
+<pre><code>python main.py --invoice_path=data/invoices --offline --ledger demo2.db --checkpoints demo2-cp.db --summary --trace reviewer</code></pre>
+<p>One line per invoice: who wrote the reason (the agent or the policy), its recommendation, and the lookups it chose.</p>
+<ul>
+  <li><b>1016.</b> The agent chose two lookups itself: products like WidgetC (it found WidgetA and WidgetB) and the vendor's history (one earlier invoice, paid). Its question: is WidgetC something we mean to order? Compare 1008, whose product names resemble nothing in inventory: code rejects it and no model is called.</li>
+  <li><b>1010.</b> The policy approves it with two warnings. The agent reads them and agrees: the higher price on the second WidgetA line is the vendor's stated rush order, and the Bill To line is Acme's own division.</li>
+</ul>
+<div class="say"><b>How to say it</b>The model can add a hold and advise a person. It cannot approve, reject or pay, and that is enforced in code, so nothing a vendor writes can talk it into paying.</div>
+<p>Two true stories, both found by reading real output and not by tests:</p>
+<ul>
+  <li>Its first replies suspected four invoices of being duplicates of themselves. The cause was a lookup tool that listed the invoice under review in the vendor's history.</li>
+  <li>It then held 1010, asking why WidgetA had two prices (the line said "rush order") and who "Acme Corp Manufacturing Division" was. Its instructions had never said it works for Acme.</li>
+</ul>
+<p>Both are the same lesson: when an agent gets something wrong, look first at what it was given.</p>
+
+<h3>The critic: checking the reasons a reviewer reads</h3>
+<pre><code>python main.py --invoice_path=data/invoices --offline --ledger demo3.db --checkpoints demo3-cp.db --summary --trace critic</code></pre>
+<ul>
+  <li><b>1010 was sent back by a check in code:</b> two flag codes had been written into the text. The revision describes them in words. No model was needed to catch it.</li>
+  <li><b>The loop ends on a counter,</b> two passes at most. It is the graph's only backward edge.</li>
+  <li><b>No outcome changed, and none can.</b> The critic checks the reason. It cannot undo a hold.</li>
+</ul>
+<div class="dont"><b>What not to claim</b>That the model critic is reliable. In its first two recordings it sent four assessments back on objections that didn't hold up. The checks in code are the dependable part.</div>
+
+<h3>A format nobody has seen before</h3>
+<pre><code>python main.py --invoice_path=data/unfamiliar --offline --ledger demo-new.db --checkpoints demo-new-cp.db --summary --trace ingest</code></pre>
+<table class="keep">
+  <tr><th style="width:22%">File</th><th>What it is</th><th style="width:30%">Outcome</th></tr>
+  <tr><td><code>invoice_3004.dat</code></td><td>Pipe-separated lines with no labels: <code>HDR|INV-3004|Coastal Bearings Co.|...</code></td><td>Read correctly in one attempt; held</td></tr>
+  <tr><td><code>invoice_3001.json</code></td><td>JSON with a supplier's own field names</td><td>Read correctly; held</td></tr>
+  <tr><td><code>invoice_3003.xml</code></td><td>XML with a different root element</td><td>Read correctly; held</td></tr>
+  <tr><td><code>invoice_3002.csv</code></td><td>Other column names, the grand total repeated on every row</td><td><b>Misread, and rejected</b></td></tr>
+</table>
+<ul>
+  <li><b>The CSV is the one to dwell on.</b> The model took the repeated total for each line's amount. Every value it returned is in the file, so grounding passed. The arithmetic didn't reconcile, so the policy rejected it.</li>
+  <li><b>Nothing in a new format is paid without a person.</b> Three are held; one is rejected.</li>
+</ul>
+<div class="say"><b>How to say it</b>The model lets the system read what nobody wrote a parser for. The checks in code decide whether to believe it.</div>
+<div class="dont"><b>What not to claim</b>That the fallback is reliable: one of four was misread. What is reliable is that a misreading which breaks the arithmetic is caught, and one that happens to reconcile is held for a person, not paid.</div>
+
+<h3>Watching one invoice move through the pipeline</h3>
+<pre><code>python main.py --invoice_path=data/invoices/invoice_1003.txt --offline --ledger demo4.db --checkpoints demo4-cp.db --summary --trace</code></pre>
+<p>One line per stage as it finishes: how the file was read, the flags found, the decision with its rule and reasons, and the branch taken.</p>
+
+<h2>3. How the outcomes changed over time</h2>
+<p>The same 20 sample files, run through the system at each point in its construction. Each row shows what a stage is for by what it changed.</p>
+<table>
+  <tr><th style="width:21%">Stage added</th><th style="width:9%">Commit</th><th style="width:34%">What happens to the 20 files</th><th>What changed, and why</th></tr>
+  <tr><td>Checks and repairs only</td><td><code>d6b6d14</code></td><td>No decisions yet. Worst flag per file: 4 block, 6 review, 3 warn, 5 notes only, 2 none</td><td>The system can say what is wrong with an invoice, not what to do about it</td></tr>
+  <tr><td>Policy</td><td><code>994d0ec</code></td><td><b>8 approved, 7 held, 5 rejected.</b> Approved invoices total $35,265.00</td><td>Flags become decisions</td></tr>
+  <tr><td>Ledger and payment</td><td><code>40d715d</code></td><td><b>6 paid ($26,325.00), 7 held, 4 rejected, 3 skipped</b></td><td>Invoices are compared with each other. $8,940.00 the policy alone approved is not paid; $4,890.00 of it would have been paid twice</td></tr>
+  <tr><td>Review queue</td><td><code>460d953</code></td><td>Same outcomes. Held invoices now wait for a person</td><td>A hold stops being a dead end</td></tr>
+  <tr><td>Rate service</td><td><code>5f324b7</code></td><td>Same outcomes. 1014 is listed with a dollar estimate and paid in euros when released</td><td>A foreign-currency invoice can be approved like any other</td></tr>
+  <tr><td>Reviewer agent, first recording</td><td><code>493ac7d</code></td><td><b>5 paid ($19,140.00), 8 held</b></td><td>The model added a hold to 1010. It was wrong to</td></tr>
+  <tr><td>Agent told who the buyer is</td><td><code>a5d6c6a</code></td><td><b>6 paid ($26,325.00), 7 held</b></td><td>1010 is paid again. The model had been missing context</td></tr>
+  <tr><td>Critic, first recording</td><td><code>e3d4d80</code></td><td>Same outcomes. 4 of the agent's 8 assessments sent back once</td><td>The reasons a reviewer reads are checked. No decision changed</td></tr>
+  <tr><td>Critic, after its review</td><td><code>b6009c7</code></td><td>Same outcomes. 1 of 8 sent back, by a check in code</td><td>The critic was told what it had been missing; a hold the agent adds can no longer be undone</td></tr>
+  <tr><td>Unknown products split</td><td><code>5ed41ad</code></td><td><b>6 paid, 6 held, 5 rejected, 3 skipped</b></td><td>A rule change: 1008 (resembles nothing in stock) moves from held to rejected; 1016 (close to a real product) stays held</td></tr>
+  <tr><td>Review screen</td><td><code>7e5844a</code></td><td>Same outcomes. Decisions move from the command line to the browser</td><td>The person deciding sees the flags explained, the agent's advice and what approving pays</td></tr>
+  <tr><td>Resolved list, search, filters</td><td><code>43acd68</code>, <code>2149c53</code>, <code>e151b15</code></td><td>Same outcomes. Every finished run is logged and can be opened</td><td>What the application did by itself becomes visible and searchable</td></tr>
+  <tr><td>Model fallback</td><td><code>c84f37c</code></td><td>The 20 are unchanged. Four new files in unknown formats: 3 held, 1 rejected</td><td>A format with no parser can be read, and is never paid without a person</td></tr>
+</table>
+
+<h3>Policy: two files move against their worst flag</h3>
+<table class="keep">
+  <tr><th style="width:14%">Invoice</th><th style="width:14%">Worst flag</th><th style="width:16%">Policy outcome</th><th>Why they differ</th></tr>
+  <tr><td>1003</td><td>Review</td><td><b>Rejected</b></td><td>No single flag blocks it. Four fraud signals together do</td></tr>
+  <tr><td>1012</td><td>Warning</td><td><b>Held</b></td><td>Nothing on it is wrong once repaired. It is $25 under the limit and carries other warnings; that combination is held</td></tr>
+</table>
+
+<h3>Ledger: the same invoice, twice</h3>
+<p>Approved by the policy alone: $35,265.00. Paid with the ledger: $26,325.00. The difference, $8,940.00, is 1011's second copy ($3,000.00) and 1004's revision ($5,940.00). Of that, $4,890.00 would have been money paid twice ($3,000.00 + $1,890.00); the remaining $4,050.00 is the revision's real difference, which a person releases.</p>
+
+<h3>Reviewer agent: one outcome changed, then changed back</h3>
+<p>This is the only stage where a model can move an outcome, and only from approved to held. Its hold on 1010 was a mistake, and the cause was in what it had been given: nothing told it which company it was reviewing for. On every other invoice it reviews, in every recording, it has recommended what the policy decided. It has never recommended paying something the policy held.</p>
+
+<h3>Critic: the reasons are checked, the decisions are not touched</h3>
+<table class="keep">
+  <tr><th></th><th class="n">First recording</th><th class="n">After its review</th></tr>
+  <tr><td>Assessments the agent wrote</td><td class="n">8</td><td class="n">8</td></tr>
+  <tr><td>Sent back once</td><td class="n">4</td><td class="n">1</td></tr>
+  <tr><td>...by a check in code</td><td class="n">2</td><td class="n">1</td></tr>
+  <tr><td>...on the model critic's objection</td><td class="n">2</td><td class="n">0</td></tr>
+  <tr><td>Outcomes changed</td><td class="n">0</td><td class="n">0</td></tr>
+</table>
+<p>The model critic's early objections did not hold up. Each traced to something it had not been told: what a flag means, who the buyer is, that a vendor's own claim is not confirmation. Since the unknown-products change the agent reviews seven invoices; one is sent back, by code, and all seven end accepted.</p>
+
+<h3>What code review changed</h3>
+<p>Each stage was reviewed after it was built, and the findings fixed with a test for each. The ones that changed behaviour, not just code:</p>
+<ul>
+  <li><b>Two reviewers deciding one invoice at the same moment</b> could both go through. The first decision recorded now stands and the second is refused.</li>
+  <li><b>A payment that was sent but did not confirm</b> looked like a normal approval on the screen. It is now a warning to check with the bank, never "paid".</li>
+  <li><b>A file in a format nothing reads</b> was silently skipped when it sat in a folder. It is now reported.</li>
+  <li><b>Any text file in the folder</b> would have been sent to the model by the fallback. Only listed types are.</li>
+  <li><b>A file holding several invoices</b> would have yielded one and dropped the rest, and for a PDF could have paid that one unseen. A batch is refused, or flagged and held.</li>
+  <li><b>Invoices in subfolders</b> were passed over without a word. The folders are now named, and <code>--recursive</code> includes them.</li>
+</ul>
+
+<h3>What stayed the same throughout</h3>
+<ul>
+  <li><b>No stage ever paid something an earlier stage had held or rejected.</b> Every change after the policy either held or rejected more, or let a named person release a hold.</li>
+  <li><b>1003, 1007, 1009 and 1013 were rejected from the day the policy was written.</b> No later stage, and no model, touched them.</li>
+  <li><b>1001, 1004, 1006, 1011 and 1015 were paid in every version</b> since payment existed. 1010 is the only one that moved.</li>
+</ul>
+
+<h2>4. What was left out, and why</h2>
+<table>
+  <tr><th style="width:32%">Not built</th><th>Why</th></tr>
+  <tr><td>OCR for scanned images</td><td>The sample PDFs have a text layer. A scan is refused with a message saying so.</td></tr>
+  <tr><td>Reading Word, Excel or image files</td><td>Each is reported as an error for a person. Nothing in the brief to build or test against.</td></tr>
+  <tr><td>Matching to purchase orders and goods receipts</td><td>No such data in the brief. It is the first thing to add with real systems: stock on hand is only a stand-in for "quantity we can confirm receiving".</td></tr>
+  <tr><td>A vendor list</td><td>Would catch a changed bank account, a billing currency, and a vendor name spelled two ways.</td></tr>
+  <tr><td>Real exchange rates</td><td>The brief rules out internet access. The rate service is a local mock with made-up rates; a real one is one class with the same method.</td></tr>
+  <tr><td>Retrying a failed payment</td><td>The mock payment always succeeds. An unconfirmed payment is held for a person, never resent blindly.</td></tr>
+  <tr><td>Processing invoices from the browser</td><td>The screen is for decisions. Invoices are still processed by <code>main.py</code>.</td></tr>
+  <tr><td>Logins, deployment, concurrency at scale</td><td>Out of scope for a local prototype. A reviewer is whoever types their name, and the screen is served to this machine only.</td></tr>
+  <tr><td>Splitting a file that holds several invoices</td><td>Such a file is held or refused, for a person to split. Reading each invoice out of it is a change to what the model is asked for, and would need new recordings throughout.</td></tr>
+  <tr><td>Full-text search index</td><td>Search runs in SQL with one <code>LIKE</code> per word, which scans the table. Fine for thousands of rows; SQLite's full-text index is the next step.</td></tr>
+</table>
+
+<h3>Assumptions the brief leaves open</h3>
+<p>Each is a decision made here, to be confirmed with Acme in the first week.</p>
+<ul>
+  <li><b>Acme is the buyer.</b> These are suppliers' invoices that Acme pays.</li>
+  <li><b>Stock is checked per invoice and doesn't run down</b> across invoices. The brief's own examples require this.</li>
+  <li><b>"Over $10K" includes exactly $10,000.</b> The cautious reading.</li>
+  <li><b>An invoice that names no currency is in US dollars,</b> and says so in a note.</li>
+  <li><b>Files are processed in name order,</b> so 1004 is paid before its revision is read.</li>
+</ul>
+
+<h2 class="first" style="margin-top:18pt">5. What not to claim</h2>
+<ul>
+  <li><b>The percentages don't generalise.</b> Twenty files, built to be awkward.</li>
+  <li><b>The agent has not improved a decision.</b> On these 20 files its one change was an error, since corrected. Its contribution is the written reason and the lookups behind it.</li>
+  <li><b>The model critic has not earned trust.</b> Across three recordings it found no real problem, and raised four that weren't until its instructions were corrected.</li>
+  <li><b>The fallback is not reliable by itself.</b> One of four unfamiliar files was misread. The checks around it are what make it safe to use.</li>
+  <li><b>Model output varies between runs,</b> even at temperature 0. The recordings pin one run.</li>
+  <li><b>Payments are not real,</b> and exchange rates are made up.</li>
+</ul>
+
+<h2 class="first" style="margin-top:18pt">6. Facts to have to hand</h2>
+<table>
+  <tr><th style="width:56%">Fact</th><th>Where it comes from</th></tr>
+  <tr><td>All 20 sample files run with no API key, in about a second</td><td><code>python main.py --invoice_path=data/invoices --offline</code></td></tr>
+  <tr><td>The test suite runs offline in about 20 seconds, on Python 3.11 and 3.13, Linux and Windows</td><td><code>pytest</code></td></tr>
+  <tr><td>Nine of ten text files were grounded on the first model attempt</td><td><code>tests/test_recordings.py</code></td></tr>
+  <tr><td>A document that says "ignore previous instructions" can only write text into a field</td><td><code>tests/test_extraction.py</code></td></tr>
+  <tr><td>Without the ledger, the policy approves $35,265.00 for this folder; $4,890.00 of it is a double payment</td><td><code>tests/test_approval.py</code>, <code>tests/test_pipeline.py</code></td></tr>
+  <tr><td>With no recordings and no key, every invoice is still decided, by the policy</td><td><code>tests/test_pipeline.py</code></td></tr>
+  <tr><td>The pipeline diagram in the README is checked against the real graph</td><td><code>tests/test_pipeline.py</code></td></tr>
+  <tr><td>The brief's own example path, <code>invoice1.txt</code>, does not exist</td><td>Running it lists the files that do</td></tr>
+</table>
+
+</body>
+</html>

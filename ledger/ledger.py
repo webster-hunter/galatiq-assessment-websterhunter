@@ -544,6 +544,17 @@ class Ledger:
         """Every payment on record, in the order made."""
         return [dict(r) for r in self._db.execute("SELECT * FROM payments ORDER BY created_at, payment_key")]
 
+    def payment_summary(self) -> tuple[int, dict[str, Decimal]]:
+        """How many payments are on record, and what has been paid per currency, without reading the rows.
+
+        The same figures as len(payments()) and paid_totals(), computed by the database. Amounts
+        are summed in hundredths as whole numbers, so the total is exact.
+        """
+        count = self._db.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+        rows = self._db.execute("SELECT currency, SUM(CAST(ROUND(amount * 100) AS INTEGER)) AS hundredths FROM payments "
+                                "WHERE status = 'PAID' GROUP BY currency ORDER BY MIN(rowid)")
+        return count, {r["currency"]: Decimal(r["hundredths"]) / 100 for r in rows}
+
     def paid_totals(self) -> dict[str, Decimal]:
         """What has been paid, per currency. Amounts in different currencies are never added together."""
         totals: dict[str, Decimal] = {}
