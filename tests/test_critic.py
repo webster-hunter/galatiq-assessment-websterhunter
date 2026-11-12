@@ -117,11 +117,32 @@ def test_the_model_critic_sees_the_evidence_and_the_draft_and_its_findings_count
     assert "Lookups made, with results" in user["content"] and "Your colleague's assessment" in user["content"]
 
 
-def test_a_complaint_about_words_that_are_not_there_is_dropped():
-    """The critic must quote the assessment. An objection to text the assessment doesn't contain is the critic inventing, and doesn't count."""
+def test_an_objection_that_cannot_be_matched_is_kept_on_record_not_passed_off_as_acceptance():
+    """The critic must quote the assessment. An objection to text that isn't there can't be acted on, so it doesn't send the assessment back; but it is recorded, and the model's verdict is shown as REVISE, not ACCEPT."""
     invoice, floor = checked("invoice_1016.json")
     found = critique(invoice, floor, assessment(GOOD_1016), Model([revise("the vendor is fraudulent")]))
-    assert (found["verdict"], found["model"], found["problems"]) == ("ACCEPT", "ACCEPT", [])
+    assert (found["verdict"], found["problems"]) == ("ACCEPT", [])
+    assert found["model"] == "REVISE (1 objection(s) not matched to the text)"
+    assert [p["quote"] for p in found["unmatched_objections"]] == ["the vendor is fraudulent"]
+
+
+def test_a_quote_that_differs_only_in_punctuation_or_case_still_counts():
+    """A dropped comma or a capital letter in the critic's quote doesn't lose the objection."""
+    invoice, floor = checked("invoice_1016.json")
+    quote = "widgetc is not a product in inventory so the invoice needs a person"      # no comma, lower case
+    found = critique(invoice, floor, assessment(GOOD_1016), Model([revise(quote)]))
+    assert (found["verdict"], found["model"]) == ("REVISE", "REVISE") and "unmatched_objections" not in found
+
+
+def test_a_number_the_agent_only_put_into_a_lookup_is_not_evidence():
+    """get_stock("9999") must not make "9999 complaints" grounded: a figure counts only if it is in what the agent was given or in what a lookup found, not in what the agent asked."""
+    invoice, floor = checked("invoice_1016.json")
+    lookup = {"tool": "get_stock", "arguments": {"item": "9999"}, "result": {"item": "9999", "found": False}}
+    a = assessment("Widgets Inc. has 9999 complaints on file.", tools=[lookup])
+    assert [(p["check"], p["quote"]) for p in code_checks(invoice, floor, a)] == [("UNGROUNDED_NUMBER", "9999")]
+    # What a lookup returns that the agent didn't supply still counts.
+    found = {"tool": "get_stock", "arguments": {"item": "GadgetX"}, "result": {"item": "GadgetX", "found": True, "in_stock": 5}}
+    assert code_checks(invoice, floor, assessment("WidgetC is unknown; GadgetX has 5 in stock.", tools=[found])) == []
 
 
 def test_code_checks_stand_whatever_the_model_says_or_when_it_is_missing():
@@ -186,23 +207,27 @@ def test_the_loop_stops_after_two_rounds_and_says_the_assessment_is_unverified()
     assert len(model.reviewer_saw) == 2 and len(model.critic_saw) == 2      # no third attempt
 
 
-def test_a_hold_the_reviewer_cannot_justify_is_withdrawn():
-    """1010 is approved by the policy with warnings. The reviewer holds it, asking why WidgetA has two prices; the critic points out the line says "rush order"; the reviewer withdraws, and the invoice is paid."""
+def test_the_critic_cannot_undo_a_hold_the_agent_added():
+    """The policy approves with warnings; the agent holds; the model critic objects; the agent withdraws. The invoice is held all the same: a second model's objection is not a check, and a person releases it."""
+    held = reply(HOLD, "Precision Parts Ltd. bills $1,890.00 and WidgetB at 500 looks high.", ["Why is WidgetB priced at 500?"], addressed=[])
+    fine = reply(APPROVE, "Precision Parts Ltd. bills $1,890.00 for WidgetA and WidgetB.", addressed=[])
+    model = Model([revise("Why is WidgetB priced at 500?", "500 is the usual price"), accept()], [held, fine])
     ledger = Ledger(":memory:", pay=lambda *args: None)
-    invoice = normalizer.load(INVOICES / "invoice_1004.json", INVENTORY)        # stands in for 1010 without needing the extraction model
-    invoice.line_items[1].note = "rush order"
-    hold = reply(HOLD, "Precision Parts Ltd. bills $1,890.00 with WidgetB at 500.", ["Why is WidgetB priced at 500?"], addressed=[])
-    ok = reply(APPROVE, "Precision Parts Ltd. bills $1,890.00; WidgetB at 500 carries the vendor's rush order note.", addressed=[])
-    model = Model([revise("Why is WidgetB priced at 500?", "the line's note says rush order, which is the reason"), accept()], [hold, ok])
-    floor = Decision(APPROVE, "NO_OBJECTION", (), warnings=("DUPLICATE_ITEM",))
-    from approval import assess
-    first_decision, first = assess(invoice, floor, model)
-    assert first_decision.outcome == HOLD and first_decision.stage == "REVIEWER_AGENT"       # the hold the agent added
-    found = critique(invoice, floor, first, model)
-    assert found["verdict"] == "REVISE"
-    second_decision, second = assess(invoice, floor, model, previous=first, problems=found["problems"])
-    assert second_decision == floor and second["recommendation"] == APPROVE and second["open_questions"] == []
-    assert critique(invoice, floor, second, model)["verdict"] == "ACCEPT"
+    graph = build_graph(model, INVENTORY, ledger)
+    import json as _json
+    path = INVOICES.parent / "invoices" / "invoice_1004.json"
+    # A warned approval: 1004 with one item on two lines.
+    warned = _json.loads(path.read_text())
+    warned["line_items"] = [{"item": "WidgetA", "quantity": 3, "unit_price": 250.0}, {"item": "WidgetA", "quantity": 4, "unit_price": 250.0}]
+    warned["subtotal"], warned["tax_amount"], warned["total"] = 1750.0, 140.0, 1890.0
+    import tempfile
+    f = Path(tempfile.mkdtemp()) / "warned.json"
+    f.write_text(_json.dumps(warned))
+    state = run(graph, f)
+    assert decide(state["invoice"].flags).outcome == APPROVE
+    assert [(s["recommendation"], s["outcome"]) for s in steps(state, "reviewer")] == [(HOLD, HOLD), (APPROVE, HOLD)]
+    assert state["result"]["status"] == "HELD" and ledger.payments() == []
+    assert "withdrew the hold after the critic's objections" in state["assessment"]["note"]
 
 
 def test_the_critic_cannot_take_an_outcome_below_the_floor():
@@ -211,7 +236,7 @@ def test_the_critic_cannot_take_an_outcome_below_the_floor():
                   [reply(HOLD, GOOD_1016), reply(APPROVE, GOOD_1016)])
     state = run(graph_with(model), INVOICES / "invoice_1016.json")
     assert state["decision"] == decide(state["invoice"].flags) and state["result"]["status"] == "HELD"
-    assert "below the policy floor of HOLD" in state["assessment"]["note"]
+    assert state["assessment"]["recommendation"] == HOLD and "below the policy floor of HOLD" in state["assessment"]["note"]
 
 
 def test_with_no_model_at_all_nothing_loops():
@@ -224,6 +249,6 @@ def test_with_no_model_at_all_nothing_loops():
 def test_the_critics_instructions_limit_what_it_looks_for():
     """Three kinds of problem only, each to be quoted; no style comments, no asking for more caution, nothing looser than the floor."""
     s = critic_module.SYSTEM
-    for phrase in ("do not support", "already answers", "quote the exact words", "Do not comment on style",
-                   "do not suggest a looser recommendation than the policy floor"):
+    for phrase in ("do not\n   support", "already states", "character for\ncharacter", "Do not comment on style",
+                   "do not suggest a looser recommendation than the policy floor", "A flag is not always a\nfinding of fault"):
         assert phrase in s, phrase

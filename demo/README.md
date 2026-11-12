@@ -173,17 +173,18 @@ problem was found. An invoice with two lines went round the loop.
 
 What to point at:
 
-- **1016 and 1014** were sent back by a check in code: a flag code had been written into the
-  text. The revision describes it in words. No model was needed to catch it.
+- **1010** was sent back by a check in code: two flag codes had been written into the text. The
+  revision describes them in words. No model was needed to catch it.
 - **The loop ends on a counter,** two passes at most. Show `after_critic` in `pipeline/graph.py`:
   it is five lines, and it is the graph's only backward edge.
-- **No outcome changed.** The critic checks the reason, not the decision.
+- **No outcome changed, and none can.** The critic checks the reason. It cannot undo a hold.
 
 How to say it: the agent writes for a person, so what it writes is checked before a person sees
 it. Figures must come from the invoice, the flags or a lookup; anything else goes back.
 
-What not to claim: that the model critic is reliable. On these files its two objections were
-debatable (the detail is in `approvals-over-time.md`). The checks in code are the dependable part.
+What not to claim: that the model critic is reliable. In its first two recordings it sent four
+assessments back on objections that didn't hold up, each because of something it hadn't been
+told (the detail is in `approvals-over-time.md`). The checks in code are the dependable part.
 
 ## Watching one invoice move through the pipeline
 

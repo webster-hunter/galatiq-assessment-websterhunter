@@ -160,7 +160,7 @@ def test_steps_are_reported_as_they_happen(graph):
     seen = []
     state = run(graph, INVOICES / "invoice_1002.txt", seen.append)
     assert seen == state["trail"]
-    assert nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", "critic", "reviewer", "critic", "hold"]  # one revision
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "reviewer", "critic", "hold"]
     assert seen[0] == {"node": "ingest", "method": "llm", "model_attempts": 2}  # 1002's recorded retry
     assert seen[2] == {"node": "register", "seen": "NEW"}
 
@@ -674,24 +674,19 @@ def folder(tmp_path):
 
 
 AGENT_TOOLS = {   # what Grok chose to look up for each invoice it reviewed
-    "invoice_1002.txt": ["get_vendor_history"],
-    "invoice_1004_revised.json": ["get_vendor_history"],
+    "invoice_1002.txt": [],
+    "invoice_1004_revised.json": [],
     "invoice_1005.json": ["get_vendor_history"],
-    "invoice_1008.txt": ["find_similar_products", "find_similar_products"],
+    "invoice_1008.txt": ["find_similar_products", "find_similar_products", "get_vendor_history"],
     "invoice_1010.txt": [],
     "invoice_1012.pdf": [],
     "invoice_1014.xml": [],
-    "invoice_1016.json": ["find_similar_products"],
+    "invoice_1016.json": ["find_similar_products", "get_vendor_history"],
 }
+ACCEPTED_FIRST_TIME = [("ACCEPT", [])]
 CRITIC_ROUNDS = {  # per invoice: (verdict, kinds of problem found) for each critic pass
-    "invoice_1002.txt": [("REVISE", ["MODEL_CRITIC"]), ("ACCEPT", [])],
-    "invoice_1004_revised.json": [("ACCEPT", [])],
-    "invoice_1005.json": [("ACCEPT", [])],
-    "invoice_1008.txt": [("ACCEPT", [])],
-    "invoice_1010.txt": [("REVISE", ["MODEL_CRITIC"]), ("ACCEPT", [])],
-    "invoice_1012.pdf": [("ACCEPT", [])],
-    "invoice_1014.xml": [("REVISE", ["FLAG_CODE_IN_TEXT"]), ("ACCEPT", [])],
-    "invoice_1016.json": [("REVISE", ["FLAG_CODE_IN_TEXT"]), ("ACCEPT", [])],
+    **{name: ACCEPTED_FIRST_TIME for name in AGENT_TOOLS},
+    "invoice_1010.txt": [("REVISE", ["FLAG_CODE_IN_TEXT", "FLAG_CODE_IN_TEXT"]), ("ACCEPT", [])],
 }
 
 
@@ -706,11 +701,13 @@ def test_the_agent_reviews_the_eight_held_or_warned_invoices_and_no_others(folde
     assert len(others) == 9 and all(a["by"] == "policy" and a["tools_used"] == [] for a in others)
 
 
-def test_the_critic_sends_four_assessments_back_and_accepts_all_eight(folder):
-    """Real model output: four of the eight assessments go round the loop once (two for a flag code in the text, caught in code; two on the model critic's objection), and every one is accepted by its last pass."""
+def test_the_critic_sends_one_assessment_back_and_accepts_all_eight(folder):
+    """Real model output: seven of the eight assessments are accepted on the first pass. 1010's is sent back once, by the check in code, for two flag codes written into its text; the revision is accepted. The model critic objects to none."""
     rounds = {n: [(c["verdict"], c["problems"]) for c in s["trail"] if c["node"] == "critic"] for n, s in folder.items() if n in AGENT_TOOLS}
     assert rounds == CRITIC_ROUNDS
     assert all(folder[n]["critique"]["verdict"] == "ACCEPT" for n in AGENT_TOOLS)
+    models = [c["model"] for n in AGENT_TOOLS for c in folder[n]["trail"] if c["node"] == "critic"]
+    assert models == ["ACCEPT"] * 9      # nine passes in all, the model critic taking part in each
     # Invoices the agent didn't review pass the critic without a model call.
     untouched = [c for n, s in folder.items() if n not in AGENT_TOOLS for c in s["trail"] if c["node"] == "critic"]
     assert len(untouched) == 9 and all(c["model"] == "NOT_NEEDED" for c in untouched)
@@ -730,8 +727,8 @@ def test_the_agent_agrees_1010_is_payable_and_says_why(folder):
     a = state["assessment"]
     assert (state["decision"].outcome, state["decision"].stage, state["result"]["status"]) == ("APPROVE", "POLICY_FLOOR", "PAID")
     assert (a["by"], a["recommendation"], a["open_questions"]) == ("reviewer_agent", "APPROVE", [])
-    assert "rush order" in a["rationale"] and "Acme Corp Manufacturing Division" in a["rationale"]
-    assert a["flags_addressed"] == ["UNEXPECTED_FIELDS", "DUPLICATE_ITEM"]
+    assert "rush order note on the second line" in a["rationale"] and "Acme Corp Manufacturing Division" in a["rationale"]
+    assert "matches the expected buyer name" in a["rationale"] and sorted(a["flags_addressed"]) == ["DUPLICATE_ITEM", "UNEXPECTED_FIELDS"]
 
 
 def test_the_agent_is_told_who_it_works_for():
@@ -742,20 +739,22 @@ def test_the_agent_is_told_who_it_works_for():
 
 
 def test_the_agents_lookups_are_reflected_in_what_it_says(folder):
-    """What the tools returned shows in the rationale: WidgetC resembles stocked items (1016); nothing resembles SuperGizmo or MegaSprocket (1008); the revision adds $4,050 to a paid $1,890 (1004)."""
+    """What the tools returned shows in the rationale: WidgetC resembles stocked items and the vendor was paid before (1016); nothing resembles SuperGizmo or MegaSprocket and the vendor is new (1008). The revision's figures come from its flag (1004)."""
     a = folder["invoice_1016.json"]["assessment"]
     assert [s["item"] for s in a["tools_used"][0]["result"]["similar"]] == ["WidgetB", "WidgetA"]
-    assert "similar items WidgetA and WidgetB" in a["rationale"]
+    assert a["tools_used"][1]["result"]["other_invoices"] == [{"number": "1001", "revision": 0, "total": "5000", "outcome": "PAID"}]
+    assert "similar items WidgetA and WidgetB are stocked" in a["rationale"] and "one prior paid invoice" in a["rationale"]
     b = folder["invoice_1008.txt"]["assessment"]
-    assert all(t["result"]["similar"] == [] for t in b["tools_used"]) and "no similar inventory matches" in b["rationale"]
+    assert [t["result"].get("similar", t["result"].get("other_invoices")) for t in b["tools_used"]] == [[], [], []]
+    assert "returned no matches" in b["rationale"] and "no prior invoices" in b["rationale"]
     c = folder["invoice_1004_revised.json"]["assessment"]
-    assert c["tools_used"][0]["result"]["other_invoices"] == [{"number": "1004", "revision": 0, "total": "1890", "outcome": "PAID"}]
-    assert "1890.00" in c["rationale"] and "4050.00" in c["rationale"]
+    assert "$1890" in c["rationale"] and "$4050" in c["rationale"]
+    assert c["open_questions"] == ["Confirm the PO amendment authorizes the added line items and new total."]
 
 
 def test_the_invoice_under_review_is_not_mistaken_for_an_earlier_one(folder):
     """Vendor history leaves out the invoice being reviewed, so no rationale reports it as already received or as a possible duplicate of itself."""
-    for name in ("invoice_1002.txt", "invoice_1005.json"):
+    for name in ("invoice_1005.json", "invoice_1008.txt"):
         a = folder[name]["assessment"]
         history = [t["result"] for t in a["tools_used"] if t["tool"] == "get_vendor_history"]
         assert history and all(h["other_invoices"] == [] for h in history), name

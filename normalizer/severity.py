@@ -68,6 +68,58 @@ SEVERITY = {
 }
 
 
+# What each flag means, in a sentence a person (or a model) can read. A flag records what a check
+# noticed. It is not always a finding of fault: UNEXPECTED_FIELDS means the file had data with no
+# place in the invoice structure, not that the data is suspicious. Sent with the flags to the
+# reviewer agent and its critic, which otherwise guess at a code's meaning from its name.
+MEANING = {
+    "QTY_MISSING": "a line has no quantity",
+    "QTY_NON_POSITIVE": "a line's quantity is zero or negative",
+    "QTY_NOT_WHOLE": "a line's quantity is not a whole number",
+    "PRICE_MISSING": "a line has no unit price",
+    "PRICE_NEGATIVE": "a line's unit price is negative",
+    "ITEM_MISSING": "a line has no product name",
+    "LINE_ITEMS_MISSING": "the invoice has no line items",
+    "VENDOR_MISSING": "the invoice names no vendor",
+    "INVOICE_NUMBER_MISSING": "the invoice has no invoice number",
+    "TOTAL_MISSING": "the invoice states no total",
+    "TOTAL_NEGATIVE": "the stated total is below zero",
+    "SHIPPING_NEGATIVE": "the stated shipping charge is below zero",
+    "TAX_NEGATIVE": "the stated tax amount or rate is below zero",
+    "CONFLICTING_ROWS": "rows of a CSV disagree on an invoice-level value such as the vendor or invoice number",
+    "LINE_AMOUNT_MISMATCH": "a line's stated amount is not its quantity times its unit price",
+    "SUBTOTAL_MISMATCH": "the stated subtotal is not the sum of the lines",
+    "TAX_AMOUNT_MISMATCH": "the stated tax is not the subtotal times the stated rate",
+    "TOTAL_MISMATCH": "the stated total is not the lines plus tax and shipping",
+    "UNPARSEABLE": "a value could not be read as the kind of value its field needs; `value` is the text as written",
+    "UNKNOWN_PRODUCT": "a line's product name is not in inventory",
+    "DUE_DATE_MISSING": "the invoice states no due date",
+    "DUE_DATE_BEFORE_INVOICE_DATE": "the due date is earlier than the invoice date",
+    "OVER_APPROVAL_THRESHOLD": "the total, in dollars, is at or above the amount that requires a person's review",
+    "CURRENCY_UNSUPPORTED": "the invoice is in another currency and no usable exchange rate was found",
+    "CURRENCY_CONVERTED": "the invoice is in another currency; `usd_estimate` is its estimated cost in dollars",
+    "STOCK_EXCEEDED": "the quantity billed for a product, summed over its lines, is more than is in stock",
+    "STOCK_UNKNOWN": "inventory has no usable stock figure for a product",
+    "NOT_IN_SOURCE": "a value the model transcribed does not appear in the document",
+    "INVENTORY_NOT_CHECKED": "no inventory was available, so products and stock were not checked",
+    "REVISION_OF_PAID": "this revises an invoice that was already paid; `already_paid` and `difference` say how much",
+    "DUPLICATE_CONFLICT": "an invoice with the same vendor, number and revision is on record with different content",
+    "POSSIBLE_DUPLICATE": "an invoice with the same number and content is on record under a different vendor name",
+    "OCR_REPAIRED": "a value damaged in scanning was read and confirmed by another value on the invoice; `proof` says how",
+    "ITEM_NAME_REPAIRED": "a product name was matched to an inventory name that differs only in spacing or case",
+    "NEAR_THRESHOLD": "the total is just under the amount that requires a person's review",
+    "PRESSURE_LANGUAGE": "the invoice's text pushes for fast payment; `matched` lists the words",
+    "WIRE_REQUEST": "the invoice's text asks for a wire or bank transfer, or names a changed account",
+    "UNEXPECTED_FORMAT": "a value is not written in its field's usual form; it was still read as written",
+    "DUPLICATE_ITEM": "the same product is on more than one line; often legitimate (a discount or rush line)",
+    "UNEXPECTED_FIELDS": "the file holds data with no place in the invoice structure (a Bill To line, a PO number); "
+                         "this is not a fault in itself",
+    "CURRENCY_ASSUMED": "the invoice names no currency, so it was read as US dollars",
+    "SUPERSEDES_UNPAID": "this revision replaces an earlier one that had not been paid",
+    "EXTRACTION_RETRIED": "transcribing the document took more than one model attempt",
+}
+
+
 def severity(flag: dict) -> str:
     """Look up the severity for one flag.
 

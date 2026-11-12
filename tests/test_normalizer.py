@@ -1013,3 +1013,10 @@ def test_names_are_not_matched_without_an_inventory(tmp_path):
     inv = normalizer.load(items_invoice(tmp_path, ("Widget A", 1)))
     assert inv.line_items[0].item == "Widget A"
     assert [x["code"] for x in inv.flags] == ["UNEXPECTED_FORMAT", "INVENTORY_NOT_CHECKED"]
+
+
+def test_every_flag_code_has_a_plain_meaning():
+    """Each flag code has a one-sentence meaning (sent to the reviewer agent and its critic with the flags), and no meaning is left over for a code that no longer exists."""
+    assert set(normalizer.MEANING) == set(normalizer.SEVERITY)
+    assert all(len(text) > 15 and not text.endswith(".") for text in normalizer.MEANING.values())
+    assert "not a fault in itself" in normalizer.MEANING["UNEXPECTED_FIELDS"]

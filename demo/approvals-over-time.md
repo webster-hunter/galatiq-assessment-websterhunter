@@ -16,7 +16,8 @@ what it changed.
 | Rate service | `5f324b7` | Same outcomes. 1014 is listed as 4,125.00 EUR (~$4,480.16) and is paid in euros when released | A foreign-currency invoice can be approved like any other |
 | Reviewer agent, first recording | `493ac7d` | **5 paid ($19,140.00), 8 held**, 4 rejected, 3 skipped | The model added a hold to 1010. It was wrong to |
 | Reviewer agent, told who the buyer is | `a5d6c6a` | **6 paid ($26,325.00), 7 held**, 4 rejected, 3 skipped | 1010 is paid again. The model had been missing context |
-| Critic | current | Same outcomes. 4 of the agent's 8 assessments are sent back once; all 8 end accepted | The reasons a reviewer reads are checked. No decision changed |
+| Critic, first recording | `e3d4d80` | Same outcomes. 4 of the agent's 8 assessments are sent back once; all 8 end accepted | The reasons a reviewer reads are checked. No decision changed |
+| Critic, after its review | current | Same outcomes. 1 of 8 is sent back, by a check in code; all 8 end accepted | The critic was told what it had been missing, and an agent-added hold can no longer be undone |
 
 ## Each change, by invoice
 
@@ -81,22 +82,30 @@ matching the policy. It has never recommended paying something the policy held.
 
 ### Critic: the reasons are checked, the decisions are not touched
 
-| | Count |
-|---|---|
-| Assessments the agent wrote | 8 |
-| Sent back to the agent once | 4 |
-| ...for a flag code in the text (caught by a check in code) | 2 (1014, 1016) |
-| ...on the model critic's objection | 2 (1002, 1010) |
-| Accepted by the final pass | 8 |
-| Outcomes changed | 0 |
+| | First recording | After its code review |
+|---|---|---|
+| Assessments the agent wrote | 8 | 8 |
+| Sent back to the agent once | 4 | 1 |
+| ...by a check in code (a flag code in the text) | 2 (1014, 1016) | 1 (1010) |
+| ...on the model critic's objection | 2 (1002, 1010) | 0 |
+| Accepted by the final pass | 8 | 8 |
+| Outcomes changed | 0 | 0 |
 
-The two objections from the model critic are worth reading before citing them. On 1010 it said
-the sentence "the bill-to field is an expected Acme division name" contradicted the
+The model critic's objections in the first recording did not hold up. On 1010 it said the
+sentence "the bill-to field is an expected Acme division name" contradicted the
 unexpected-fields flag. It doesn't: that flag means the field has no place in the invoice
 structure, not that it is suspicious. On 1002 it said the question "should the order for 20
 GadgetX proceed given only 5 in stock?" was already answered by the stock flag, which states the
-shortfall but not what to do about it. Both times the agent dropped the sentence and the result
-was accepted. Neither objection was clearly right. The two caught by code were.
+shortfall but not what to do about it. A second recording produced two more of the same kind.
+
+Each one traced to something the critic had not been told: what a flag means, who the buyer is,
+that a vendor's own claim is not confirmation. Those are in its instructions now, each flag is
+sent with its meaning, and in the current recording the model critic objects to nothing. The one
+assessment sent back is caught by code.
+
+The code review also changed a rule. The critic could previously lead the agent to withdraw a
+hold it had added, on the model critic's word alone. Now a hold the agent adds stays, whatever
+the critic says and even if the model fails mid-revision; a person releases it.
 
 ## What stayed the same throughout
 
@@ -117,6 +126,7 @@ holds an owner, and the model was allowed to add caution and explain, never to a
 
 - That the agent improved a decision. On these 20 files its one change was an error, since
   corrected. Its contribution is the written reason and the lookups behind it.
-- That the model critic is reliable. Its two objections here were debatable. The checks in code
-  are the part to rely on.
+- That the model critic is reliable. Across three recordings it has not found a real problem, and
+  it found four that weren't until its instructions were corrected. The checks in code are the
+  part to rely on.
 - That these counts generalise. Twenty files, built to be awkward.

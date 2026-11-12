@@ -263,7 +263,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         rounds = state.get("critic_rounds", 0) + 1
         found = critique(state["invoice"], decide(state["invoice"].flags), state["assessment"], provider)
         step = {"round": rounds, "verdict": found["verdict"], "model": found["model"],
-                "problems": [p["check"] for p in found["problems"]]}
+                "problems": [p["check"] for p in found["problems"]],
+                **({"unmatched_objections": len(found["unmatched_objections"])} if "unmatched_objections" in found else {})}
         return {"critique": found, "critic_rounds": rounds, "trail": _step("critic", **step)}
 
     def settle(state: State, status: str, detail: str) -> None:

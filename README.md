@@ -298,14 +298,19 @@ run it, and answers an unknown tool or bad arguments with an error the model can
 
 | Policy floor | What the agent can do |
 |---|---|
-| APPROVE with warnings | Add a HOLD. The only way it changes an outcome; even a "reject" from it only holds |
-| HOLD | Advise the person who decides. Its recommendation is shown in the review queue |
+| APPROVE with warnings | Add a HOLD. The only way it changes an outcome; even a "reject" from it only holds. Once added, the hold stays: nothing later in the run can remove it, only a person |
+| HOLD | Advise the person who decides. Its recommendation is shown in the review queue, and is never looser than the hold: an "approve" from it is recorded as HOLD, with a note |
 | REJECT, or a clean APPROVE | Nothing: it isn't called, and the reason is written from the flags |
 
-So a model can make the system stricter, never looser. The invoice text it reads was written by
-the vendor, and is sent as delimited data with an instruction to treat pressure as a reason for
-care; if that fails entirely, the worst outcome is an extra hold. If the model can't be reached,
-or answers unusably, the policy's decision stands and says so.
+So a model can make the system stricter, never looser. If the model can't be reached, or answers
+unusably, the policy's decision stands and says so. A lookup that fails costs the agent that
+fact, not the batch its run.
+
+**Vendor text is always inside a delimited block.** It is not only in the invoice: a flag quotes
+it (an unknown product's name), and a lookup echoes it. The invoice goes in `<invoice>`, the flags
+in `<flags>`, lookup results in `<lookups>`, and none can be closed from inside. Each flag is sent
+with its meaning in a sentence (`normalizer.MEANING`), since a code's name alone invites
+misreading. If the instructions fail entirely, the worst outcome is still an extra hold.
 
 ### The critic
 
@@ -328,9 +333,18 @@ that is the `critic -> reviewer` edge, the one edge that points backwards. A cou
 state ends the loop after two critic passes; an assessment still not accepted goes forward
 marked as unverified, and `review.py` says so.
 
-The critic changes no outcome itself. It can lead the agent to withdraw a hold it can't justify,
-and the policy floor still holds underneath. A model checking a model tends to agree with it,
-which is why the code checks come first and count on their own.
+The critic changes no outcome. It checks the reason, and cannot undo a hold the agent added: if
+the agent withdraws a hold after the critic's objections, the invoice is held all the same, with
+a note saying so, for a person to release. A second model's objection is not a check.
+
+Three things keep the critic itself honest:
+
+- **The code checks come first and count on their own.** A model that accepts everything can't
+  wave through an invented figure.
+- **Figures are grounded on what a lookup found, not on what the agent asked.** Calling
+  `get_stock("9999")` does not make "9999 complaints" evidence.
+- **What the model critic said is recorded as it said it.** An objection whose quote can't be
+  matched to the text doesn't send the assessment back, but it is kept on the record.
 
 ### What they did on the samples
 
@@ -346,14 +360,16 @@ the seven policy holds, and 1010. On all eight it agreed with the policy's outco
 - **1004 revised:** it found the original in the vendor's history, paid $1,890, explains that
   this revision adds $4,050, and asks whether the PO amendment authorises it.
 
-The critic sent four of the eight back once, and accepted all eight on its last pass:
+The critic accepted seven of the eight on the first pass. It sent 1010's back once, on the check
+in code: two flag codes had been written into its text. The revision describes them in words and
+was accepted. The model critic objected to none.
 
-- **Two for a flag code in the text** (1014, 1016), caught by the check in code. The revisions
-  describe the problem in words.
-- **Two on the model critic's objection** (1002, 1010). Both objections were debatable: on 1010
-  it called "the bill-to field is an expected Acme division name" a contradiction of the
-  unexpected-fields flag, which only means the field is unmapped. The agent dropped the sentence
-  either way. The code checks are the part to rely on.
+That is the third recording of the critic, and the first two are the instructive ones. In each,
+the model critic sent two assessments back on objections that didn't hold up: that "an expected
+Acme division name" contradicted the unexpected-fields flag; that a question about confirming a
+PO amendment was answered by the vendor's own note claiming one. Each traced to something the
+critic had not been told: what a flag means, who the buyer is, that a vendor's claim is not
+confirmation. With those in its instructions it stopped. The checks in code never needed fixing.
 
 Two faults were found earlier by reading recorded replies, and neither was the model's:
 
@@ -370,8 +386,11 @@ each stage was added, including the agent's mistaken hold.
 
 Limits:
 
-- The model critic is not dependable: see above. What is dependable is narrow: figures, flag
-  codes, and the flag checklist.
+- The model critic is the weak part: see above. It found nothing real on these files and, before
+  its instructions were corrected, twice found things that weren't. What is dependable is narrow:
+  figures, flag codes, and the flag checklist.
+- The flag checklist can be satisfied by listing a code without discussing it. It catches a flag
+  forgotten, not a flag brushed aside.
 - A statement with no figure in it ("the vendor is well established") is checked only by the
   model critic.
 - The model's choices vary between recordings: which tools it calls changed with each prompt

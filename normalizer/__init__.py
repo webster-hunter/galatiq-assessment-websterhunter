@@ -17,9 +17,9 @@ from .checks import flag, inventory_from_db
 from .models import Invoice, LineItem
 from .parsing import LOADERS
 from .repair import repair, repair_item_names
-from .severity import SEVERITIES, SEVERITY, severity
+from .severity import MEANING, SEVERITIES, SEVERITY, severity
 
-__all__ = ["Invoice", "LineItem", "SEVERITIES", "SEVERITY", "check", "expand", "flag", "inventory_from_db",
+__all__ = ["Invoice", "LineItem", "MEANING", "SEVERITIES", "SEVERITY", "check", "expand", "flag", "inventory_from_db",
            "load", "normalize", "repair", "severity"]
 
 
