@@ -46,8 +46,8 @@ Requires Python 3.10 or later.
 pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
-python review.py                                                           # what is waiting for a person
-pytest                                                                     # 280 tests, about 5 seconds
+python -m web                                                              # the review screen, at http://127.0.0.1:8000
+pytest                                                                     # 286 tests, about 8 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -57,7 +57,7 @@ call the model live, copy `.env.example` to `.env`, add an xAI key, and drop `--
 steps taken, and the invoice as read) and a summary on stderr:
 
 ```
-6 held for review. See them with: python review.py --ledger ledger.db --checkpoints checkpoints.db
+6 held for review. Open the review screen with: python -m web --ledger ledger.db --checkpoints checkpoints.db
 20 files: paid 6 now ($26,325.00). Ledger ledger.db: 6 payments ($26,325.00) in all.
 ```
 
@@ -70,13 +70,14 @@ Add `--trace` to watch an invoice move through the stages, one JSON line per ste
 {"file": "invoice_1003.txt", "node": "reject", "status": "REJECTED", "reasons": [...]}
 ```
 
-Held invoices wait in a queue. `review.py` lists them with the reviewer agent's advice, and a
-named person decides:
+Held invoices wait in a queue. The review screen lists them, and a named person decides:
 
-```bash
-python review.py approve 2 --by "Dana Lee"                                  # 1004 revised: pays the $4,050.00 difference
-python review.py reject 1 --by "Dana Lee" --note "Only 5 GadgetX were delivered"
-```
+![The review screen: the queue on the left, one held invoice with its flags, the agent's advice and the decision form on the right](docs/review-screen.png)
+
+Each invoice shows why it is held, the reviewer agent's advice and questions, and what approving
+would pay: the $4,050.00 difference for 1004's revision, 4,125.00 EUR for 1014. A rejection needs
+a note. The screen is a FastAPI backend and a TypeScript page with no framework; it listens on
+this machine only and has no login.
 
 The ledger persists between runs (`ledger.db`), which is why a second run pays nothing. `--fresh`
 sets it aside and starts empty.
@@ -190,7 +191,8 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
   currency is paid in that currency, with a dollar estimate for the reviewer.
 - **Files are processed in name order,** so 1004 is paid before its revision is read, and the
   revision is held for the difference.
-- **A reviewer is whoever types their name.** There is no login.
+- **A reviewer is whoever types their name.** There is no login, and the review screen is served
+  to this machine only.
 
 ## Not built, and why
 
@@ -200,8 +202,8 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | Matching to purchase orders and goods receipts | No such data in the brief. It is the first thing to add with real systems |
 | A vendor list | Would catch a changed bank account, a billing currency, and a vendor name spelled two ways |
 | Real exchange rates | The brief rules out internet access. `rates/` is a local mock with made-up rates |
-| A web interface | The command line covers the whole flow. A review screen is the obvious next step for the person deciding |
 | Retrying a failed payment | `mock_payment` always succeeds. An unconfirmed payment is held for a person, never resent blindly |
+| Processing invoices from the browser | The screen is for decisions. Invoices are still processed by `main.py` |
 | Deployment, logins, concurrency | Out of scope for a local prototype |
 
 ## What I would not claim
@@ -217,7 +219,8 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 
 | Path | What |
 |---|---|
-| `main.py`, `review.py` | The two commands |
+| `main.py` | Processes invoices |
+| `web/` | The review screen: FastAPI backend, TypeScript page. [Reference](docs/ledger-and-review.md#review-queue) |
 | `normalizer/` | Parsing, repairs, checks and flag severities. Standard library only. [Reference](docs/normalizer.md) |
 | `extraction/` | Model transcription, grounding, the retry loop, the provider, recordings. [Reference](docs/extraction.md) |
 | `approval/` | Policy, reviewer agent, critic. [Reference](docs/approval.md) |
@@ -225,5 +228,5 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/replays/` | The sample invoices; the model's recorded replies |
 | `demo/` | Numbers and examples for a walkthrough, each with the command that reproduces it |
-| `tests/` | 280 tests. Each one's first line says the behaviour it pins |
+| `tests/` | 286 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

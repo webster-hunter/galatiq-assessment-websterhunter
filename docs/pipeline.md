@@ -45,7 +45,7 @@ The diagram is in the [README](../README.md#how-it-works).
 
 - **A held invoice is a paused run.** The graph is compiled with a checkpointer, which saves the
   state after every node under a thread ID (in `checkpoints.db`). `await_review` calls LangGraph's
-  `interrupt()`, which stops the run there. `review.py`, in another process and possibly days
+  `interrupt()`, which stops the run there. The review screen, in another process and possibly days
   later, resumes that thread with a person's decision, and the run continues into `pay` or
   `reject`. See [Review queue](ledger-and-review.md#review-queue).
 

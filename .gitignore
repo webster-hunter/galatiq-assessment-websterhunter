@@ -11,3 +11,6 @@ prep/
 
 # Local secrets; copy .env.example
 .env
+
+# The page is built with `npm run build` in web/frontend; the built web/static/app.js is committed
+node_modules/

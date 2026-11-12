@@ -110,7 +110,7 @@ quote the words it objects to; a complaint about text that isn't in the assessme
 Any problem sends the assessment back to the agent with the specific complaints. In the graph
 that is the `critic -> reviewer` edge, the one edge that points backwards. A counter in the
 state ends the loop after two critic passes; an assessment still not accepted goes forward
-marked as unverified, and `review.py` says so.
+marked as unverified, and the review screen says so.
 
 The critic changes no outcome. It checks the reason, and cannot undo a hold the agent added: if
 the agent withdraws a hold after the critic's objections, the invoice is held all the same, with

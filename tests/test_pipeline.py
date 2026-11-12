@@ -522,34 +522,6 @@ def test_a_run_paused_in_one_process_is_resumed_from_another(tmp_path):
     assert state["result"]["status"] == "PAID" and ledger.total_paid() == Decimal("9975")
 
 
-def test_review_command_lists_shows_and_decides(capsys, tmp_path):
-    """review.py against what main.py left behind: the list with a dollar estimate, one invoice in full, a refused rejection (exit 1), and a plain approval paid in euros."""
-    import review
-    where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
-    main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
-    assert "1 held for review" in capsys.readouterr().err
-
-    assert review.main(where) == 0
-    listing = capsys.readouterr().out
-    assert "invoice_1014.xml" in listing and "4,125.00 EUR (~$4,480.16)" in listing and "1 waiting" in listing
-
-    assert review.main([*where, "show", "1"]) == 0
-    shown = json.loads(capsys.readouterr().out)
-    assert shown["cannot_approve_because"] is None and shown["usd_estimate"]["usd_estimate"] == "4480.16"
-    assert shown["invoice"]["currency"] == "EUR"
-
-    assert review.main([*where, "reject", "1", "--by", "Dana"]) == 1          # a rejection needs a note
-    assert "needs a note" in capsys.readouterr().err
-
-    assert review.main([*where, "approve", "1", "--by", "Dana"]) == 0         # nothing to type: no amount, no rate
-    captured = capsys.readouterr()
-    out = json.loads(captured.out)
-    assert (out["result"]["status"], out["result"]["amount"], out["result"]["currency"]) == ("PAID", "4125.00", "EUR")
-    assert out["result"]["usd_estimate"]["usd_estimate"] == "4480.16" and out["review"]["reviewer"] == "Dana"
-    assert "Paid 4125.00 EUR to TechParts International" in captured.err
-    assert review.main(where) == 0 and "Nothing is waiting" in capsys.readouterr().out
-
-
 # --- Fixes from the second code review ---------------------------------------------------------------
 
 def test_a_decision_recorded_but_not_carried_out_can_be_finished(graph, ledger, monkeypatch):
@@ -637,29 +609,17 @@ def test_only_paused_runs_keep_their_saved_state(tmp_path):
 
 def test_fresh_warning_reports_every_currency_paid(capsys, tmp_path):
     """The --fresh warning names what the old ledger paid in each currency, not only the dollars."""
-    import review
+    from fastapi.testclient import TestClient
+    from web import create_app
     where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
     main.main([f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", *where])
     main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
-    review.main([*where, "approve", "1", "--by", "Dana"])
+    assert "1 held for review. Open the review screen with: python -m web" in capsys.readouterr().err
+    reviewed = TestClient(create_app(*where[1::2])).post("/api/queue/1/decision", json={"action": "approve", "reviewer": "Dana"})
+    assert reviewed.status_code == 200
     capsys.readouterr()
     main.main([f"--invoice_path={INVOICES / 'invoice_1001.txt'}", "--offline", "--fresh", *where])
     assert "2 payments, $2,750.00 + 4,125.00 EUR" in capsys.readouterr().err
-
-
-def test_review_does_not_create_a_checkpoints_file_or_decide_without_one(capsys, tmp_path):
-    """Given a path with no saved runs, review.py lists from the ledger with a warning, refuses to decide, and leaves no new file behind. The held invoice is untouched."""
-    import review
-    good = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
-    main.main([f"--invoice_path={INVOICES / 'invoice_1005.json'}", "--offline", *good])
-    capsys.readouterr()
-    wrong = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "typo.db")]
-    assert review.main(wrong) == 0
-    out = capsys.readouterr()
-    assert "invoice_1005.json" in out.out and "No saved runs at" in out.err
-    assert review.main([*wrong, "approve", "1", "--by", "Dana"]) == 1
-    assert not (tmp_path / "typo.db").exists()
-    assert review.main([*good, "approve", "1", "--by", "Dana"]) == 0     # still there, and releasable with the right file
 
 
 # --- The reviewer agent on the samples, from its recorded replies -----------------------------------

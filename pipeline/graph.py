@@ -32,7 +32,7 @@ Pausing for a person. A held invoice is a run that stops and waits. Two LangGrap
                   answer, and the node carries on.
 
 So `await_review` is one line of waiting: the graph pauses in it for as long as it takes, and a
-reviewer's decision (review.py) resumes it into `pay` or `reject`.
+reviewer's decision (the review screen, web/) resumes it into `pay` or `reject`.
 
 Nodes with side effects. `register`, `pay`, `hold` and `reject` write to the ledger, and `pay`
 moves money. LangGraph may run a node more than once: after a crash, or when a paused run is
@@ -112,7 +112,7 @@ def checkpointer(path: str | Path | None = None):
 
     Args:
         path: A SQLite file, so a run paused in one process can be resumed from another (main.py
-            holds an invoice, review.py releases it later). None keeps states in memory: pausing
+            holds an invoice, the review screen releases it later). None keeps states in memory: pausing
             and resuming still work, within this process only.
     """
     serde = JsonPlusSerializer(allowed_msgpack_modules=_STATE_TYPES)
@@ -297,7 +297,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         """Held for a person: put the invoice in the review queue and record the outcome so far.
 
         A node may take a second argument, `config`, which carries the run's settings. The thread
-        ID is in it: stored with the queue entry, it is how review.py later finds this exact
+        ID is in it: stored with the queue entry, it is how the review screen later finds this exact
         paused run.
 
         This node finishes normally, so its update (result = HELD) is saved. The waiting happens

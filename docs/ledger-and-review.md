@@ -60,29 +60,41 @@ possible refinement; holding the revision is the safe behaviour either way.
 
 ## Review queue
 
-An invoice the policy holds is not finished: it waits for a person. `review.py` is how they see
-what is waiting and decide it.
+An invoice the policy holds is not finished: it waits for a person. The review screen is how
+they see what is waiting and decide it.
 
 ```bash
-python review.py                                  # what is waiting
-python review.py show 3                           # one invoice in full: flags, and the steps so far
-python review.py approve 3 --by "Dana Lee" --note "Stock arriving Friday"
-python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send a corrected invoice"
+python -m web            # then open http://127.0.0.1:8000
 ```
 
-```
-  #  file                        vendor                                 total  held for
-  1  invoice_1002.txt            Gadgets Co.                        15,000.00  OVER_APPROVAL_THRESHOLD, STOCK_EXCEEDED
-  2  invoice_1004_revised.json   Precision Parts Ltd.                5,940.00  REVISION_OF_PAID
-  ...
-```
+![The review screen](review-screen.png)
+
+The left column lists what is waiting and what has been decided. The right shows one invoice:
+why it is held, with each flag explained; the reviewer agent's advice, its questions and what it
+looked up; the lines; and what approving would pay. The reviewer enters their name, and a note if
+rejecting.
+
+**How it is built.** `web/app.py` is a FastAPI application with three routes, and it adds no rules
+of its own: deciding calls `pipeline.release`, where everything below is enforced.
+
+| Route | Does |
+|---|---|
+| `GET /api/queue` | What is waiting, what was decided, and what has been paid |
+| `GET /api/queue/{id}` | One held invoice in full |
+| `POST /api/queue/{id}/decision` | `{"action": "approve" or "reject", "reviewer", "note"}`. A refusal is a 400 with the reason |
+
+The page is plain TypeScript with no framework (`web/frontend/src/app.ts`), compiled to
+`web/static/app.js`. The compiled file is committed, so running the screen needs only Python;
+`npm install && npm run build` in `web/frontend` rebuilds it. Vendor text is put on the page as
+text, never as HTML. There is no login: the server listens on this machine only, and a reviewer
+is whoever types their name.
 
 - **Deciding resumes the run.** Approve continues the paused run into payment; reject records the
   reviewer's note as the reason. The reviewer's name, decision and note are kept in the ledger,
   and the policy's original decision stays on the record beside them.
 - **A person can overrule a hold, within limits.** Some holds can only be rejected, because the
   invoice can't be paid correctly whoever approves it: one with no invoice number, or one that
-  conflicts with an invoice already on record. The command says why.
+  conflicts with an invoice already on record. The screen says why, and the Approve button is off.
 - **An invoice in another currency is approved like any other.** It is listed with its dollar
   estimate, `4,125.00 EUR (~$4,480.16)`, from the [rate service](ledger-and-review.md#exchange-rates). The reviewer
   types no amount and no rate. Approval pays the invoiced amount in the invoiced currency.
@@ -104,8 +116,8 @@ checkpoints. Three things keep them from drifting apart:
 - **A held invoice whose saved run is missing is put back.** Deciding it reports the loss, closes
   the entry, and returns the invoice to unprocessed, so running its file again checks and queues
   it afresh.
-- **`review.py` never creates a checkpoints file.** Pointed at a path with no saved runs it lists
-  from the ledger, says so, and decides nothing.
+- **The review screen never creates a checkpoints file.** Started with a path that has no saved
+  runs it says so, and decides nothing.
 
 Runs that reach an outcome have their saved states deleted; only paused runs are kept.
 

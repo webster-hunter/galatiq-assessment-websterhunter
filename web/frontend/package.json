@@ -1,0 +1,10 @@
+{
+  "name": "invoice-review-frontend",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

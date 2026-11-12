@@ -112,14 +112,16 @@ After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to bo
 keep the demo's saved runs apart too):
 
 ```bash
-python review.py --ledger demo.db                                     # six invoices waiting, with the agent's advice
-python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 5 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
+python -m web --ledger demo.db          # then open http://127.0.0.1:8000: six invoices waiting, with the agent's advice
 ```
+
+In the browser: open Precision Parts Ltd. (1004 revised) and approve it, which pays the $4,050.00
+difference. Then open TechParts International (1014), listed as 4,125.00 EUR (about $4,480.16),
+and approve it, which pays 4,125.00 EUR. Try rejecting one with no note to show the refusal.
 
 What to point at:
 
-- **`main.py` has exited.** Each held invoice is a pipeline run saved mid-flight; `review.py` is a
+- **`main.py` has exited.** Each held invoice is a pipeline run saved mid-flight; the review screen is a
   separate process that picks one up and lets it finish.
 - **The revision pays $4,050.00, not $5,940.00,** because $1,890.00 already went out.
 - **The EUR invoice is approved like any other.** The queue shows what it costs in dollars, from
@@ -138,7 +140,7 @@ python main.py --invoice_path=data/invoices --offline --ledger demo.db --trace 2
 ```
 
 One line per invoice showing who wrote the reason (the agent or the policy), its recommendation,
-and which tools it called. `python review.py --ledger demo.db` then prints its advice under the queue.
+and which tools it called. The review screen (`python -m web --ledger demo.db`) shows its advice on each held invoice.
 
 What to point at:
 

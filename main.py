@@ -11,8 +11,8 @@ Runs one invoice file, or every invoice in a folder, through the pipeline graph 
     register   the ledger: is this a duplicate, or a revision of one already handled?
     pay / hold / reject, or skip for an invoice that was already handled
 
-A held invoice is a paused run, saved in checkpoints.db. review.py lists what is waiting and
-resumes a run with a person's decision.
+A held invoice is a paused run, saved in checkpoints.db. The review screen (python -m web) lists
+what is waiting and resumes a run with a person's decision.
 
 Prints a JSON list on stdout, one {"file", "result", "decision", "assessment", "trail", "invoice"} entry per
 file ({"file", "error"} for a file that can't be read); exits 1 if any file is an error. With
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
               f"paid again: {', '.join(Path(f).name for f in unconfirmed)}", file=sys.stderr)
     held = [r for r in results if r.get("result", {}).get("status") == "HELD"]
     if held:
-        print(f"{len(held)} held for review. See them with: python review.py --ledger {args.ledger} "
+        print(f"{len(held)} held for review. Open the review screen with: python -m web --ledger {args.ledger} "
               f"--checkpoints {args.checkpoints}", file=sys.stderr)
     now: dict = {}
     for p in paid:  # per currency: euros and dollars are never added together
