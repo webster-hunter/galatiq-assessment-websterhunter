@@ -355,3 +355,47 @@ def test_an_unconfirmed_payment_is_filed_under_other_not_paid(paths, monkeypatch
     client.post(f"/api/queue/{by_file(client)['invoice_1016.json']['id']}/decision", json={"action": "approve", "reviewer": "Dana Lee"})
     assert client.get("/api/queue", params={"outcome": "paid"}).json()["decided"] == []
     assert files(client.get("/api/queue", params={"outcome": "other"}).json()["decided"]) == ["1016.json"]
+
+
+# --- Fixes from the second code review ---------------------------------------------------------------
+
+def test_an_invoice_a_reviewer_decided_can_be_opened_with_every_step_it_took(client):
+    """A decided row names its finished run. Opened, it says who resolved it and with what note, and its steps run to the end: the wait for review and the payment are there, not only what came before."""
+    queue_id = by_file(client)["invoice_1016.json"]["id"]
+    client.post(f"/api/queue/{queue_id}/decision", json={"action": "approve", "reviewer": "Dana Lee", "note": "New product, agreed"})
+    [row] = client.get("/api/queue").json()["decided"]
+    shown = client.get(f"/api/runs/{row['run']}").json()
+    assert (shown["resolved"]["status"], shown["resolved"]["by"], shown["resolved"]["reviewer"], shown["resolved"]["note"]) == (
+        "PAID", "person", "Dana Lee", "New product, agreed")
+    assert [s["node"] for s in shown["trail"]][-3:] == ["hold", "await_review", "pay"]
+    assert shown["trail"][-1]["approved_by"] == "Dana Lee" and shown["flags"][0]["code"] == "UNKNOWN_PRODUCT"
+
+
+def test_a_run_resolved_by_the_policy_ends_with_its_final_step(client):
+    """The logged steps include the one that ended the run."""
+    runs = {a["file"]: a["run"] for a in client.get("/api/queue").json()["automatic"]}
+    assert client.get(f"/api/runs/{runs['invoice_1003.txt']}").json()["trail"][-1]["node"] == "reject"
+    assert client.get(f"/api/runs/{runs['invoice_1001.txt']}").json()["trail"][-1]["node"] == "pay"
+    assert client.get(f"/api/runs/{runs['invoice_1011.txt']}").json()["trail"][-1]["node"] == "skip"
+
+
+def test_an_amount_is_found_however_it_is_typed(client):
+    """The screen shows $15,000.00; the ledger stores 15000. Searching either form, with or without the sign, comma or cents, finds the invoice."""
+    for typed in ("15000", "15,000", "$15,000.00", "15,000.00"):
+        assert files(client.get("/api/queue", params={"q": typed}).json()["waiting"]) == ["1002.txt"], typed
+    assert files(client.get("/api/queue", params={"q": "4,125"}).json()["waiting"]) == ["1014.xml"]
+    assert files(client.get("/api/queue", params={"q": "$22,562.80"}).json()["automatic"]) == ["1013.json", "1013.pdf"]
+
+
+def test_the_lists_of_finished_invoices_are_limited_and_read_without_their_evidence(client, paths):
+    """A limit cuts the finished lists, newest first, and the count still says how many there are. Listing reads the runs' columns only: no evidence is loaded to build or search the list."""
+    from ledger import Ledger
+    cut = client.get("/api/queue", params={"limit": 3}).json()
+    assert (len(cut["automatic"]), cut["of"]["automatic"], len(cut["waiting"])) == (3, 14, 6)      # waiting is never cut
+    assert files(cut["automatic"]) == ["1013.json", "1013.pdf", "1015.csv"]
+    assert client.get("/api/queue", params={"limit": 0}).status_code == 422
+    rows = Ledger(paths["ledger"]).runs()
+    assert "summary" not in rows[0] and {"reasons", "note", "source_path"} <= set(rows[0])
+    by_name = {r["source_file"]: r for r in rows}
+    assert by_name["invoice_1003.txt"]["reasons"] == "STOCK_EXCEEDED, UNPARSEABLE, PRESSURE_LANGUAGE, WIRE_REQUEST"
+    assert by_name["invoice_1011.txt"]["note"] == "A copy of invoice_1011.pdf, which was paid"

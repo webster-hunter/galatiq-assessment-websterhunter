@@ -68,9 +68,13 @@ CREATE TABLE IF NOT EXISTS review_queue (
 -- stands; this says how each file got there, including second copies that have no row of their own.
 CREATE TABLE IF NOT EXISTS runs (
     thread_id TEXT PRIMARY KEY, source_file TEXT NOT NULL, vendor TEXT, total TEXT, currency TEXT,
-    status TEXT NOT NULL, resolved_by TEXT NOT NULL, reviewer TEXT, summary TEXT NOT NULL, finished_at TEXT NOT NULL
+    status TEXT NOT NULL, resolved_by TEXT NOT NULL, reviewer TEXT, summary TEXT NOT NULL, finished_at TEXT NOT NULL,
+    -- What a list of runs shows and searches, kept out of the JSON so listing never has to parse it.
+    source_path TEXT, reasons TEXT, note TEXT
 );
 """
+RUN_COLUMNS = ("thread_id", "source_file", "source_path", "vendor", "total", "currency", "status", "resolved_by", "reviewer",
+               "reasons", "note", "finished_at")
 
 
 def _alnum(text: str | None) -> str:
@@ -151,6 +155,9 @@ class Ledger:
             self._db.execute("ALTER TABLE review_queue ADD COLUMN amount TEXT")
         if "currency" not in {row["name"] for row in self._db.execute("PRAGMA table_info(payments)")}:
             self._db.execute("ALTER TABLE payments ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'")
+        for column in ("source_path", "reasons", "note"):  # added to runs after its first version
+            if column not in {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}:
+                self._db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
         self._pay, self._now = pay, now
 
     def close(self) -> None:
@@ -378,31 +385,38 @@ class Ledger:
                                 "WHERE vendor_key=? ORDER BY number_key, revision", (_alnum(vendor_name),))
         return [dict(r) for r in rows]
 
-    def log_run(self, thread_id: str, source_file: str, vendor: str | None, total, currency: str | None, status: str,
-                resolved_by: str, reviewer: str | None, summary: str) -> None:
+    def log_run(self, thread_id: str, source_path: str, source_file: str, vendor: str | None, total, currency: str | None,
+                status: str, resolved_by: str, reviewer: str | None, reasons: list[str], note: str | None, summary: str) -> None:
         """Record how one run ended. Safe to repeat: a run is one row, replaced if written again.
 
         Args:
             thread_id: The run's name. A held invoice released later finishes under the same one.
+            source_path: The file's full path. Two files with the same name in different folders are different files.
+            source_file: The file's name, for showing.
             status: The outcome: PAID, REJECTED, SKIPPED_DUPLICATE, ERROR and so on.
+            reasons: The flag codes behind the outcome (or, for an approval, its warnings).
+            note: One line of explanation where codes don't give it: what a skipped file is a copy
+                of, why a file couldn't be read, a reviewer's note.
             resolved_by: "policy", "policy+agent" (the reviewer agent wrote the reason), "ledger"
                 (a duplicate or superseded copy), "person" (released or rejected on review), or
                 "none" for a file that couldn't be read.
             reviewer: The person's name, when resolved_by is "person".
             summary: The evidence as a JSON object, for showing the run later.
         """
-        with self._db:
-            self._db.execute("INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)",
-                             (thread_id, source_file, vendor, _plain(total) if total is not None else None, currency, status,
-                              resolved_by, reviewer, summary, self._now().isoformat()))
+        row = {"thread_id": thread_id, "source_file": source_file, "source_path": source_path, "vendor": vendor,
+               "total": _plain(total) if total is not None else None, "currency": currency, "status": status,
+               "resolved_by": resolved_by, "reviewer": reviewer, "reasons": ", ".join(reasons), "note": note,
+               "summary": summary, "finished_at": self._now().isoformat()}
+        with self._db:  # columns are named: the table has gained columns since it was first created
+            self._db.execute(f"INSERT OR REPLACE INTO runs ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
 
-    def has_run(self, source_file: str, status: str) -> bool:
-        """Whether a run of this file already ended this way."""
-        return self._db.execute("SELECT 1 FROM runs WHERE source_file=? AND status=? LIMIT 1", (source_file, status)).fetchone() is not None
+    def has_run(self, source_path: str, status: str) -> bool:
+        """Whether a run of this exact file already ended this way."""
+        return self._db.execute("SELECT 1 FROM runs WHERE source_path=? AND status=? LIMIT 1", (source_path, status)).fetchone() is not None
 
     def runs(self) -> list[dict]:
-        """Every finished run, newest first."""
-        return [dict(r) for r in self._db.execute("SELECT * FROM runs ORDER BY finished_at DESC, rowid DESC")]
+        """Every finished run, newest first, without its evidence (see run_record for one in full)."""
+        return [dict(r) for r in self._db.execute(f"SELECT {', '.join(RUN_COLUMNS)} FROM runs ORDER BY finished_at DESC, rowid DESC")]
 
     def run_record(self, thread_id: str) -> dict | None:
         row = self._db.execute("SELECT * FROM runs WHERE thread_id=?", (thread_id,)).fetchone()

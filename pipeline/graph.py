@@ -49,6 +49,7 @@ import copy
 import dataclasses
 import json
 import operator
+import sys
 import sqlite3
 import uuid
 from datetime import date
@@ -229,7 +230,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
 
     def skip(state: State, config) -> dict:
         """The invoice was already handled, as this file or as another copy. Nothing is decided or paid."""
-        finish(state, config, state["result"])
+        finish(state, config, "skip", state["result"])
         return {"trail": _step("skip", **state["result"])}
 
     def approve(state: State) -> dict:
@@ -277,17 +278,35 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         if state.get("recorded"):
             ledger.record(state["invoice"], status, detail)
 
-    def finish(state: State, config, result: dict) -> None:
+    # Outcomes that settle nothing, so the same file reaches them again on every run over its
+    # folder. Each is logged the first time only.
+    REPEATABLE = ("SKIPPED_DUPLICATE", "SKIPPED_SUPERSEDED", "ERROR", "PAYMENT_NOT_SENT")
+
+    def finish(state: State, config, node: str, result: dict) -> None:
         """Log how this run ended, with the evidence, so it can be looked up after its saved state is gone.
 
-        Called by each node that ends a run. A file that was simply processed before
-        (ALREADY_PROCESSED) is not logged again: its first run is the record. Nor is a second
-        copy that is skipped again on a later run over the same folder.
+        Called by each node that ends a run, after it has done its work. The log is a record of
+        what happened, not part of it: if writing it fails, the failure is reported on stderr and
+        the run carries on. A payment that has gone out must never be reported as a failed run
+        because its log entry could not be written.
+
+        A file that was simply processed before (ALREADY_PROCESSED) is not logged again: its
+        first run is the record. Nor is an outcome that the same file reaches on every run: a
+        copy skipped again, a file that still can't be read.
         """
         if result["status"] == "ALREADY_PROCESSED":
             return
+        try:
+            _log(state, config, node, result)
+        except Exception as e:  # anything at all: see above
+            print(f"warning: the outcome of {Path(state['path']).name} ({result['status']}) could not be logged "
+                  f"({type(e).__name__}: {e}); the outcome itself stands", file=sys.stderr)
+
+    def _log(state: State, config, node: str, result: dict) -> None:
         invoice, review, assessment = state.get("invoice"), state.get("review"), state.get("assessment") or {}
-        if result["status"].startswith("SKIPPED") and ledger.has_run(invoice.source_file, result["status"]):
+        decision, status = state.get("decision"), result["status"]
+        path = str(Path(state["path"]).resolve())
+        if status in REPEATABLE and not review and ledger.has_run(path, status):
             return
         if review:
             by = "person"
@@ -297,12 +316,19 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
             by = "none"
         else:
             by = "policy+agent" if assessment.get("by") == "reviewer_agent" else "policy"
-        summary = {"invoice": invoice, "decision": state.get("decision"), "assessment": state.get("assessment"),
-                   "critique": state.get("critique"), "review": review, "result": result, "trail": state.get("trail", [])}
-        ledger.log_run(config["configurable"]["thread_id"], invoice.source_file if invoice else Path(state["path"]).name,
+        if status.startswith("SKIPPED"):
+            note = f"A copy of {result['earlier_file']}, which was {result['earlier_status'].lower()}"
+        else:
+            note = result.get("error") or (review or {}).get("note")
+        reasons = list(decision.because or decision.warnings) if decision and not status.startswith("SKIPPED") else []
+        # The state's trail doesn't yet hold this node's own entry: it is added when the node returns.
+        summary = {"invoice": invoice, "decision": decision, "assessment": state.get("assessment"),
+                   "critique": state.get("critique"), "review": review, "result": result,
+                   "trail": state.get("trail", []) + _step(node, **result)}
+        ledger.log_run(config["configurable"]["thread_id"], path, invoice.source_file if invoice else Path(state["path"]).name,
                        invoice.vendor_name if invoice else None, invoice.total if invoice else None,
-                       currency_of(invoice) if invoice else None, result["status"], by, review["reviewer"] if review else None,
-                       json.dumps(summary, default=_plain))
+                       currency_of(invoice) if invoice else None, status, by, review["reviewer"] if review else None,
+                       reasons, note, json.dumps(summary, default=_plain))
 
     def pay(state: State, config) -> dict:
         """Stage 4, approved branch. Pay through the ledger, which pays any one invoice only once.
@@ -323,7 +349,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         result = {**payment, "status": status, **({"approved_by": review["reviewer"]} if review else {}),
                   **({"usd_estimate": estimate} if estimate else {})}
         settle(state, seen.RECEIVED if status == "PAYMENT_NOT_SENT" else status, payment.get("error") or payment["payment_key"])
-        finish(state, config, result)
+        finish(state, config, "pay", result)
         return {"result": result, "trail": _step("pay", **result)}
 
     def hold(state: State, config) -> dict:
@@ -365,13 +391,13 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         else:
             result = {"status": "REJECTED", "reasons": list(state["decision"].because)}
         settle(state, "REJECTED", ", ".join(result["reasons"]))
-        finish(state, config, result)
+        finish(state, config, "reject", result)
         return {"result": result, "trail": _step("reject", **result)}
 
     def failed(state: State, config) -> dict:
         """The file couldn't be read at all, so there is no invoice to decide on."""
         result = {"status": "ERROR", "error": state["error"]}
-        finish(state, config, result)
+        finish(state, config, "failed", result)
         return {"result": result, "trail": _step("failed", **result)}
 
     # --- Routers. A conditional edge calls one of these and goes to the node it names. --------
@@ -433,7 +459,7 @@ def _plain(value):
         return value.isoformat()
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return dataclasses.asdict(value)
-    raise TypeError(f"can't serialise {type(value).__name__}")
+    return str(value)  # a record for people to read: an unfamiliar value is better written as text than not at all
 
 
 def _thread(thread_id: str) -> dict:

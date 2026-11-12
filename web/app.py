@@ -22,11 +22,12 @@ page the reviewer has open could point its own domain at 127.0.0.1 and post deci
 import dataclasses
 import json
 import sqlite3
+from decimal import Decimal, InvalidOperation
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -43,6 +44,7 @@ from pipeline.graph import _thread
 from rates import MockRates
 
 STATIC = Path(__file__).parent / "static"
+LIST_LIMIT = 200  # rows sent per list of finished invoices, unless the request asks for another number
 
 
 class Decision(BaseModel):
@@ -77,12 +79,17 @@ def _summary(entry: dict, state: dict, rates) -> dict:
     }
 
 
-def _decided(entry: dict, payments: dict) -> dict:
-    """One row of the decided list, with the payment made for it, if any: its amount, currency and whether it confirmed."""
+def _decided(entry: dict, payments: dict, logged: set) -> dict:
+    """One row of the decided list, with the payment made for it, if any: its amount, currency and whether it confirmed.
+
+    `run` is the name of the finished run to open for the full record, or None if none was logged
+    (an entry closed as lost or superseded, or a decision made before runs were logged).
+    """
     payment = None
     if entry["number_key"] is not None:
         payment = payments.get(payment_key(entry["vendor_key"], entry["number_key"], entry["revision"]))
-    return {"id": entry["id"], "file": entry["source_file"], "vendor": entry["vendor"], "total": entry["total"],
+    return {"id": entry["id"], "run": entry["thread_id"] if entry["thread_id"] in logged else None,
+            "file": entry["source_file"], "vendor": entry["vendor"], "total": entry["total"],
             "status": entry["status"], "action": entry["action"], "reviewer": entry["reviewer"], "note": entry["note"],
             "payment": payment and entry["action"] == "approve" and {
                 "amount": payment["amount"], "currency": payment["currency"], "status": payment["status"]} or None}
@@ -141,13 +148,25 @@ def _decided_outcome(row: dict) -> str:
     return "other"
 
 
-def _mentions(text: str, *fields) -> bool:
+def _amount_text(total) -> str:
+    """A stored total in the forms someone might type it: 15000, 15000.00, 15,000.00 and $15,000.00."""
+    try:
+        amount = Decimal(str(total))
+    except (InvalidOperation, ValueError):
+        return ""
+    return f"{total} {amount:.2f} ${amount:,.2f}"     # "15,000.00" is inside "$15,000.00"
+
+
+def _mentions(text: str, *fields, total=None) -> bool:
     """Whether every word of a search appears somewhere in a row's fields, ignoring case.
 
-    A flag code matches as written and in words, so "stock exceeded" finds STOCK_EXCEEDED.
+    A flag code matches as written and in words, so "stock exceeded" finds STOCK_EXCEEDED. An
+    amount matches as stored and as the screen shows it, so "15,000" and "$15,000.00" find 15000.
     """
+    if not text.strip():
+        return True
     haystack = " ".join(str(f) for f in fields if f).lower()
-    haystack += " " + haystack.replace("_", " ")
+    haystack += " " + haystack.replace("_", " ") + " " + _amount_text(total)
     return all(word in haystack for word in text.lower().split())
 
 
@@ -156,19 +175,11 @@ WHO = {"policy": "The policy", "policy+agent": "The policy, with the reviewer ag
 
 
 def _run_summary(run: dict) -> dict:
-    """One row of the list of finished runs: what happened to a file, who resolved it and why."""
-    summary = json.loads(run["summary"])
-    result, decision = summary["result"], summary.get("decision") or {}
-    note = None
-    if run["status"].startswith("SKIPPED"):
-        note = f"A copy of {result['earlier_file']}, which was {result['earlier_status'].lower()}"
-    elif run["status"] == "ERROR":
-        note = result["error"]
-    elif run["resolved_by"] == "person":
-        note = (summary.get("review") or {}).get("note")
+    """One row of the list of finished runs: what happened to a file, who resolved it and why. Read from the run's columns alone."""
     return {"run": run["thread_id"], "file": run["source_file"], "vendor": run["vendor"], "total": run["total"],
-            "currency": run["currency"] or "USD", "status": run["status"], "by": run["resolved_by"], "who": WHO[run["resolved_by"]],
-            "reviewer": run["reviewer"], "reasons": list(decision.get("because") or decision.get("warnings") or []), "note": note}
+            "currency": run["currency"] or "USD", "status": run["status"], "by": run["resolved_by"],
+            "who": WHO.get(run["resolved_by"], run["resolved_by"]), "reviewer": run["reviewer"],
+            "reasons": [r for r in (run["reasons"] or "").split(", ") if r], "note": run["note"]}
 
 
 def _run_detail(run: dict) -> dict:
@@ -230,13 +241,15 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
         return graph.get_state(_thread(entry["thread_id"])).values
 
     @app.get("/api/queue")
-    def queue(q: str = "", outcome: str = ""):
+    def queue(q: str = "", outcome: str = "", limit: int = Query(LIST_LIMIT, ge=1, le=1000)):
         """The three lists, optionally narrowed.
 
         Args:
             q: Words to look for. A row is kept if every word appears in its file name, vendor,
                 total, reasons, note or reviewer. Empty: no narrowing.
             outcome: One of OUTCOMES, to keep only rows of that kind. Empty: all kinds.
+            limit: The most rows to send for each of the two lists of finished invoices, newest
+                first. Every waiting invoice is always sent: those are the ones needing action.
         """
         if outcome and outcome not in OUTCOMES:
             raise HTTPException(400, f"outcome must be one of: {', '.join(OUTCOMES)}")
@@ -247,18 +260,21 @@ def create_app(ledger_path="ledger.db", checkpoints_path="checkpoints.db", rates
             # Narrowed on the queue row, before the saved run is read: a search that matches two
             # invoices loads two runs, not all of them.
             keep = [e for e in held if outcome in ("", "waiting")
-                    and _mentions(q, e["source_file"], e["vendor"], e["total"], e["reasons"])]
+                    and _mentions(q, e["source_file"], e["vendor"], e["reasons"], e["reviewer"], total=e["total"])]
             waiting = [_summary(e, saved(graph, e), rates) | {"stuck": e["id"] in stuck and {"action": e["action"], "reviewer": e["reviewer"]}}
                        for e in keep]
             payments = {p["payment_key"]: p for p in ledger.payments()}
-            all_decided = [_decided(e, payments) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
-            decided = [d for d in all_decided if outcome in ("", _decided_outcome(d))
-                       and _mentions(q, d["file"], d["vendor"], d["total"], d["reviewer"], d["note"], d["status"])]
-            all_automatic = [_run_summary(r) for r in ledger.runs() if r["resolved_by"] != "person"]
+            runs = ledger.runs()   # the list columns only: no run's evidence is read or parsed here
+            logged = {r["thread_id"] for r in runs}
+            all_decided = [_decided(e, payments, logged) for e in everything if e["status"] != "WAITING" and e["id"] not in stuck]
+            decided = [d for d in all_decided[::-1] if outcome in ("", _decided_outcome(d))
+                       and _mentions(q, d["file"], d["vendor"], d["reviewer"], d["note"], d["status"], total=d["total"])]
+            all_automatic = [_run_summary(r) for r in runs if r["resolved_by"] != "person"]
             automatic = [a for a in all_automatic if outcome in ("", _outcome_of(a["status"]))
-                         and _mentions(q, a["file"], a["vendor"], a["total"], " ".join(a["reasons"]), a["note"], a["who"], a["status"])]
-            return _plain({"waiting": waiting, "decided": decided[::-1], "automatic": automatic,
-                           # How many there are before narrowing, so the screen can say "2 of 14".
+                         and _mentions(q, a["file"], a["vendor"], " ".join(a["reasons"]), a["note"], a["who"], a["status"], total=a["total"])]
+            return _plain({"waiting": waiting, "decided": decided[:limit], "automatic": automatic[:limit],
+                           # How many there are in all, so the screen can say "2 of 14" when a list
+                           # is narrowed or cut short.
                            "of": {"waiting": len(held), "decided": len(all_decided), "automatic": len(all_automatic)},
                            "paid": ledger.paid_totals(), "payments": len(ledger.payments())})
 

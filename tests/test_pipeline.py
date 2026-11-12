@@ -1,5 +1,6 @@
 """The pipeline graph: its shape, the path each invoice takes, and that it decides exactly as the policy does."""
 import json
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -740,3 +741,62 @@ def test_two_decisions_on_one_invoice_the_second_is_refused_and_nothing_resumes_
         release(graph, ledger, queue_id, "approve", "Second Reviewer")
     assert ledger.payments() == [] and ledger.invoices()[0]["status"] == "HELD"
 
+
+
+# --- The log of finished runs ------------------------------------------------------------------------
+
+def test_a_run_log_that_cannot_be_written_does_not_fail_the_run(graph, ledger, monkeypatch, capsys):
+    """The payment goes out, then writing the log entry fails. The run still ends PAID with its result, and the failure is reported on stderr: a paid invoice is never reported as a failed run."""
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ledger, "log_run", broken)
+    state = run(graph, INVOICES / "invoice_1004.json")
+    assert state["result"]["status"] == "PAID" and nodes(state)[-1] == "pay" and len(ledger.payments()) == 1
+    warning = capsys.readouterr().err
+    assert "invoice_1004.json (PAID) could not be logged (OperationalError: database is locked)" in warning
+    assert ledger.runs() == []
+
+
+def test_an_unfamiliar_value_in_the_state_is_logged_as_text():
+    """The log's JSON never fails on a type it doesn't know: the value is written as text."""
+    import json
+    from pipeline.graph import _plain
+    assert json.loads(json.dumps({"a": frozenset({1}), "p": Path("x/y.txt"), "d": Decimal("1.50")}, default=_plain)) == {
+        "a": "frozenset({1})", "p": "x/y.txt", "d": "1.50"}
+
+
+def test_a_file_that_ends_the_same_way_every_run_is_logged_once_and_by_its_path(graph, ledger, tmp_path):
+    """An unreadable file and a second copy reach the same outcome on every run over their folder: each is logged the first time only. The key is the file's full path, so a file with the same name in another folder is its own file."""
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    for _ in range(3):
+        assert run(graph, broken)["result"]["status"] == "ERROR"
+    assert [r["status"] for r in ledger.runs()] == ["ERROR"]
+
+    run(graph, INVOICES / "invoice_1004.json")
+    for folder in ("january", "february"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "copy.json").write_text((INVOICES / "invoice_1004.json").read_text())
+    for folder in ("january", "february", "january"):
+        assert run(graph, tmp_path / folder / "copy.json")["result"]["status"] == "SKIPPED_DUPLICATE"
+    skipped = [r for r in ledger.runs() if r["status"] == "SKIPPED_DUPLICATE"]
+    assert sorted(Path(r["source_path"]).parent.name for r in skipped) == ["february", "january"]
+    assert {r["source_file"] for r in skipped} == {"copy.json"}
+
+
+def test_a_ledger_from_before_the_run_columns_is_upgraded_and_written_by_column_name(tmp_path):
+    """A ledger whose runs table has the first version's ten columns gains the new ones on opening, and a run logged into it lands in the right columns whatever their order."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE runs (thread_id TEXT PRIMARY KEY, source_file TEXT NOT NULL, vendor TEXT, total TEXT, currency TEXT, "
+                "status TEXT NOT NULL, resolved_by TEXT NOT NULL, reviewer TEXT, summary TEXT NOT NULL, finished_at TEXT NOT NULL)")
+    old.execute("INSERT INTO runs VALUES ('t0','old.json','V','10','USD','PAID','policy',NULL,'{}','2026-01-01T00:00:00')")
+    old.commit()
+    old.close()
+    ledger = Ledger(path)
+    ledger.log_run("t1", "/in/new.json", "new.json", "Vendor", Decimal("12.50"), "USD", "REJECTED", "policy", None, ["TOTAL_MISMATCH"], None, "{}")
+    new, before = ledger.runs()
+    assert (new["source_file"], new["source_path"], new["status"], new["reasons"], new["total"]) == (
+        "new.json", "/in/new.json", "REJECTED", "TOTAL_MISMATCH", "12.5")
+    assert (before["source_file"], before["status"], before["reasons"], before["source_path"]) == ("old.json", "PAID", None, None)

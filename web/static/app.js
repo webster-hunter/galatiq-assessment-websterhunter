@@ -72,9 +72,9 @@ function filters() {
         params.set("outcome", outcome);
     return params.toString();
 }
-/** "3" when a list is whole, "2 of 14" when it is narrowed. */
+/** "3" when the whole list is shown, "2 of 14" when it is narrowed or cut short. */
 function countOf(shown, all, narrowed) {
-    return narrowed ? `${shown} of ${all}` : String(shown);
+    return narrowed || shown !== all ? `${shown} of ${all}` : String(shown);
 }
 async function loadQueue(openFirst = true) {
     let queue;
@@ -106,9 +106,23 @@ async function loadQueue(openFirst = true) {
         return el("li", {}, button);
     });
     $("waiting").replaceChildren(...(rows.length ? rows : [el("li", { class: "empty" }, none ?? "Nothing is waiting.")]));
-    const decided = queue.decided.map((d) => el("li", { class: "done" }, el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"), el("span", { class: `tag ${d.action ?? ""}` }, d.action === "approve" ? "Approved" : d.action === "reject" ? "Rejected" : d.status)), el("div", { class: "small" }, `${d.file} · ${d.reviewer ?? "nobody"}`
-        + (d.payment?.status === "PAID" ? ` · paid ${money(d.payment.amount, d.payment.currency)}` : "")), d.payment && d.payment.status !== "PAID"
-        ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null, d.note ? el("div", { class: "small" }, `“${d.note}”`) : null));
+    const decided = queue.decided.map((d) => {
+        const parts = [
+            el("div", { class: "row" }, el("strong", {}, d.vendor ?? "No vendor named"), el("span", { class: `tag ${d.action ?? ""}` }, d.action === "approve" ? "Approved" : d.action === "reject" ? "Rejected" : d.status)),
+            el("div", { class: "small" }, `${d.file} · ${d.reviewer ?? "nobody"}`
+                + (d.payment?.status === "PAID" ? ` · paid ${money(d.payment.amount, d.payment.currency)}` : "")),
+            d.payment && d.payment.status !== "PAID"
+                ? el("div", { class: "small warn" }, `Payment of ${money(d.payment.amount, d.payment.currency)} was sent but not confirmed: check with the bank`) : null,
+            d.note ? el("div", { class: "small" }, `“${d.note}”`) : null
+        ];
+        const run = d.run;
+        if (run === null)
+            return el("li", { class: "done" }, ...parts); // no finished run on record: nothing to open
+        const button = el("button", { type: "button", "aria-current": String(run === selectedRun) }, ...parts);
+        button.dataset.run = run;
+        button.addEventListener("click", () => selectRun(run));
+        return el("li", {}, button);
+    });
     $("decided").replaceChildren(...(decided.length ? decided : [el("li", { class: "empty" }, none ?? "No decisions yet.")]));
     $("automatic-count").textContent = countOf(queue.automatic.length, queue.of.automatic, narrowed);
     const automatic = queue.automatic.map((a) => {
@@ -123,14 +137,18 @@ async function loadQueue(openFirst = true) {
         selected = null;
     if (selected === null && selectedRun === null && openFirst && queue.waiting.length)
         await select(queue.waiting[0].id);
-    if (selected === null && selectedRun === null && openFirst)
-        $("detail").replaceChildren(el("p", { class: "empty" }, "Nothing is waiting for a decision."));
+    if (selected === null && selectedRun === null && openFirst) {
+        const hidden = queue.of.waiting - queue.waiting.length; // waiting, but not matching the search or filter
+        $("detail").replaceChildren(el("p", { class: "empty" }, hidden > 0
+            ? `No waiting invoice matches the search or filter. ${hidden} ${hidden === 1 ? "is" : "are"} waiting: clear the search to see ${hidden === 1 ? "it" : "them"}.`
+            : "Nothing is waiting for a decision."));
+    }
 }
 function highlight() {
     document.querySelectorAll("#waiting button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === String(selected))));
-    document.querySelectorAll("#automatic button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.run === selectedRun)));
+    document.querySelectorAll("#automatic button, #decided button").forEach((b) => b.setAttribute("aria-current", String(b.dataset.run === selectedRun)));
 }
-/** Show a run that finished without a person: the same evidence as a held invoice, and how it ended in place of the form. */
+/** Show a finished run, whoever resolved it: the same evidence as a held invoice, and how it ended in place of the form. */
 async function selectRun(run) {
     selected = null;
     selectedRun = run;
@@ -235,7 +253,7 @@ function render(d) {
         el("h3", {}, "Line items"), el("div", { class: "scroll" }, lines),
         d.notes ? el("p", { class: "small" }, `Vendor's notes: ${d.notes}`) : null,
         notes.length ? el("details", {}, el("summary", {}, `Other notes on this invoice (${notes.length})`), flagList(notes)) : null,
-        el("details", {}, el("summary", {}, "Steps taken so far"), el("pre", {}, d.trail.map((t) => JSON.stringify(t)).join("\n"))),
+        el("details", {}, el("summary", {}, d.resolved ? "Steps taken" : "Steps taken so far"), el("pre", {}, d.trail.map((t) => JSON.stringify(t)).join("\n"))),
         d.resolved ? null : decisionForm(d, pays)
     ];
     $("detail").replaceChildren(...parts.filter((p) => p !== null));

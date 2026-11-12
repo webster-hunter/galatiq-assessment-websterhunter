@@ -73,12 +73,15 @@ An invoice resolved without a person, opened from the list:
 
 ![An invoice paid by the policy, with the reviewer agent's reason](review-screen-resolved.png)
 
-The left column lists what is waiting, what a reviewer has decided, and what was resolved
+The left column lists what is waiting, what a reviewer has decided (each can be opened to see
+what they decided on), and what was resolved
 without a person: paid or rejected by the policy (with the reviewer agent's reason where it wrote
 one), or skipped by the ledger as a second copy. Any of those can be opened to see the same
 evidence, read-only, with how it ended in place of the decision form. A search box and an outcome
 filter at the top narrow all three lists: the search matches vendor, file name, reason (as a flag
-code or in words), note and reviewer, and each list then shows "2 of 14". The right shows one invoice:
+code or in words), note, reviewer and amount (as stored or as shown, so `15,000` finds
+$15,000.00), and each list then shows "2 of 14". The two lists of finished invoices send at most
+200 rows each, newest first. The right shows one invoice:
 why it is held, with each flag explained; the reviewer agent's advice, its questions and what it
 looked up; the lines; and what approving would pay. The reviewer enters their name, and a note if
 rejecting.
@@ -137,7 +140,10 @@ checkpoints. Three things keep them from drifting apart:
 
 Runs that reach an outcome have their saved states deleted; only paused runs are kept. What a
 finished run found and how it ended is written to the ledger's `runs` table as it ends, one row
-per file, which is what the screen reads for resolved invoices.
+per file, which is what the screen reads for resolved invoices. An outcome a file reaches on every
+run (a copy skipped again, a file that still can't be read) is logged the first time only. If the
+log can't be written the run still ends as it did, with a warning: a payment that went out is
+never reported as a failed run.
 
 ## Exchange rates
 
