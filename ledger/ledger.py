@@ -122,6 +122,10 @@ class Ledger:
         self._db = sqlite3.connect(str(path))
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
+        # Added after the first version of the queue: the dollar amount a reviewer set. A ledger
+        # file made before then gets the column here, since CREATE TABLE IF NOT EXISTS won't add it.
+        if "amount" not in {row["name"] for row in self._db.execute("PRAGMA table_info(review_queue)")}:
+            self._db.execute("ALTER TABLE review_queue ADD COLUMN amount TEXT")
         self._pay, self._now = pay, now
 
     def close(self) -> None:
@@ -282,12 +286,12 @@ class Ledger:
         row = self._db.execute("SELECT * FROM review_queue WHERE id=?", (queue_id,)).fetchone()
         return dict(row) if row else None
 
-    def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None) -> None:
-        """Record a person's decision on a queued invoice: who, what, and why."""
+    def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None, amount: Decimal | None = None) -> None:
+        """Record a person's decision on a queued invoice: who, what, why, and any amount they set."""
         with self._db:
-            self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, resolved_at=? "
+            self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, amount=?, resolved_at=? "
                              "WHERE thread_id=? AND status='WAITING'",
-                             (action, reviewer, note, self._now().isoformat(), thread_id))
+                             (action, reviewer, note, _plain(amount) or None, self._now().isoformat(), thread_id))
 
     def invoices(self) -> list[dict]:
         """Every invoice on record, oldest identity first."""

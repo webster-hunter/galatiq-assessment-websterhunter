@@ -369,17 +369,70 @@ def test_a_later_revision_counts_what_was_actually_paid(graph, ledger, tmp_path)
     assert ledger.total_paid() == Decimal("5940")
 
 
-@pytest.mark.parametrize("name, why", [
-    ("invoice_1014.xml", "billed in EUR"),
-])
-def test_some_holds_can_only_be_rejected(graph, ledger, name, why):
-    """A reviewer can overrule a hold, within limits: an invoice in another currency can't be paid in dollars whoever approves it. It stays in the queue until rejected."""
-    queue_id, state = held(graph, name)
-    assert why in cannot_approve(state["invoice"])
-    with pytest.raises(ValueError, match="can't be approved"):
-        release(graph, ledger, queue_id, "approve", "Dana Lee")
-    assert [e["id"] for e in ledger.queue()] == [queue_id] and ledger.payments() == []
-    assert release(graph, ledger, queue_id, "reject", "Dana Lee", "We pay in USD only")["result"]["status"] == "REJECTED"
+def test_some_holds_can_only_be_rejected(graph, ledger, tmp_path):
+    """A reviewer can overrule a hold, within limits: an invoice that conflicts with one on record, or has no invoice number, can't be paid correctly whoever approves it. It stays in the queue until rejected."""
+    run(graph, INVOICES / "invoice_1015.csv")
+    conflict = tmp_path / "copy.csv"
+    conflict.write_text((INVOICES / "invoice_1015.csv").read_text().replace("WidgetA,10,250.00,2500.00", "WidgetA,12,250.00,3000.00")
+                        .replace("6500.00", "7000.00"))
+    unnumbered = tmp_path / "unnumbered.json"
+    unnumbered.write_text(json.dumps(json.loads((INVOICES / "invoice_1004.json").read_text()) | {"invoice_number": None}))
+    for path, why in ((conflict, "already on record"), (unnumbered, "no invoice number")):
+        state = run(graph, path)
+        queue_id = state["result"]["queue_id"]
+        assert why in cannot_approve(state["invoice"])
+        with pytest.raises(ValueError, match="can't be approved"):
+            release(graph, ledger, queue_id, "approve", "Dana Lee")
+        assert queue_id in [e["id"] for e in ledger.queue()]
+        assert release(graph, ledger, queue_id, "reject", "Dana Lee", "Send a corrected invoice")["result"]["status"] == "REJECTED"
+    assert ledger.total_paid() == Decimal("6500")  # only the original 1015
+
+
+def test_an_invoice_in_another_currency_is_approved_with_a_dollar_amount(graph, ledger):
+    """1014 is billed 4,125.00 EUR. The reviewer states the dollars to pay and the rate; that amount is paid, and the invoice's own total, currency and the implied rate are kept with the decision."""
+    queue_id, _ = held(graph, "invoice_1014.xml")
+    state = release(graph, ledger, queue_id, "approve", "Dana Lee", "EUR at 1.0861, treasury rate 26 Jan", amount=Decimal("4480.00"))
+    converted = {"invoice_total": Decimal("4125.00"), "invoice_currency": "EUR", "implied_rate": Decimal("1.0861")}
+    assert state["result"]["status"] == "PAID" and state["result"]["amount"] == Decimal("4480.00")
+    assert state["result"]["converted"] == converted and state["review"]["converted"] == converted
+    [entry] = ledger.queue(status=None)
+    assert (entry["action"], entry["reviewer"], entry["amount"], entry["note"]) == (
+        "approve", "Dana Lee", "4480", "EUR at 1.0861, treasury rate 26 Jan")
+    assert [Decimal(p["amount"]) for p in ledger.payments()] == [Decimal("4480")]
+
+
+def test_the_dollar_amount_is_required_explained_and_only_for_other_currencies(graph, ledger):
+    """No rate is ever guessed: a EUR approval without an amount is refused, as is an amount without a note, a zero amount, an amount on a rejection, and an amount on an invoice already in dollars."""
+    eur, _ = held(graph, "invoice_1014.xml")
+    usd, _ = held(graph, "invoice_1016.json")
+    for kwargs, message in (
+            (dict(action="approve"), "give the dollar amount to pay"),
+            (dict(action="approve", amount=Decimal("4480")), "an amount needs a note"),
+            (dict(action="approve", amount=Decimal("0"), note="rate"), "more than zero"),
+            (dict(action="reject", amount=Decimal("4480"), note="no"), "only applies to an approval")):
+        with pytest.raises(ValueError, match=message):
+            release(graph, ledger, eur, reviewer="Dana Lee", **kwargs)
+    with pytest.raises(ValueError, match="billed in dollars"):
+        release(graph, ledger, usd, "approve", "Dana Lee", "rounding", amount=Decimal("3000"))
+    assert [e["status"] for e in ledger.queue(status=None)] == ["WAITING", "WAITING"] and ledger.payments() == []
+    # The dollar invoice is approved the ordinary way, for its own total.
+    assert release(graph, ledger, usd, "approve", "Dana Lee")["result"]["amount"] == Decimal("3233.00")
+
+
+def test_a_ledger_from_before_the_amount_column_still_opens(tmp_path):
+    """A ledger file created before reviewers could set an amount gains the column on opening, and works."""
+    import sqlite3
+    path = tmp_path / "old.db"
+    Ledger(path).close()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE review_queue DROP COLUMN amount")
+    db.commit()
+    db.close()
+    ledger = Ledger(path, pay=lambda vendor, amount: None)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
+    queue_id, _ = held(graph, "invoice_1014.xml")
+    release(graph, ledger, queue_id, "approve", "Dana", "rate 1.09", amount=Decimal("4496.25"))
+    assert ledger.queue(status=None)[0]["amount"] == "4496.25"
 
 
 def test_a_decision_needs_a_name_a_reason_to_reject_and_a_waiting_invoice(graph, ledger):
@@ -429,7 +482,7 @@ def test_a_run_paused_in_one_process_is_resumed_from_another(tmp_path):
 
 
 def test_review_command_lists_shows_and_decides(capsys, tmp_path):
-    """review.py against what main.py left behind: the list, one invoice in full, a refused approval (exit 1), and a rejection."""
+    """review.py against what main.py left behind: the list, one invoice in full, a refused approval (exit 1), and an approval with a dollar amount."""
     import review
     where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")]
     main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
@@ -441,12 +494,16 @@ def test_review_command_lists_shows_and_decides(capsys, tmp_path):
 
     assert review.main([*where, "show", "1"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert "EUR" in shown["cannot_approve_because"] and shown["invoice"]["currency"] == "EUR"
+    assert shown["approval_needs_dollar_amount"] is True and shown["cannot_approve_because"] is None
+    assert shown["invoice"]["currency"] == "EUR"
 
     assert review.main([*where, "approve", "1", "--by", "Dana"]) == 1
-    assert "can't be approved" in capsys.readouterr().err
+    assert "give the dollar amount to pay (--amount)" in capsys.readouterr().err
+    assert review.main([*where, "approve", "1", "--by", "Dana", "--amount", "lots", "--note", "rate"]) == 1
+    assert "plain dollar amount" in capsys.readouterr().err
 
-    assert review.main([*where, "reject", "1", "--by", "Dana", "--note", "USD only"]) == 0
+    assert review.main([*where, "approve", "1", "--by", "Dana", "--amount", "$4,480.00", "--note", "EUR at 1.0861"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert (out["result"]["status"], out["review"]["reviewer"]) == ("REJECTED", "Dana")
+    assert (out["result"]["status"], out["result"]["amount"], out["review"]["reviewer"]) == ("PAID", "4480.00", "Dana")
+    assert out["result"]["converted"] == {"invoice_total": "4125.00", "invoice_currency": "EUR", "implied_rate": "1.0861"}
     assert review.main(where) == 0 and "Nothing is waiting" in capsys.readouterr().out

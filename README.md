@@ -336,6 +336,7 @@ python review.py                                  # what is waiting
 python review.py show 3                           # one invoice in full: flags, and the steps so far
 python review.py approve 3 --by "Dana Lee" --note "Stock arriving Friday"
 python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send a corrected invoice"
+python review.py approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.0861, treasury rate 26 Jan"
 ```
 
 ```
@@ -349,8 +350,14 @@ python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send 
   reviewer's note as the reason. The reviewer's name, decision and note are kept in the ledger,
   and the policy's original decision stays on the record beside them.
 - **A person can overrule a hold, within limits.** Some holds can only be rejected, because the
-  invoice can't be paid correctly whoever approves it: one in another currency, one with no
-  invoice number, one that conflicts with an invoice already on record. The command says why.
+  invoice can't be paid correctly whoever approves it: one with no invoice number, or one that
+  conflicts with an invoice already on record. The command says why.
+- **An invoice in another currency is approved with a dollar amount.** The system holds no
+  exchange rates and never guesses one. The reviewer states the dollars to pay (`--amount`) and,
+  in the note, the rate and where it came from. That amount is paid, and the invoice's own
+  total, its currency and the rate the amount implies are kept with the decision, so a slipped
+  digit shows. `--amount` is refused for an invoice already in dollars, whose amount comes from
+  the invoice.
 - **A revision of a paid invoice is released for the difference.** Approving 1004's revision
   ($5,940.00) after the original was paid ($1,890.00) pays $4,050.00.
 - **A rejection needs a note,** since it is what goes back to the vendor.
@@ -693,7 +700,8 @@ also carries `CURRENCY_ASSUMED`.
 - Scanned PDFs with no text layer (they need OCR first; the loader says so).
 - Fuzzy product matching: a typo or a longer name such as "WidgetA (rush order)" in a structured
   file is left as written and flagged `UNKNOWN_PRODUCT`. Only spacing, hyphen and case variants are matched.
-- Currency conversion: a non-USD invoice is held for review, not converted.
+- Automatic currency conversion: a non-USD invoice is held, and the reviewer who approves it
+  supplies the dollar amount. There is no rate table.
 - Confirming an assumed currency. An invoice that names none is read as USD and says so
   (`CURRENCY_ASSUMED`). A vendor who bills in another dollar and writes only `$` can't be told apart
   from the invoice alone; that needs a vendor record giving each vendor's billing currency.

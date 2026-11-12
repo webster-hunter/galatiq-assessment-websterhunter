@@ -111,8 +111,8 @@ keep the demo's saved runs apart too):
 ```bash
 python review.py --ledger demo.db                                     # seven invoices waiting
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014 in EUR: refused, with the reason
-python review.py --ledger demo.db reject 6 --by "Dana Lee" --note "We pay in USD only"
+python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014 in EUR: asks for a dollar amount
+python review.py --ledger demo.db approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.0861, treasury rate 26 Jan"
 ```
 
 What to point at:
@@ -120,8 +120,10 @@ What to point at:
 - **`main.py` has exited.** Each held invoice is a pipeline run saved mid-flight; `review.py` is a
   separate process that picks one up and lets it finish.
 - **The revision pays $4,050.00, not $5,940.00,** because $1,890.00 already went out.
-- **The EUR invoice can't be approved by anyone,** only rejected: a person can overrule the
-  policy, but not into paying euros as dollars.
+- **The EUR invoice needs a dollar amount.** The system holds no exchange rates and won't guess
+  one, so approving it bare is refused. With `--amount` and a note giving the rate, it pays that
+  amount and shows the invoice's own total, currency and the implied rate beside it. (1.0861 is
+  an example rate for the demo, not a quoted one.)
 - **Every decision carries a name and a note** in the ledger.
 
 How to say it: the system never asks a person to do what it can do, and never does what a person

@@ -3,15 +3,19 @@
     python review.py                                   list what is waiting
     python review.py show 3                            one invoice in full: its flags and the steps so far
     python review.py approve 3 --by "Dana Lee"         release it for payment
+    python review.py approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.0861, treasury rate 26 Jan"
     python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send a corrected invoice"
 
 A held invoice is a pipeline run paused at its await_review step (see pipeline/graph.py). Deciding
 it resumes that run, in this process, from where main.py left it: approve goes on to payment,
 reject records the reason. Who decided, and why, is kept in the ledger.
 
-Some holds can't be approved, only rejected: an invoice in another currency, one with no invoice
-number, one that conflicts with an invoice already on record. A revision of an invoice that was
-already paid is released for the difference only.
+What approval pays: the invoice total; for a revision of an invoice already paid, the difference;
+for an invoice in another currency, the dollar amount the reviewer gives with --amount (the
+system holds no exchange rates, so the person who knows the rate states it, in the note).
+
+Some holds can't be approved, only rejected: an invoice with no invoice number, or one that
+conflicts with an invoice already on record.
 """
 import argparse
 import json
@@ -22,7 +26,8 @@ from pathlib import Path
 from extraction import Replay
 from ledger import Ledger
 from normalizer.__main__ import _json_default
-from pipeline import build_graph, cannot_approve, checkpointer, release
+from normalizer.parsing import _money
+from pipeline import build_graph, cannot_approve, checkpointer, needs_dollar_amount, release
 from pipeline.graph import _thread
 
 
@@ -49,7 +54,9 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=f"{name} a held invoice")
         p.add_argument("queue_id", type=int)
         p.add_argument("--by", required=True, help="who is deciding (recorded)")
-        p.add_argument("--note", help="why" + (" (required)" if name == "reject" else ""))
+        p.add_argument("--note", help="why" + (" (required)" if name == "reject" else " (required with --amount)"))
+        if name == "approve":
+            p.add_argument("--amount", help="dollars to pay, for an invoice billed in another currency")
     args = ap.parse_args(argv)
 
     if not Path(args.ledger).exists():
@@ -71,12 +78,19 @@ def main(argv: list[str] | None = None) -> int:
         saved = graph.get_state(_thread(entry["thread_id"])).values
         out = {"queue": entry}
         if saved:
-            out |= {"cannot_approve_because": cannot_approve(saved["invoice"]), "decision": asdict(saved["decision"]),
+            out |= {"cannot_approve_because": cannot_approve(saved["invoice"]),
+                    "approval_needs_dollar_amount": needs_dollar_amount(saved["invoice"]), "decision": asdict(saved["decision"]),
                     "trail": saved["trail"], "invoice": asdict(saved["invoice"])}
         print(json.dumps(out, indent=2, default=_json_default))
         return 0
     try:
-        state = release(graph, ledger, args.queue_id, args.command, args.by, args.note)
+        amount = None
+        if getattr(args, "amount", None) is not None:
+            try:
+                amount = _money(args.amount)  # "4480", "4,480.00" and "$4,480.00" all read as the same amount
+            except (ValueError, ArithmeticError):
+                raise ValueError(f"--amount must be a plain dollar amount, not {args.amount!r}") from None
+        state = release(graph, ledger, args.queue_id, args.command, args.by, args.note, amount=amount)
     except ValueError as e:
         print(e, file=sys.stderr)
         return 1
