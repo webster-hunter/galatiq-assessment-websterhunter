@@ -15,14 +15,15 @@ python main.py --invoice_path=data/invoices --offline
 | Outcome | Invoices | Why |
 |---|---|---|
 | **Paid**, 6 invoices, $26,325.00 | 1001, 1004, 1006, 1010, 1011, 1015 | Nothing to object to. 1010 carries two warnings, which the reviewer agent read and explained |
-| **Held** for a person, 5 | 1002, 1005 | More billed than is in stock, and $10,000 or over |
+| **Held** for a person, 6 | 1002, 1005 | More billed than is in stock, and $10,000 or over |
+| | 1016 | WidgetC is not in inventory but is one letter from WidgetA and WidgetB: a misspelling, or a new product? |
 | | 1012 | $25 under the $10,000 limit, after two scanner-damaged values and two product names were repaired |
 | | 1014 | Billed in euros: shown as 4,125.00 EUR (~$4,480.16) and paid in euros when released |
 | | 1004 revised | The original was already paid $1,890.00, so only the $4,050.00 difference can be owed |
-| **Rejected**, 6 | 1003 | Four fraud signals: an item with no stock, a due date of "yesterday", "URGENT... penalties", a request for a wire |
+| **Rejected**, 5 | 1003 | Four fraud signals: an item with no stock, a due date of "yesterday", "URGENT... penalties", a request for a wire |
 | | 1007, 1013 | The stated total doesn't match the lines: $110.00 short on 1007, $50.00 over on 1013 |
 | | 1009 | Negative quantity, negative total, no vendor |
-| | 1008, 1016 | A product that isn't in inventory: Acme doesn't stock it, so the line can't be checked or fulfilled |
+| | 1008 | SuperGizmo and MegaSprocket: not in inventory, and nothing in inventory has a similar name |
 | **Skipped** as duplicates, 3 | second copies of 1011, 1012, 1013 | The same invoice arrived in two formats; recognised by content, not file name |
 
 Three things in that table are easy to get wrong, and each is a test in this repo:
@@ -56,7 +57,7 @@ call the model live, copy `.env.example` to `.env`, add an xAI key, and drop `--
 steps taken, and the invoice as read) and a summary on stderr:
 
 ```
-5 held for review. See them with: python review.py --ledger ledger.db --checkpoints checkpoints.db
+6 held for review. See them with: python review.py --ledger ledger.db --checkpoints checkpoints.db
 20 files: paid 6 now ($26,325.00). Ledger ledger.db: 6 payments ($26,325.00) in all.
 ```
 
@@ -129,7 +130,7 @@ Three places, each fenced by code.
 | Use | What the model does | What stops it going wrong |
 |---|---|---|
 | **Extraction** | Transcribes a TXT or PDF into a fixed JSON schema, copying values as written, errors included | Every value must appear in the document (grounding). One that doesn't is sent back with the specific complaint, three attempts at most. A retry that drops data is never used |
-| **Reviewer agent** | Chooses lookups (stock, a vendor's history), recommends, and explains | It can add a hold to an approval and nothing else. It cannot approve, reject or pay. Once it adds a hold, only a person can remove it |
+| **Reviewer agent** | Chooses lookups (stock, similar products, a vendor's history), recommends, and explains | It can add a hold to an approval and nothing else. It cannot approve, reject or pay. Once it adds a hold, only a person can remove it |
 | **Critic** | Looks for claims the evidence doesn't support | Checks in code run first and count on their own: every figure must be in the invoice, the flags or a lookup result |
 
 The rule underneath all three: **a model can make the system stricter, never looser.** If the
@@ -146,13 +147,13 @@ Two loops, each judged by code and each with a hard stop.
 | Loop | Triggered by | On the samples |
 |---|---|---|
 | Extraction retry | A transcribed value that isn't in the document | 1 of 10 text files needed it (1002), and the second attempt was clean |
-| Reviewer and critic | A figure, flag code or claim the evidence doesn't support | 1 of 6 assessments was sent back (1010), by a check in code |
+| Reviewer and critic | A figure, flag code or claim the evidence doesn't support | 1 of 7 assessments was sent back (1010), by a check in code |
 
 Repairs are a third kind, with no model: a scanner's `O` for `0` is read only when another value
 on the invoice confirms it. On 1012, `$3,500.O0` is confirmed by 7 × $500.
 
 `python -m extraction.report data/invoices` compares every file with and without self-correction:
-flags that would hold an invoice fall from 39 to 30, for one extra model call, with 3 files
+flags that would hold an invoice fall from 41 to 32, for one extra model call, with 3 files
 better and none worse.
 
 ## What the brief asked for
@@ -182,8 +183,9 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 - **Stock is checked per invoice and doesn't run down** across invoices. The brief's own examples
   require this.
 - **"Over $10K" includes exactly $10,000.** The cautious reading.
-- **A product that isn't in inventory is rejected, not held.** The name must match after spacing,
-  hyphens and case are ignored, so a misspelled name is rejected too and the vendor resubmits.
+- **A product that isn't in inventory is rejected, unless its name is close to one that is.**
+  A near name ("WidgtA", "WidgetC") may be a misspelling, so a person decides. A name that
+  resembles nothing Acme stocks is rejected outright.
 - **An invoice that names no currency is in US dollars,** and says so in a note. A named foreign
   currency is paid in that currency, with a dollar estimate for the reviewer.
 - **Files are processed in name order,** so 1004 is paid before its revision is read, and the

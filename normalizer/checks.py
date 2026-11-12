@@ -3,6 +3,7 @@
 Each check adds a flag with a stable code and its evidence. Severity is graded separately
 (severity.py), so the checks only say what is wrong, not how much it matters.
 """
+import difflib
 import re
 import sqlite3
 from datetime import date
@@ -84,6 +85,25 @@ def usable_rate(rates, currency: str, on: date | None, today: date | None = None
     return rate, None
 
 
+def similar_products(name, inventory: dict) -> list[str]:
+    """Inventory product names that `name` could be a misspelling or a variant of, closest first.
+
+    Two ways to count as similar: the spelling is close ("WidgtA" or "WidgetC" to WidgetA), or
+    the name contains a product's whole name ("WidgetA (rush order)"). At most three are returned.
+    An empty list means the name resembles nothing in inventory.
+
+    Args:
+        name: The product name as written on the invoice.
+        inventory: Product name -> stock.
+    """
+    if not isinstance(name, str):
+        return []
+    known = [k for k in inventory if isinstance(k, str)]
+    close = difflib.get_close_matches(name, known, n=3, cutoff=0.6)
+    contained = [k for k in known if k not in close and len(k) >= 4 and k.lower() in name.lower()]
+    return (close + contained)[:3]
+
+
 def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None, today: date | None = None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
@@ -142,6 +162,10 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None, toda
         # TODO: exact name match; "WidgetA (rush order)"-style variants need SKU matching.
         elif inventory is not None and li.item not in inventory:
             invalid("item", "UNKNOWN_PRODUCT")
+            # A name near a real product's ("WidgtA", "WidgetC") may be a misspelling: a person
+            # decides. A name that resembles nothing we stock ("SuperGizmo") can't be one.
+            if not similar_products(li.item, inventory):
+                invalid("item", "PRODUCT_NOT_STOCKED")
         # Alongside UNKNOWN_PRODUCT, this says why "Widget A" wasn't found: its form, not a new product.
         unexpected_format(f"line_items[{i}].item", li.item, FORMATS["line_items[].item"])
 
@@ -228,7 +252,7 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None, toda
     if inventory is None:
         # Say so: an invoice whose products and stock were never checked must not look like one
         # that passed. 1016 (WidgetC) has no other flag.
-        flags.append({"code": "INVENTORY_NOT_CHECKED", "skipped": ["UNKNOWN_PRODUCT", "STOCK_EXCEEDED"]})
+        flags.append({"code": "INVENTORY_NOT_CHECKED", "skipped": ["UNKNOWN_PRODUCT", "PRODUCT_NOT_STOCKED", "STOCK_EXCEEDED"]})
     else:
         for item, qty in requested.items():
             if item not in inventory:

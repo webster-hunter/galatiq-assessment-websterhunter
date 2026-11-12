@@ -78,7 +78,7 @@ also carries the `CURRENCY_ASSUMED` note (INFO), left out below:
 | 1001, 1011 (txt and pdf) | Clean |
 | 1002 | Total $15,000.00 read from "Amt"; `STOCK_EXCEEDED` GadgetX (20 / 5); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for the bare number `1002`. Took two attempts (below) |
 | 1003 | Due date `yesterday` `UNPARSEABLE`; `STOCK_EXCEEDED` FakeItem (100 / 0); `OVER_APPROVAL_THRESHOLD`; `UNEXPECTED_FORMAT` for terms `Immediate`. The "URGENT" note is transcribed into `notes` and changes nothing |
-| 1008 | Both items `UNKNOWN_PRODUCT`; the email's From, To and Subject kept in `unexpected_fields` |
+| 1008 | Both items `UNKNOWN_PRODUCT` and `PRODUCT_NOT_STOCKED`; the email's From, To and Subject kept in `unexpected_fields` |
 | 1010 | Reconciles with shipping; the rush line is item WidgetA with note "rush order", so `DUPLICATE_ITEM`; vendor is Consolidated Materials Group, not the Bill To party |
 | 1012 (txt and pdf) | OCR damage copied as written by the model, then read by code: `$3,500.O0` is confirmed by 7 × $500 and `26-Jan-2O26` by Net 30 to the due date (`OCR_REPAIRED` ×2); "Widget A" and "Gadget X" are matched to the inventory's WidgetA and GadgetX (`ITEM_NAME_REPAIRED` ×2), and all three items are within stock; `UNEXPECTED_FORMAT` for `INV 1012`. No REVIEW or BLOCK flag remains; vendor is the FROM party, with "formerly FastShip Ltd." kept apart in `unexpected_fields` |
 | 1013 (pdf) | All eight lines; `STOCK_EXCEEDED` on all three items; `TOTAL_MISMATCH` (stated 22,562.80, computed 22,512.80); `OVER_APPROVAL_THRESHOLD` |
@@ -100,7 +100,7 @@ hold the invoice (BLOCK or REVIEW):
 
 | | Without | With |
 |---|---|---|
-| Holding flags across the 20 files | 39 | 30 |
+| Holding flags across the 20 files | 41 | 32 |
 | Model calls for the 10 TXT and PDF files | 10 | 11 |
 | Files improved / worse / unchanged | | 3 / 0 / 17 |
 

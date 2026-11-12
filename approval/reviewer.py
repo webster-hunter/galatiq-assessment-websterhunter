@@ -22,11 +22,11 @@ How it works is a tool-calling loop:
 
 The tools are read-only lookups. The model names a tool and arguments; this code runs it.
 """
-import difflib
 import json
 
 from extraction.providers import ProviderError
 from ledger.ledger import identity
+from normalizer.checks import similar_products
 from normalizer.severity import MEANING
 
 from .policy import APPROVE, HOLD, REJECT, STRICTNESS, Decision
@@ -136,8 +136,7 @@ def make_tools(inventory: dict | None, ledger, invoice=None) -> dict:
         return {"item": item, "found": False, "note": "not a product in inventory; try find_similar_products"}
 
     def find_similar_products(name: str) -> dict:
-        close = difflib.get_close_matches(name, [k for k in stock if isinstance(k, str)], n=3, cutoff=0.6)
-        return {"name": name, "similar": [{"item": k, "in_stock": stock[k]} for k in close]}
+        return {"name": name, "similar": [{"item": k, "in_stock": stock[k]} for k in similar_products(name, stock)]}
 
     def get_vendor_history(vendor: str) -> dict:
         rows = ledger.vendor_history(vendor) if ledger is not None else []

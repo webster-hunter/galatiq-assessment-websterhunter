@@ -29,8 +29,9 @@ SEVERITY = {
     "SUBTOTAL_MISMATCH": "BLOCK",
     "TAX_AMOUNT_MISMATCH": "BLOCK",
     "TOTAL_MISMATCH": "BLOCK",
-    "UNKNOWN_PRODUCT": "BLOCK",  # not a product we stock: nothing to check the line against, so it can't be paid
+    "PRODUCT_NOT_STOCKED": "BLOCK",  # an unknown product whose name resembles nothing in inventory: not a misspelling
     # A person must decide.
+    "UNKNOWN_PRODUCT": "REVIEW",  # may be a misspelling of a real product, or something we don't stock
     "UNPARSEABLE": "REVIEW",  # value couldn't be read; the flag carries the raw value
     "QTY_NOT_WHOLE": "REVIEW",  # stock is counted in whole units
     "DUE_DATE_MISSING": "REVIEW",  # can be looked up
@@ -93,6 +94,7 @@ MEANING = {
     "TOTAL_MISMATCH": "the stated total is not the lines plus tax and shipping",
     "UNPARSEABLE": "a value could not be read as the kind of value its field needs; `value` is the text as written",
     "UNKNOWN_PRODUCT": "a line's product name is not in inventory",
+    "PRODUCT_NOT_STOCKED": "a line's product name is not in inventory and resembles no product that is",
     "DUE_DATE_MISSING": "the invoice states no due date",
     "DUE_DATE_BEFORE_INVOICE_DATE": "the due date is earlier than the invoice date",
     "OVER_APPROVAL_THRESHOLD": "the total, in dollars, is at or above the amount that requires a person's review",

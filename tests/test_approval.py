@@ -22,7 +22,7 @@ EXPECTED = {
     "invoice_1005.json": (HOLD, "NEEDS_REVIEW", ("OVER_APPROVAL_THRESHOLD", "STOCK_EXCEEDED")),
     "invoice_1006.csv": (APPROVE, "NO_OBJECTION", ()),
     "invoice_1007.csv": (REJECT, "BLOCKING_FLAG", ("TOTAL_MISMATCH",)),
-    "invoice_1008.txt": (REJECT, "BLOCKING_FLAG", ("UNKNOWN_PRODUCT",)),
+    "invoice_1008.txt": (REJECT, "BLOCKING_FLAG", ("PRODUCT_NOT_STOCKED",)),
     "invoice_1009.json": (REJECT, "BLOCKING_FLAG", ("QTY_NON_POSITIVE", "VENDOR_MISSING", "TOTAL_NEGATIVE", "SUBTOTAL_MISMATCH")),
     "invoice_1010.txt": (APPROVE, "NO_OBJECTION", ()),
     "invoice_1011.pdf": (APPROVE, "NO_OBJECTION", ()),
@@ -35,7 +35,7 @@ EXPECTED = {
     "invoice_1013.pdf": (REJECT, "BLOCKING_FLAG", ("TOTAL_MISMATCH",)),
     "invoice_1014.xml": (HOLD, "NEEDS_REVIEW", ("CURRENCY_UNSUPPORTED",)),
     "invoice_1015.csv": (APPROVE, "NO_OBJECTION", ()),
-    "invoice_1016.json": (REJECT, "BLOCKING_FLAG", ("UNKNOWN_PRODUCT",)),
+    "invoice_1016.json": (HOLD, "NEEDS_REVIEW", ("UNKNOWN_PRODUCT",)),
 }
 
 
@@ -52,10 +52,10 @@ def test_policy_floor_on_each_sample(name):
 
 
 def test_every_sample_file_has_an_expected_decision():
-    """The table covers all 20 files: 8 approved, 5 held, 7 rejected."""
+    """The table covers all 20 files: 8 approved, 6 held, 6 rejected."""
     assert set(EXPECTED) == {p.name for p in INVOICES.iterdir()}
     outcomes = [v[0] for v in EXPECTED.values()]
-    assert (outcomes.count(APPROVE), outcomes.count(HOLD), outcomes.count(REJECT)) == (8, 5, 7)
+    assert (outcomes.count(APPROVE), outcomes.count(HOLD), outcomes.count(REJECT)) == (8, 6, 6)
 
 
 def F(code, severity, **more):

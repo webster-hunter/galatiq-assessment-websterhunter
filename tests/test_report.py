@@ -19,7 +19,7 @@ def test_self_correction_helps_three_files_and_harms_none():
     assert (s["files"], s["errors"], s["better"], s["worse"], s["same"]) == (20, 0, 3, 0, 17)
     assert (s["model_calls_without"], s["model_calls_with"]) == (10, 11)
     assert (s["retries_resolved"], s["retries_unresolved"], s["ocr_repairs"], s["name_repairs"]) == (1, 0, 4, 4)
-    assert (s["holding_flags_before"], s["holding_flags_after"]) == (39, 30)
+    assert (s["holding_flags_before"], s["holding_flags_after"]) == (41, 32)
     assert s["no_longer_held"] == ["invoice_1012.pdf", "invoice_1012.txt"]
 
 
@@ -33,7 +33,7 @@ def test_what_changed_for_each_improved_file():
     b = r["invoice_1012.txt"]
     assert (b["attempts"], b["ocr_repairs"], b["name_repairs"], b["change"]) == (1, 2, 2, "BETTER")
     assert b["before"]["holding"] == ["UNPARSEABLE", "UNPARSEABLE", "UNKNOWN_PRODUCT", "UNKNOWN_PRODUCT"]
-    assert (b["before"]["worst"], b["after"]["worst"], b["after"]["holding"]) == ("BLOCK", "WARN", [])
+    assert (b["before"]["worst"], b["after"]["worst"], b["after"]["holding"]) == ("REVIEW", "WARN", [])
 
 
 def test_the_vendors_problems_are_left_alone():
@@ -47,7 +47,7 @@ def test_the_vendors_problems_are_left_alone():
 def test_report_prints_a_table_and_a_missing_recording_is_an_error_row(tmp_path, capsys):
     """The CLI prints one line per file and the summary; a file with no recording is reported, not fatal."""
     table = render(list(rows().values()))
-    assert "invoice_1012.txt" in table and "BLOCK -> WARN" in table and "3 better, 0 worse, 17 unchanged" in table
+    assert "invoice_1012.txt" in table and "REVIEW -> WARN" in table and "3 better, 0 worse, 17 unchanged" in table
     out = measure([INVOICES / "invoice_1001.txt", INVOICES / "invoice_1004.json"], Replay(tmp_path), INVENTORY)
     assert out[0]["error"].startswith("ProviderError") and out[1]["change"] == "SAME"
     assert main([str(INVOICES / "invoice_1004.json"), "--inventory", str(tmp_path / "missing.db")]) == 1

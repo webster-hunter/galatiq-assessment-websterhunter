@@ -744,7 +744,7 @@ def test_missing_inventory_is_flagged():
     inv = normalizer.load(INVOICES / "invoice_1016.json")  # WidgetC: unknown product, but only an inventory can tell
     assert graded(inv) == [("REVIEW", "INVENTORY_NOT_CHECKED")]
     checked = normalizer.load(INVOICES / "invoice_1016.json", README_INVENTORY)
-    assert graded(checked) == [("BLOCK", "UNKNOWN_PRODUCT")]
+    assert graded(checked) == [("REVIEW", "UNKNOWN_PRODUCT")]
 
 
 def test_rounding_differences_are_not_mismatches(tmp_path):
@@ -1020,3 +1020,18 @@ def test_every_flag_code_has_a_plain_meaning():
     assert set(normalizer.MEANING) == set(normalizer.SEVERITY)
     assert all(len(text) > 15 and not text.endswith(".") for text in normalizer.MEANING.values())
     assert "not a fault in itself" in normalizer.MEANING["UNEXPECTED_FIELDS"]
+
+
+def test_an_unknown_product_is_held_if_it_could_be_a_misspelling_and_rejected_if_not():
+    """Every name not in inventory is UNKNOWN_PRODUCT (REVIEW). One that resembles no inventory name is also PRODUCT_NOT_STOCKED (BLOCK): a typo, a near name or a longer variant is for a person, something we don't stock at all is not."""
+    from normalizer.checks import similar_products
+    assert similar_products("WidgtA", README_INVENTORY)[0] == "WidgetA"
+    assert similar_products("WidgetC", README_INVENTORY) == ["WidgetB", "WidgetA"]
+    assert similar_products("WidgetA (rush order)", README_INVENTORY) == ["WidgetA"]     # contains a product's whole name
+    assert similar_products("SuperGizmo", README_INVENTORY) == [] and similar_products(None, README_INVENTORY) == []
+
+    held = normalizer.load(INVOICES / "invoice_1016.json", README_INVENTORY)
+    assert graded(held) == [("REVIEW", "UNKNOWN_PRODUCT")]
+    rejected = normalizer.load(INVOICES / "invoice_1016.json", {"GadgetX": 5})           # nothing like a Widget is stocked
+    assert [g for g in graded(rejected) if g[1] == "PRODUCT_NOT_STOCKED"] == [("BLOCK", "PRODUCT_NOT_STOCKED")] * 3
+    assert [f["value"] for f in rejected.flags if f["code"] == "PRODUCT_NOT_STOCKED"] == ["WidgetA", "WidgetB", "WidgetC"]

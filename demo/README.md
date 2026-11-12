@@ -19,7 +19,7 @@ stale.
 
 | | Without self-correction | With |
 |---|---|---|
-| Flags that would hold an invoice (BLOCK or REVIEW), 20 files | 39 | 30 |
+| Flags that would hold an invoice (BLOCK or REVIEW), 20 files | 41 | 32 |
 | Model calls, 10 TXT and PDF files | 10 | 11 |
 | Files improved / worse / unchanged | | 3 / 0 / 17 |
 
@@ -112,7 +112,7 @@ After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to bo
 keep the demo's saved runs apart too):
 
 ```bash
-python review.py --ledger demo.db                                     # five invoices waiting, with the agent's advice
+python review.py --ledger demo.db                                     # six invoices waiting, with the agent's advice
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
 python review.py --ledger demo.db approve 5 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
 ```
@@ -142,9 +142,10 @@ and which tools it called. `python review.py --ledger demo.db` then prints its a
 
 What to point at:
 
-- **1005.** The agent chose a lookup itself: the vendor's history, which is empty. Its questions
-  to the reviewer: can the GadgetX quantity be cut to what is in stock, and has this new vendor
-  been approved?
+- **1016.** The agent chose two lookups itself: products like WidgetC (it found WidgetA and
+  WidgetB) and the vendor's history (one earlier invoice, paid). Its question to the reviewer:
+  is WidgetC something we mean to order? Compare 1008, whose product names resemble nothing in
+  inventory: code rejects it and no model is called.
 - **1010.** The policy approves it with two warnings. The agent reads them and agrees: the higher
   price on the second WidgetA line is the vendor's stated rush order, and the Bill To line is
   Acme's own division. It is paid, with that reason on record.
