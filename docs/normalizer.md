@@ -137,6 +137,7 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `SHIPPING_NEGATIVE` | `shipping` | BLOCK | Shipping below zero; it would quietly offset an inflated line sum |
 | `TAX_NEGATIVE` | `tax_amount` or `tax_rate` | BLOCK | Tax below zero; same risk as negative shipping |
 | `CONFLICTING_ROWS` | the field, with `row`, `value`, `first_value` | BLOCK | CSV rows disagree on an invoice-level field such as invoice number or vendor |
+| `UNFAMILIAR_FORMAT` | none; `read_by`, and `file_type` or `unrecognised_fields` | REVIEW | No parser could read the file, so the model did (`read_by: model`), or could not (`read_by: parser`, with why). Held so a person sees a new format |
 | `UNKNOWN_PRODUCT` | `line_items[i].item` | REVIEW | Not in inventory (exact name match). Possibly a misspelling, so a person decides |
 | `PRODUCT_NOT_STOCKED` | `line_items[i].item` | BLOCK | Raised with `UNKNOWN_PRODUCT` when the name also resembles no inventory product: close spelling (`WidgtA`, `WidgetC`) or containing a product's whole name (`WidgetA (rush order)`) counts as resembling |
 | `QTY_NOT_WHOLE` | `line_items[i].quantity` | REVIEW | Fractional quantity; stock is counted in whole units |
@@ -213,9 +214,9 @@ also carries `CURRENCY_ASSUMED`.
 ### Not handled yet
 
 - Scanned PDFs with no text layer (they need OCR first; the loader says so).
-- File types with no reader (`.docx`, `.xlsx`, images): `main.py` reports each as an error with its
-  name. A JSON, CSV or XML file in a layout the parsers don't know is read, finds none of its
-  expected fields, and is rejected with the unrecognised fields kept in `unexpected_fields`.
+- Files that aren't text (`.docx`, `.xlsx`, images): `main.py` reports each as an error with its
+  name. A text file no parser can read (an unknown type, or a JSON, CSV or XML file in an unknown
+  layout) falls back to the model: see [extraction](extraction.md#fallback-for-formats-no-parser-knows).
 - Fuzzy product matching: a typo or a longer name such as "WidgetA (rush order)" in a structured
   file is left as written, flagged `UNKNOWN_PRODUCT` and held for a person. Only spacing, hyphen and case variants are matched.
 - Real exchange rates: the rate service is a local mock with made-up rates (see Exchange rates).

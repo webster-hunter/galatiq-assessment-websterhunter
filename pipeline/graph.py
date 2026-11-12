@@ -68,10 +68,9 @@ from approval import APPROVE, HOLD, MAX_ROUNDS, REJECT, Decision, assess, critiq
 from ledger import Ledger
 from ledger import ledger as seen
 from ledger.ledger import currency_of
-from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
+from extraction import Provider, ProviderError, read
 from normalizer.checks import usable_rate
 from normalizer.models import Invoice
-from normalizer.parsing import LOADERS
 
 
 class State(TypedDict, total=False):
@@ -155,17 +154,14 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
     # --- Nodes. Each takes the state and returns only the keys it changes. --------------------
 
     def ingest(state: State) -> dict:
-        """Stage 1. Read the file into an Invoice: a parser for structured files, the model for text."""
+        """Stage 1. Read the file into an Invoice: a parser for structured files, the model for text.
+
+        A structured file in a layout the parser doesn't know falls back to the model (see
+        extraction.read). The trail says which means was used.
+        """
         path = Path(state["path"])
-        suffix = path.suffix.lower()
         try:
-            if suffix in TEXT_SUFFIXES:
-                invoice = extract(path, provider)
-            elif suffix in LOADERS:
-                invoice = LOADERS[suffix](path)
-            else:
-                raise ValueError(f"No reader for {suffix or 'extensionless'} files ({path.name}). Supported: "
-                                 f"{', '.join(sorted(LOADERS.keys() | TEXT_SUFFIXES))}. It needs a person, or a reader for this format.")
+            invoice, method = read(path, provider)
         except (*normalizer.LOAD_ERRORS, ProviderError) as e:
             # A node reports failure through the state, like any other result. The edge after
             # ingest reads `error` and routes to the `failed` node. Any other exception is a bug
@@ -173,8 +169,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
             error = f"{type(e).__name__}: {e}"
             return {"error": error, "trail": _step("ingest", error=error)}
         return {"invoice": invoice,
-                "trail": _step("ingest", method="llm" if suffix in TEXT_SUFFIXES else "parser",
-                               model_attempts=len(invoice.extraction_attempts))}
+                "trail": _step("ingest", method=method, model_attempts=len(invoice.extraction_attempts))}
 
     def validate(state: State) -> dict:
         """Stage 2. Repair what the invoice proves, run every check against the inventory, grade each flag."""

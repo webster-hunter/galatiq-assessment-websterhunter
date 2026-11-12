@@ -1,0 +1,16 @@
+{
+  "invoiceNo": "INV-3001",
+  "supplier": {"companyName": "Northwind Components", "street": "88 Harbor Road, Portland, OR 97201"},
+  "issued": "2026-02-03",
+  "payBy": "2026-03-05",
+  "terms": "Net 30",
+  "rows": [
+    {"sku": "WidgetA", "qty": 3, "price": 250.00},
+    {"sku": "WidgetB", "qty": 2, "price": 500.00}
+  ],
+  "net": 1750.00,
+  "vatPercent": "8%",
+  "vat": 140.00,
+  "grandTotal": 1890.00,
+  "purchaseOrder": "PO-7741"
+}

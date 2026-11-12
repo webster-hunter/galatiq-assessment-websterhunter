@@ -213,3 +213,29 @@ scrolling through JSON. The pipeline diagram is in the main README.
 
 Approval, payment, and duplicate detection across files (1011, 1012 and 1013 each arrive twice;
 1004 has a revision).
+
+## A format nobody has seen before
+
+```bash
+python main.py --invoice_path=data/unfamiliar --offline --ledger demo-new.db --trace 2>&1 >/dev/null | grep '"ingest"'
+```
+
+Four files no parser can read: an unlabelled `.dat`, and JSON, XML and CSV in a supplier's own
+layout. Each line shows `"method": "llm_fallback"`.
+
+What to point at:
+
+- **The `.dat` file has no labels at all,** only `HDR|INV-3004|Coastal Bearings Co.|...` and
+  `LIN|WidgetA|6|250.00`. The model reads it correctly in one attempt, every value is found in
+  the file, and it is held for a person because the format is new.
+- **The CSV is misread, and rejected.** Its grand total is repeated on every row; the model took
+  it for each line's amount. Every value it returned is in the file, so the grounding check
+  passed. The arithmetic didn't reconcile, so the policy rejected it.
+- **Nothing in a new format is paid without a person.** Three are held; one is rejected.
+
+How to say it: the model lets the system read what nobody wrote a parser for. The checks in
+code decide whether to believe it.
+
+What not to claim: that the fallback is reliable. One of four was misread. What is reliable is
+that a misreading which breaks the arithmetic is caught; one that happens to reconcile would be
+held for a person, not paid.

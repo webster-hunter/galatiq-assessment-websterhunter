@@ -120,3 +120,34 @@ Not done yet: detecting duplicates across files (1011, 1012 and 1013 each arrive
 anything that weighs warnings together. 1012 now carries only warnings, but it is $25 under the
 $10K threshold with four values repaired and a renamed vendor; holding that combination is a job
 for the approval policy.
+
+## Fallback for formats no parser knows
+
+`extraction.read(path, provider)` is the one entry point for reading a file, and says which means
+it used:
+
+| Method | When |
+|---|---|
+| `llm` | A TXT or PDF |
+| `parser` | A JSON, CSV or XML file the parser recognises |
+| `llm_fallback` | A text file no parser can read: an unknown type (`.dat`), or a JSON, CSV or XML file in which the parser finds fewer than two of an invoice number, a vendor, a total and a line with anything on it |
+
+The fallback gives the model the file's text and builds the invoice from its reply, as for a
+PDF. Three things differ:
+
+- **Records stand in for rows.** A line item's values must sit together. In a text invoice that
+  means one printed line; in JSON, one innermost object; in XML, one element whose children are
+  all leaves. Either may span several lines of the file.
+- **A CSV is checked as cells.** In prose a comma before a digit makes it the tail of a longer
+  number. In a CSV every value follows a comma, so the text is split into cells first. A
+  comma-separated file of another type is treated the same if every row has the same number of cells.
+- **The result is always held,** by `UNFAMILIAR_FORMAT` (REVIEW).
+
+It is never used for an invoice in the usual layout with a field missing (1009 has no vendor and
+stays with the parser), for a file that isn't text, or for one over 200,000 bytes. If the model
+is unavailable or finds no invoice, the parser's result stands for a structured file, and an
+unknown type is an error.
+
+On the four files in `data/unfamiliar/` the model read three correctly in one attempt each. On
+the fourth, a CSV, it put the repeated grand total into each line's amount. Grounding passed,
+since every value is in the file; `LINE_AMOUNT_MISMATCH` and `TOTAL_MISSING` rejected it.

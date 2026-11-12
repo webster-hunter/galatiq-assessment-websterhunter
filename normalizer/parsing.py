@@ -16,6 +16,14 @@ from xml.parsers import expat
 from .models import Invoice, LineItem
 
 
+
+class UnfamiliarLayout(ValueError):
+    """The file is well-formed, but its outermost structure isn't an invoice's as the loaders know it.
+
+    A ValueError, so everything that treats a loader's ValueError as "this file can't be loaded"
+    still does. Raised separately so that a caller with a model can try reading the file as text.
+    """
+
 def _text(v) -> str | None:
     """Normalize a text field.
 
@@ -175,7 +183,7 @@ def from_json(path: str | Path) -> Invoice:
     d = json.loads(path.read_text(encoding="utf-8"), parse_float=Decimal, parse_constant=str,
                    object_pairs_hook=first_wins)
     if not isinstance(d, dict):
-        raise ValueError(f"top level is a JSON {type(d).__name__}, not an object: not an invoice")
+        raise UnfamiliarLayout(f"top level is a JSON {type(d).__name__}, not an object: not an invoice")
     unexpected = _unexpected(d)
     for key, value in repeats:
         keep_unexpected(unexpected, f"repeated_key.{key}", value)
@@ -586,7 +594,7 @@ def from_xml(path: str | Path) -> Invoice:
     guard.Parse(raw, True)
     root = ET.fromstring(raw)
     if _snake(root.tag) != "invoice":
-        raise ValueError(f"root element is <{root.tag}>, not <invoice>: not an invoice")
+        raise UnfamiliarLayout(f"root element is <{root.tag}>, not <invoice>: not an invoice")
 
     d = {"line_items": []}
     lines_read = False
@@ -611,3 +619,16 @@ def from_xml(path: str | Path) -> Invoice:
 
 
 LOADERS = {".json": from_json, ".csv": from_csv, ".xml": from_xml}
+
+
+def layout_recognised(inv: Invoice) -> bool:
+    """Whether a loader found an invoice in the file it read, not just a stray field.
+
+    A structured file in a layout the loaders don't know (a supplier's own field names) parses
+    without error and yields next to nothing: at most one thing that happens to share a name
+    with ours, and the rest of what it holds in unexpected_fields. That is different from an
+    invoice in our layout with a field missing, which has the others. So: recognised means at
+    least two of an invoice number, a vendor, a total, and a line with anything on it.
+    """
+    line = any(v is not None for li in inv.line_items for v in (li.item, li.quantity, li.unit_price, li.amount))
+    return sum([inv.invoice_number is not None, inv.vendor_name is not None, inv.total is not None, line]) >= 2

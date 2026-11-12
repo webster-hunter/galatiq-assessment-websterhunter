@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Bill>
+  <Reference>INV-3003</Reference>
+  <Seller>
+    <Company>Ridgeline Fasteners</Company>
+  </Seller>
+  <Raised>2026-02-05</Raised>
+  <Payable>2026-03-07</Payable>
+  <Positions>
+    <Position>
+      <Article>WidgetB</Article>
+      <Count>4</Count>
+      <Rate>500.00</Rate>
+    </Position>
+  </Positions>
+  <Sum>2000.00</Sum>
+</Bill>

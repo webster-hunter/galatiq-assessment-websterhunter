@@ -66,7 +66,55 @@ _ROW_KEYS = ("item", "quantity", "unit_price", "amount")  # a line item's values
 _TOP_PATHS = {"vendor_name": "vendor.name", "vendor_address": "vendor.address"}  # as the Invoice names them
 
 
-def ungrounded(transcription: dict, text: str) -> list[dict]:
+def as_written(text: str, suffix: str) -> str:
+    """The text a transcription is checked against. For a CSV file, its cells set apart by spaces.
+
+    In running text a comma before a digit means the digit is the tail of a longer number
+    ("1,250"), so a value there is not counted as found. In a CSV file the comma is the
+    separator: every value follows one. Read as cells, "2" in "WidgetA,2,250.00" is the value 2,
+    and a quoted cell "1,250.00" stays one value.
+    """
+    import csv
+    import io
+    rows = [cells for cells in csv.reader(io.StringIO(text)) if cells]
+    if suffix != ".csv":
+        # A file of another type may be comma-separated all the same (.dat often is). It is read
+        # as cells if it looks like a table: several rows, each with the same number of cells.
+        widths = {len(cells) for cells in rows}
+        if suffix in (".txt", ".pdf", ".json", ".xml") or len(rows) < 2 or len(widths) != 1 or widths.pop() < 3:
+            return text
+    return "\n".join("  ".join(cells) for cells in rows)
+
+
+def records(text: str, suffix: str) -> list[str]:
+    """The units of a structured file that play the part of a row: where one line item's values sit together.
+
+    In a text invoice a line item is one printed line. In JSON it is one object, in XML one
+    element, and either may be spread over several lines of the file. So for those, each
+    innermost JSON object and each XML element whose children are all leaves is a record. A CSV
+    row is already a line.
+
+    Args:
+        text: The file's text.
+        suffix: The file's extension, lowercase with the dot.
+
+    Returns:
+        The records, each squashed to one line. Empty for a format with none, or a file that doesn't parse.
+    """
+    if suffix == ".json":
+        return [_squash(m) for m in re.findall(r"\{[^{}]*\}", text)]
+    if suffix == ".xml":
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            return []
+        return [_squash(" ".join([*e.attrib.values(), *(c.text or "" for c in e), *(v for c in e for v in c.attrib.values())]))
+                for e in root.iter() if len(e) and not any(len(c) for c in e)]
+    return []
+
+
+def ungrounded(transcription: dict, text: str, extra_rows: list[str] = ()) -> list[dict]:
     """Flag every transcribed value that isn't in the source text.
 
     Invoice-level values, per-line notes and other_fields values are looked for anywhere in the
@@ -77,6 +125,7 @@ def ungrounded(transcription: dict, text: str) -> list[dict]:
     Args:
         transcription: The model's reply, in the extraction SCHEMA's shape, before any typing.
         text: The document text the model was given.
+        extra_rows: Further units that count as one row, for a structured file (see records).
 
     Returns:
         NOT_IN_SOURCE flags (without severity), each with the field path and the value. A line
@@ -84,7 +133,7 @@ def ungrounded(transcription: dict, text: str) -> list[dict]:
         "line_items[i]", with reason NOT_ON_ONE_LINE.
     """
     whole = _squash(text)
-    rows = [_squash(line) for line in text.splitlines() if line.strip()]
+    rows = [_squash(line) for line in text.splitlines() if line.strip()] + list(extra_rows)
     flags = []
 
     def check(field, value):

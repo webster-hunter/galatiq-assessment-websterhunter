@@ -25,15 +25,22 @@ from pathlib import Path
 
 import normalizer
 from normalizer.models import Invoice
-from normalizer.parsing import LOADERS, build_invoice, keep_unexpected
+from normalizer.parsing import LOADERS, UnfamiliarLayout, build_invoice, keep_unexpected, layout_recognised
 
-from .grounding import ungrounded
+from .grounding import as_written, records, ungrounded
 from .providers import Grok, Provider, ProviderError, Replay
 
-__all__ = ["Grok", "Provider", "ProviderError", "Replay", "SCHEMA", "TEXT_SUFFIXES", "extract",
+__all__ = ["Grok", "Provider", "ProviderError", "Replay", "SCHEMA", "TEXT_SUFFIXES", "extract", "read",
            "load", "normalize", "read_text"]
 
 TEXT_SUFFIXES = {".txt", ".pdf"}
+MAX_TEXT_BYTES = 200_000  # the most text of an unknown file type sent to the model: an invoice is a few thousand
+
+
+def no_reader(path: Path, why: str) -> str:
+    """The message for a file nothing can read: its type, the types that have a reader, and why the model couldn't help."""
+    return (f"No reader for {path.suffix.lower() or 'extensionless'} files ({path.name}). Supported: "
+            f"{', '.join(sorted(LOADERS.keys() | TEXT_SUFFIXES))}. {why}. It needs a person, or a reader for this format.")
 
 _S = {"type": ["string", "null"]}  # every value is text: code parses it, so a bad value is visible, not coerced
 _LINE_KEYS = ("item", "quantity", "unit_price", "amount", "note")
@@ -86,18 +93,31 @@ Rules:
 
 
 def read_text(path: str | Path) -> str:
-    """The text of a TXT or PDF invoice.
+    """The text of an invoice file: a PDF's text layer, or any other file that is text, read as it is.
+
+    A file of a type nothing here knows (.dat, .edi, no extension) is accepted if it is plain
+    text. A binary file (a Word or Excel document, an image) is not: there is no text to give
+    the model, and guessing at bytes is worse than saying so.
 
     Raises:
-        ValueError: Unsupported extension, or a PDF with no text layer (a scan needs OCR first).
+        ValueError: A file that isn't text, one too large to send, or a PDF with no text layer
+            (a scan needs OCR first).
         OSError: The file can't be read.
     """
     path = Path(path)
     suffix = path.suffix.lower()
-    if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
     if suffix != ".pdf":
-        raise ValueError(f"not a text or PDF invoice: {path}")
+        data = path.read_bytes()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        # Control characters other than tab, newline, form feed and carriage return mark a binary file.
+        if text is None or re.search(r"[\x00-\x08\x0b\x0e-\x1f]", text):
+            raise ValueError(no_reader(path, "It is not a text file, so it can't be given to the model either"))
+        if len(data) > MAX_TEXT_BYTES and suffix not in TEXT_SUFFIXES and suffix not in LOADERS:
+            raise ValueError(no_reader(path, f"At {len(data):,} bytes it is too large to give to the model"))
+        return text
     import pymupdf  # only PDFs need it
     with pymupdf.open(path) as doc:
         # sort=True reads in visual order, so a table row stays on one line instead of one cell per line.
@@ -191,7 +211,11 @@ def _rate(v):
 
 
 def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMPTS) -> Invoice:
-    """Transcribe one TXT or PDF invoice with the model and build it like a JSON file.
+    """Transcribe one invoice with the model and build it like a JSON file.
+
+    Normally a TXT or PDF. Also a JSON, CSV or XML file in a layout the parsers don't know (see
+    read): the model is given the file's text, and its values are checked against that text in
+    the same way.
 
     If the transcription has values that aren't in the document, the model is shown them and
     asked again, up to max_attempts in all. The loop stops when an attempt is fully grounded,
@@ -201,7 +225,7 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
     built; any that remain stay on the invoice as NOT_IN_SOURCE flags, so it is held, not trusted.
 
     Args:
-        path: The .txt or .pdf file.
+        path: The file.
         provider: Any Provider (Grok, Replay, a test stub).
         max_attempts: Model calls allowed for this file, counting the first. 1 turns retries off.
 
@@ -216,12 +240,16 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
     """
     path = Path(path)
     text = read_text(path)
-    messages = _messages(text)
+    messages = _messages(text)  # the model is given the file as it is
+    # What its answer is checked against: the same text, except that a CSV's cells are set apart
+    # (see as_written), plus, for a structured file, where one line item's values sit together.
+    rows = records(text, path.suffix.lower())
+    text = as_written(text, path.suffix.lower())
     attempts, best, base, previous = [], None, None, None
     while True:
         t = provider.complete(messages, SCHEMA)
         # Judged on the model's own strings, before any typing: "$1,250.00" is in the document, Decimal("1250.00") isn't.
-        problems = ungrounded(t, text)
+        problems = ungrounded(t, text, rows)
         # A retry is only usable if it changed nothing beyond what it was asked to correct.
         changed = _unasked_changes(*base, t) if base else []
         attempts.append({"attempt": len(attempts) + 1, "ungrounded": problems, **({"changed_unasked": changed} if changed else {})})
@@ -261,6 +289,73 @@ def extract(path: str | Path, provider: Provider, max_attempts: int = MAX_ATTEMP
         inv.flags.append({"code": "EXTRACTION_RETRIED", "attempts": len(attempts),
                           "outcome": "RESOLVED" if not problems else "UNRESOLVED", "stopped": outcome})
     return inv
+
+
+def read(path: str | Path, provider: Provider) -> tuple[Invoice, str]:
+    """Read one invoice file by the right means for its format, and say which was used.
+
+    - A TXT or PDF is transcribed by the model ("llm").
+    - A JSON, CSV or XML file is parsed ("parser"): exact, free, the same answer every time.
+    - A file no parser can read is given to the model as text ("llm_fallback"), if it is text:
+      a type nothing here knows (.dat, .edi, no extension), or a JSON, CSV or XML file the parser
+      finds nothing in because its field names aren't ours. The result is used only if the model
+      did find an invoice in it. It carries UNFAMILIAR_FORMAT, which holds it for a person: a
+      new format from a supplier is worth one look, and is the cue to write a reader for it.
+    - A file that isn't text (a Word or Excel document, an image) is not read at all.
+
+    If the model can't be reached or finds no invoice, nothing is made up. For an unknown type
+    that is an error naming the file. For a structured file the parser's result stands, with
+    UNFAMILIAR_FORMAT saying so: either its empty invoice, which is then rejected for its missing
+    fields with everything the file held kept in unexpected_fields, or the error it raised.
+
+    Args:
+        path: The invoice file.
+        provider: The model, used only for text files and the fallback.
+
+    Returns:
+        (the Invoice, with no check flags yet; "llm", "parser" or "llm_fallback").
+
+    Raises:
+        ValueError: A format with no reader, or a file that can't be parsed at all.
+        OSError: The file can't be read.
+        ProviderError: The model call failed, for a TXT or PDF. Never for the fallback.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in TEXT_SUFFIXES:
+        return extract(path, provider), "llm"
+    if suffix not in LOADERS:   # a type with no parser: the model, if the file is text
+        try:
+            transcribed = extract(path, provider)   # ValueError here if it isn't text
+        except ProviderError as e:
+            raise ValueError(no_reader(path, f"It is text, but the model was not available to read it ({e})")) from e
+        if not layout_recognised(transcribed):
+            raise ValueError(no_reader(path, "It is text, but the model found no invoice in it"))
+        transcribed.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", "file_type": suffix or "none"})
+        return transcribed, "llm_fallback"
+    try:
+        parsed, refused = LOADERS[suffix](path), None
+    except UnfamiliarLayout as e:   # well-formed, but not shaped like our invoices at all (another root element)
+        parsed, refused = None, e
+    if parsed is not None and layout_recognised(parsed):
+        return parsed, "parser"
+    unrecognised = sorted(parsed.unexpected_fields)[:20] if parsed is not None else []
+
+    def parsers_result(model: str) -> tuple[Invoice, str]:
+        if refused is not None:
+            raise ValueError(f"{refused}; the model {model}") from refused
+        parsed.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "parser", "unrecognised_fields": unrecognised,
+                             "model": model})
+        return parsed, "parser"
+
+    try:
+        transcribed = extract(path, provider)
+    except ProviderError as e:
+        return parsers_result(f"was not available ({e})")
+    if not layout_recognised(transcribed):
+        return parsers_result("found no invoice in it either")
+    transcribed.flags.append({"code": "UNFAMILIAR_FORMAT", "read_by": "model", "unrecognised_fields": unrecognised})
+    return transcribed, "llm_fallback"
 
 
 def load(path: str | Path, provider: Provider, inventory: dict[str, int] | None = None) -> Invoice:

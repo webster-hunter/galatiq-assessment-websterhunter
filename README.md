@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
 python -m web                                                              # the review screen, at http://127.0.0.1:8000
-pytest                                                                     # 315 tests, about 20 seconds
+pytest                                                                     # 327 tests, about 20 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -147,18 +147,37 @@ can cause is an extra hold.
 
 ### What happens to a format it hasn't seen
 
-A file's extension decides how it is read. Only free text goes to the model.
+A file is read by a parser where one exists, and by the model where none can.
 
-| The file is | How it is read | A layout never seen before |
+| The file is | How it is read |
+|---|---|
+| `.txt`, `.pdf` | The model transcribes it, whatever the layout. Grounding checks what it returns |
+| `.json`, `.csv`, `.xml` in the usual layout | A parser, no model: exact, free, the same answer every time |
+| `.json`, `.csv`, `.xml` in a layout the parser doesn't know (a supplier's own field names) | **Falls back to the model**, which is given the file as text |
+| A type with no parser that is text (`.dat`, `.edi`, no extension) | **Falls back to the model** in the same way |
+| A file that isn't text (`.docx`, `.xlsx`, an image) | Not read. It ends as an error naming the file, listed on the review screen |
+
+An invoice read by fallback is checked like any other the model transcribes: every value must be
+in the file, and a line item's values must sit together in one record of it. It is then **held
+for a person**, whatever else is true of it. A new format from a supplier deserves one look, and
+is the cue to write a parser for it. If the model is unreachable or finds no invoice, nothing is
+guessed: the file is rejected or reported, with what it held kept.
+
+`data/unfamiliar/` has four such files, with the model's replies recorded:
+
+```bash
+python main.py --invoice_path=data/unfamiliar --offline
+```
+
+| File | What it is | Outcome |
 |---|---|---|
-| `.txt`, `.pdf` | The model transcribes it | Handled: the model reads whatever layout arrives, and grounding checks what it returns |
-| `.json`, `.csv`, `.xml` | A parser, no model | Not understood: the fields it expects are missing, so the invoice is rejected with those flags. Nothing is lost: the unrecognised fields are kept on the invoice for a person to see |
-| Anything else (`.docx`, `.xlsx`, an image) | Not read | Ends as an error naming the file and the formats that can be read, and is listed on the review screen. It is never skipped silently and never guessed at |
+| `invoice_3004.dat` | Pipe-separated lines with no labels at all | Read correctly; held |
+| `invoice_3001.json` | JSON with `invoiceNo`, `supplier`, `rows`, `grandTotal` | Read correctly; held |
+| `invoice_3003.xml` | XML rooted at `<Bill>`, not `<invoice>` | Read correctly; held |
+| `invoice_3002.csv` | CSV with other column names, the grand total repeated on each row | **Misread, and rejected.** The model took the total for each line's amount. Every value it returned is in the file, so grounding passed; the arithmetic did not reconcile |
 
-Structured files are parsed, not sent to the model, on purpose: a parser is exact, free, and
-gives the same answer every time. The cost is that a supplier's new JSON layout needs a mapping
-written for it. The cheaper alternative, falling back to the model when a parser finds none of
-its fields, is not built; the grounding check would apply to it unchanged.
+The last row is the one to remember. Grounding shows a value wasn't invented, not that it is in
+the right field. The checks in code are what stopped a misread invoice being paid.
 
 ### Self-correction, measured
 
@@ -180,7 +199,7 @@ better and none worse.
 
 | Requirement | Where |
 |---|---|
-| Ingestion from PDFs and text, with typos and missing data | `extraction/`, `normalizer/parsing.py`. Also JSON, both CSV shapes, and the XML file the brief doesn't mention |
+| Ingestion from PDFs and text, with typos and missing data | `extraction/`, `normalizer/parsing.py`. Also JSON, both CSV shapes, the XML file the brief doesn't mention, and a model fallback for formats no parser knows |
 | Validation against a SQLite inventory | `normalizer/checks.py`, read-only against `inventory.db` |
 | Approval with rules and a reflection or critique loop | `approval/policy.py`, `approval/reviewer.py`, `approval/critic.py` |
 | Payment through the mock function; rejections logged with reasons | `ledger/`: `mock_payment` called at most once per invoice |
@@ -219,7 +238,6 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 |---|---|
 | OCR for scanned images | The sample PDFs have a text layer. A scan is refused with a message saying so |
 | Reading Word, Excel or image files | Each is reported as an error for a person. Converting one to text would put it on the same path as a PDF |
-| Model fallback for an unfamiliar JSON, CSV or XML layout | Such a file is rejected with its fields kept. The fallback is a few lines, since extraction and grounding already exist |
 | Matching to purchase orders and goods receipts | No such data in the brief. It is the first thing to add with real systems |
 | A vendor list | Would catch a changed bank account, a billing currency, and a vendor name spelled two ways |
 | Real exchange rates | The brief rules out internet access. `rates/` is a local mock with made-up rates |
@@ -247,7 +265,7 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `approval/` | Policy, reviewer agent, critic. [Reference](docs/approval.md) |
 | `ledger/`, `rates/` | What has been seen and paid; the mock rate service. [Reference](docs/ledger-and-review.md) |
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
-| `data/invoices/`, `data/replays/` | The sample invoices; the model's recorded replies |
+| `data/invoices/`, `data/unfamiliar/`, `data/replays/` | The 20 sample invoices; four files in formats no parser knows; the model's recorded replies |
 | `demo/` | Numbers and examples for a walkthrough, each with the command that reproduces it |
-| `tests/` | 315 tests. Each one's first line says the behaviour it pins |
+| `tests/` | 327 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

@@ -569,7 +569,7 @@ def test_xml_root_must_be_invoice(tmp_path):
     f = tmp_path / "po.xml"
     f.write_text(f'<purchase_order>{XML_BODY}<total>500</total></purchase_order>')
     [r] = normalize([f])
-    assert r["error"].startswith("ValueError") and "<purchase_order>" in r["error"]
+    assert r["error"].startswith("UnfamiliarLayout") and "<purchase_order>" in r["error"]
 
 
 def test_xml_second_line_items_block_is_kept_not_merged(tmp_path):
@@ -736,7 +736,7 @@ def test_repeated_json_key_keeps_first_and_reports_the_rest(tmp_path):
 
     f.write_text("[1, 2]")  # not an object at all: a file error
     [r] = normalize([f])
-    assert r["error"].startswith("ValueError") and "not an object" in r["error"]
+    assert r["error"].startswith("UnfamiliarLayout") and "not an object" in r["error"]
 
 
 def test_missing_inventory_is_flagged():
