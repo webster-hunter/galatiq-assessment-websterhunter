@@ -141,10 +141,13 @@ JSON list on stdout, one `{"file", "result", "decision", "trail", "invoice"}` or
 - `--fresh` sets the existing ledger aside (renamed with a timestamp, never deleted) and starts
   with an empty one, to see a first run again. It warns that the invoices the old ledger had
   paid will be paid again: fine with the mock payment, not something to do with a real one.
+- `--checkpoints` names the file of saved runs (default `checkpoints.db`), which is what lets a
+  held invoice be released later.
 - `inventory.db` is created from the seed data if it doesn't exist.
 
-Not built yet: the reviewer agent that explains and can tighten a decision, and a review queue for
-held invoices.
+Held invoices wait in the [review queue](#review-queue); `python review.py` lists and decides them.
+
+Not built yet: the reviewer agent that explains and can tighten a decision.
 
 ## Pipeline
 
@@ -162,8 +165,10 @@ graph TD;
     approve -.-> pay;
     approve -.-> hold;
     approve -.-> reject;
+    hold --> await_review;
+    await_review -.-> pay;
+    await_review -.-> reject;
     pay --> END;
-    hold --> END;
     reject --> END;
     skip --> END;
     failed --> END;
@@ -177,7 +182,9 @@ graph TD;
 | `skip` | The invoice was already handled, as this file or another copy: nothing is decided or paid | |
 | `approve` | The policy floor: the minimum outcome the flags require | `approval.decide` |
 | `pay` | Pays through the ledger, which pays any one invoice once | `ledger.Ledger.pay` |
-| `hold`, `reject` | Records the outcome in the ledger. The review queue is not built | |
+| `hold` | Puts the invoice in the review queue and records it as held | `ledger.Ledger.enqueue` |
+| `await_review` | Pauses the run until a person decides, then sends it to `pay` or `reject` | LangGraph `interrupt` |
+| `reject` | Records the rejection and its reasons, the policy's or the reviewer's | |
 | `failed` | The file couldn't be read, so there is nothing to decide | |
 
 - **One state per invoice.** A run starts with the file path. Each node returns only what it
@@ -201,10 +208,16 @@ graph TD;
 {"file": "invoice_1003.txt", "node": "reject", "status": "REJECTED", "reasons": [...]}
 ```
 
-Why a graph for a straight line with two branches: the stages still to come need what a script
-handles badly. The reviewer and critic loop is an edge pointing backwards, and a held invoice is
-a run that pauses for a person and resumes later. Both are LangGraph features, and both arrive as
-new nodes and edges in this one file.
+- **A held invoice is a paused run.** The graph is compiled with a checkpointer, which saves the
+  state after every node under a thread ID (in `checkpoints.db`). `await_review` calls LangGraph's
+  `interrupt()`, which stops the run there. `review.py`, in another process and possibly days
+  later, resumes that thread with a person's decision, and the run continues into `pay` or
+  `reject`. See [Review queue](#review-queue).
+
+Why a graph and not a script: a run that stops for a person and is resumed later by another
+process is exactly what a script handles badly, and a graph with checkpoints handles by design.
+The reviewer and critic loop still to come is an edge pointing backwards, also added in this one
+file.
 
 ## Approval policy
 
@@ -312,6 +325,39 @@ Files are processed one at a time in name order, so what an invoice is compared 
 what came before it. 1004 is paid before its revision is read, which is why the revision is held
 for the difference. Reading the whole folder first and paying only the latest revision is a
 possible refinement; holding the revision is the safe behaviour either way.
+
+## Review queue
+
+An invoice the policy holds is not finished: it waits for a person. `review.py` is how they see
+what is waiting and decide it.
+
+```bash
+python review.py                                  # what is waiting
+python review.py show 3                           # one invoice in full: flags, and the steps so far
+python review.py approve 3 --by "Dana Lee" --note "Stock arriving Friday"
+python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send a corrected invoice"
+```
+
+```
+  #  file                        vendor                                 total  held for
+  1  invoice_1002.txt            Gadgets Co.                        15,000.00  OVER_APPROVAL_THRESHOLD, STOCK_EXCEEDED
+  2  invoice_1004_revised.json   Precision Parts Ltd.                5,940.00  REVISION_OF_PAID
+  ...
+```
+
+- **Deciding resumes the run.** Approve continues the paused run into payment; reject records the
+  reviewer's note as the reason. The reviewer's name, decision and note are kept in the ledger,
+  and the policy's original decision stays on the record beside them.
+- **A person can overrule a hold, within limits.** Some holds can only be rejected, because the
+  invoice can't be paid correctly whoever approves it: one in another currency, one with no
+  invoice number, one that conflicts with an invoice already on record. The command says why.
+- **A revision of a paid invoice is released for the difference.** Approving 1004's revision
+  ($5,940.00) after the original was paid ($1,890.00) pays $4,050.00.
+- **A rejection needs a note,** since it is what goes back to the vendor.
+- **A newer revision clears the older one from the queue,** so the reviewer sees one invoice.
+
+The policy can never be loosened by a model. It can be overruled by a named person, and that is
+recorded.
 
 ## LLM extraction
 

@@ -9,7 +9,7 @@ import main
 from approval import decide
 from extraction import Replay
 from ledger import Ledger
-from pipeline import build_graph, run
+from pipeline import build_graph, cannot_approve, checkpointer, release, run
 
 ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
@@ -30,17 +30,18 @@ def nodes(state):
     return [step["node"] for step in state["trail"]]
 
 
-def test_the_graph_has_the_stages_and_three_branch_points(graph):
-    """One fixed path in (ingest, validate, register, approve) with a branch after ingest (unreadable file), after register (already handled) and after approve (the three outcomes)."""
+def test_the_graph_has_the_stages_and_four_branch_points(graph):
+    """One fixed path in (ingest, validate, register, approve) with a branch after ingest (unreadable file), after register (already handled), after approve (the three outcomes) and after await_review (the reviewer's decision)."""
     drawn = graph.get_graph()
     assert set(drawn.nodes) == {"__start__", "ingest", "validate", "register", "skip", "approve", "pay", "hold",
-                                "reject", "failed", "__end__"}
+                                "await_review", "reject", "failed", "__end__"}
     fixed = {(e.source, e.target) for e in drawn.edges if not e.conditional}
     branches = {(e.source, e.target) for e in drawn.edges if e.conditional}
-    assert fixed == {("__start__", "ingest"), ("validate", "register"), ("pay", "__end__"), ("hold", "__end__"),
+    assert fixed == {("__start__", "ingest"), ("validate", "register"), ("hold", "await_review"), ("pay", "__end__"),
                      ("reject", "__end__"), ("skip", "__end__"), ("failed", "__end__")}
     assert branches == {("ingest", "validate"), ("ingest", "failed"), ("register", "approve"), ("register", "skip"),
-                        ("approve", "pay"), ("approve", "hold"), ("approve", "reject")}
+                        ("approve", "pay"), ("approve", "hold"), ("approve", "reject"),
+                        ("await_review", "pay"), ("await_review", "reject")}
 
 
 @pytest.mark.parametrize("name, last, status", [
@@ -156,7 +157,7 @@ def test_steps_are_reported_as_they_happen(graph):
 
 def test_main_trace_prints_one_json_line_per_step(capsys, tmp_path):
     """--trace writes the steps to stderr as JSON lines, leaving stdout as the JSON result."""
-    code = main.main([f"--invoice_path={INVOICES / 'invoice_1007.csv'}", "--offline", "--trace", "--ledger", str(tmp_path / "l.db")])
+    code = main.main([f"--invoice_path={INVOICES / 'invoice_1007.csv'}", "--offline", "--trace", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")])
     out = capsys.readouterr()
     [entry] = json.loads(out.out)
     lines = [json.loads(line) for line in out.err.splitlines() if line.startswith("{")]
@@ -167,7 +168,7 @@ def test_main_trace_prints_one_json_line_per_step(capsys, tmp_path):
 
 def test_main_keeps_its_ledger_between_runs_and_fresh_resets_it(capsys, tmp_path):
     """Run a file twice through main.py: paid once, then recognised. --fresh forgets, and it is paid again."""
-    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(tmp_path / "l.db")]
+    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")]
     statuses = []
     for extra in ([], [], ["--fresh"]):
         assert main.main(args + extra) == 0
@@ -291,7 +292,7 @@ def test_nodes_do_not_change_the_state_they_are_given(ledger):
 def test_fresh_keeps_the_old_ledger_and_says_what_it_means(capsys, tmp_path):
     """--fresh renames the ledger, never deletes it, and warns that the payments it recorded will be made again."""
     path = tmp_path / "l.db"
-    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(path)]
+    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(path), "--checkpoints", str(tmp_path / "cp.db")]
     assert main.main(args) == 0
     capsys.readouterr()
     assert main.main(args + ["--fresh"]) == 0
@@ -299,3 +300,153 @@ def test_fresh_keeps_the_old_ledger_and_says_what_it_means(capsys, tmp_path):
     [kept] = list(tmp_path.glob("l.db.*.bak"))
     assert "1 payments, $2,750.00" in err and "will be paid again" in err and kept.name in err
     assert Ledger(kept).total_paid() == Decimal("2750") and Ledger(path).total_paid() == Decimal("2750")
+
+
+# --- The hold queue: a held invoice is a paused run, resumed by a person's decision ------------------
+
+def held(graph, name):
+    """Run a sample that the policy holds, and return (queue number, state)."""
+    state = run(graph, INVOICES / name)
+    assert state["result"]["status"] == "HELD"
+    return state["result"]["queue_id"], state
+
+
+def test_a_held_invoice_pauses_and_waits_in_the_queue(graph, ledger):
+    """The run stops after hold: the state has the HELD result and a queue number, the trail ends at hold, and the queue lists it with its reasons."""
+    queue_id, state = held(graph, "invoice_1005.json")
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "hold"]
+    [entry] = ledger.queue()
+    assert (entry["id"], entry["source_file"], entry["status"], entry["reasons"]) == (
+        queue_id, "invoice_1005.json", "WAITING", "OVER_APPROVAL_THRESHOLD, STOCK_EXCEEDED")
+    saved = graph.get_state({"configurable": {"thread_id": entry["thread_id"]}})
+    assert saved.next == ("await_review",)                       # where the run is paused
+    assert saved.interrupts[0].value["queue_id"] == queue_id     # the question it is waiting on
+    assert ledger.total_paid() == 0
+
+
+def test_approving_resumes_the_run_and_pays(graph, ledger):
+    """A reviewer's approval continues the same run from await_review into pay. Who approved is on the result and in the queue record."""
+    queue_id, _ = held(graph, "invoice_1005.json")
+    seen = []
+    state = release(graph, ledger, queue_id, "approve", "Dana Lee", "Stock due Friday", on_step=seen.append)
+    assert nodes(state) == ["ingest", "validate", "register", "approve", "hold", "await_review", "pay"]
+    assert [s["node"] for s in seen] == ["await_review", "pay"]     # only the new steps are reported
+    assert (state["result"]["status"], state["result"]["approved_by"], state["result"]["amount"]) == ("PAID", "Dana Lee", Decimal("15225.00"))
+    assert state["decision"].outcome == "HOLD"                      # the policy's decision is kept; the review sits beside it
+    [entry] = ledger.queue(status=None)
+    assert (entry["status"], entry["action"], entry["reviewer"], entry["note"]) == ("RESOLVED", "approve", "Dana Lee", "Stock due Friday")
+    assert ledger.queue() == [] and ledger.invoices()[0]["status"] == "PAID"
+
+
+def test_rejecting_resumes_the_run_and_records_the_reason(graph, ledger):
+    """A rejection goes from await_review to reject with the reviewer's note as the reason, and pays nothing."""
+    queue_id, _ = held(graph, "invoice_1016.json")
+    state = release(graph, ledger, queue_id, "reject", "Dana Lee", "WidgetC is not a product we buy")
+    assert nodes(state)[-2:] == ["await_review", "reject"]
+    assert state["result"] == {"status": "REJECTED", "rejected_by": "Dana Lee", "reasons": ["WidgetC is not a product we buy"]}
+    assert ledger.invoices()[0]["status"] == "REJECTED" and ledger.payments() == []
+
+
+def test_a_released_revision_pays_only_the_difference(graph, ledger):
+    """1004 was paid $1,890.00; approving its held revision ($5,940.00) pays $4,050.00, so the invoice is paid $5,940.00 in all."""
+    run(graph, INVOICES / "invoice_1004.json")
+    queue_id, _ = held(graph, "invoice_1004_revised.json")
+    state = release(graph, ledger, queue_id, "approve", "Dana Lee")
+    assert state["result"]["amount"] == Decimal("4050.00") and ledger.total_paid() == Decimal("5940")
+    assert [Decimal(p["amount"]) for p in ledger.payments()] == [Decimal("1890"), Decimal("4050")]
+
+
+def test_a_later_revision_counts_what_was_actually_paid(graph, ledger, tmp_path):
+    """After the original ($1,890) and the released R1 difference ($4,050), an R2 for the same total owes nothing more: it is held, and can only be rejected."""
+    run(graph, INVOICES / "invoice_1004.json")
+    queue_id, _ = held(graph, "invoice_1004_revised.json")
+    release(graph, ledger, queue_id, "approve", "Dana Lee")
+    state = run(graph, revision_of_1004(tmp_path, "R2"))
+    [f] = [f for f in state["invoice"].flags if f["code"] == "REVISION_OF_PAID"]
+    assert (f["already_paid"], f["difference"]) == (Decimal("5940"), Decimal("0.00"))
+    with pytest.raises(ValueError, match="nothing more is owed"):
+        release(graph, ledger, state["result"]["queue_id"], "approve", "Dana Lee")
+    assert ledger.total_paid() == Decimal("5940")
+
+
+@pytest.mark.parametrize("name, why", [
+    ("invoice_1014.xml", "billed in EUR"),
+])
+def test_some_holds_can_only_be_rejected(graph, ledger, name, why):
+    """A reviewer can overrule a hold, within limits: an invoice in another currency can't be paid in dollars whoever approves it. It stays in the queue until rejected."""
+    queue_id, state = held(graph, name)
+    assert why in cannot_approve(state["invoice"])
+    with pytest.raises(ValueError, match="can't be approved"):
+        release(graph, ledger, queue_id, "approve", "Dana Lee")
+    assert [e["id"] for e in ledger.queue()] == [queue_id] and ledger.payments() == []
+    assert release(graph, ledger, queue_id, "reject", "Dana Lee", "We pay in USD only")["result"]["status"] == "REJECTED"
+
+
+def test_a_decision_needs_a_name_a_reason_to_reject_and_a_waiting_invoice(graph, ledger):
+    """Refused without changing anything: no reviewer, a rejection with no note, an unknown action, an unknown queue number, and deciding the same invoice twice."""
+    queue_id, _ = held(graph, "invoice_1008.txt")
+    for args, message in ((("approve", " "), "reviewer name"), (("reject", "Dana"), "needs a note"), (("pay", "Dana"), "approve or reject")):
+        with pytest.raises(ValueError, match=message):
+            release(graph, ledger, queue_id, *args)
+    with pytest.raises(ValueError, match="no invoice is waiting under queue number 99"):
+        release(graph, ledger, 99, "approve", "Dana")
+    assert [e["status"] for e in ledger.queue(status=None)] == ["WAITING"]
+    release(graph, ledger, queue_id, "approve", "Dana")
+    with pytest.raises(ValueError, match="it is RESOLVED"):
+        release(graph, ledger, queue_id, "approve", "Dana")
+    assert len(ledger.payments()) == 1
+
+
+def test_a_held_revision_replaced_by_a_newer_one_leaves_the_queue(graph, ledger, tmp_path):
+    """R1 is waiting for review when R2 arrives. R1's queue entry closes as superseded, so the reviewer sees one invoice, not two."""
+    run(graph, INVOICES / "invoice_1004.json")
+    r1, _ = held(graph, "invoice_1004_revised.json")
+    state = run(graph, revision_of_1004(tmp_path, "R2"))
+    assert [(e["id"], e["status"]) for e in ledger.queue(status=None)] == [(r1, "SUPERSEDED"), (state["result"]["queue_id"], "WAITING")]
+    with pytest.raises(ValueError, match="it is SUPERSEDED"):
+        release(graph, ledger, r1, "approve", "Dana")
+
+
+def test_a_run_paused_in_one_process_is_resumed_from_another(tmp_path):
+    """The real arrangement: main.py holds an invoice and exits; later, a new ledger connection and a new graph over the same files release it."""
+    files = dict(ledger=tmp_path / "ledger.db", checkpoints=tmp_path / "checkpoints.db")
+
+    def process():
+        ledger = Ledger(files["ledger"], pay=lambda vendor, amount: None)
+        return ledger, build_graph(Replay(REPLAYS), INVENTORY, ledger, checkpointer(files["checkpoints"]))
+
+    ledger, graph = process()
+    queue_id, _ = held(graph, "invoice_1012.pdf")
+    ledger.close()
+
+    ledger, graph = process()                      # nothing carried over in memory
+    [entry] = ledger.queue()
+    assert entry["id"] == queue_id
+    state = release(graph, ledger, queue_id, "approve", "Dana Lee", "Vendor confirmed by phone")
+    # The invoice came back from the checkpoint file intact: exact amounts, repaired values and all.
+    assert state["invoice"].total == Decimal("9975.00") and state["invoice"].line_items[1].amount == Decimal("3500.00")
+    assert state["result"]["status"] == "PAID" and ledger.total_paid() == Decimal("9975")
+
+
+def test_review_command_lists_shows_and_decides(capsys, tmp_path):
+    """review.py against what main.py left behind: the list, one invoice in full, a refused approval (exit 1), and a rejection."""
+    import review
+    where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")]
+    main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
+    assert "1 held for review" in capsys.readouterr().err
+
+    assert review.main(where) == 0
+    listing = capsys.readouterr().out
+    assert "invoice_1014.xml" in listing and "CURRENCY_UNSUPPORTED" in listing and "1 waiting" in listing
+
+    assert review.main([*where, "show", "1"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert "EUR" in shown["cannot_approve_because"] and shown["invoice"]["currency"] == "EUR"
+
+    assert review.main([*where, "approve", "1", "--by", "Dana"]) == 1
+    assert "can't be approved" in capsys.readouterr().err
+
+    assert review.main([*where, "reject", "1", "--by", "Dana", "--note", "USD only"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert (out["result"]["status"], out["review"]["reviewer"]) == ("REJECTED", "Dana")
+    assert review.main(where) == 0 and "Nothing is waiting" in capsys.readouterr().out

@@ -9,8 +9,10 @@ dependencies = []  # standard library only
 # pymupdf is pinned to one version on purpose: a recording in data/replays is keyed by the text
 # sent to the model, and another version could space a PDF's text differently and miss it.
 llm = ["pymupdf==2.1", "python-dotenv>=1.0"]  # PDF text, .env for the CLI; the API client is stdlib
-pipeline = ["langgraph>=1.2,<2"]  # main.py and pipeline/: the stages wired as a graph
-dev = ["pytest>=8", "pymupdf==2.1", "python-dotenv>=1.0", "langgraph>=1.2,<2"]
+# main.py, review.py and pipeline/: the stages wired as a graph, with runs saved to SQLite so a
+# held invoice can be released later.
+pipeline = ["langgraph>=1.2,<2", "langgraph-checkpoint-sqlite>=3.1,<4"]
+dev = ["pytest>=8", "pymupdf==2.1", "python-dotenv>=1.0", "langgraph>=1.2,<2", "langgraph-checkpoint-sqlite>=3.1,<4"]
 
 [build-system]
 requires = ["setuptools>=64"]

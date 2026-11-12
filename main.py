@@ -9,6 +9,9 @@ Runs one invoice file, or every invoice in a folder, through the pipeline graph 
     register   the ledger: is this a duplicate, or a revision of one already handled?
     pay / hold / reject, or skip for an invoice that was already handled
 
+A held invoice is a paused run, saved in checkpoints.db. review.py lists what is waiting and
+resumes a run with a person's decision.
+
 Prints a JSON list on stdout, one {"file", "result", "decision", "trail", "invoice"} entry per
 file ({"file", "error"} for a file that can't be read); exits 1 if any file is an error. With
 --trace, each step is also printed to stderr as it happens, one JSON line per node.
@@ -31,7 +34,7 @@ from extraction.__main__ import emit, model_options, provider_from
 from ledger import Ledger
 from normalizer.__main__ import _json_default
 from normalizer.parsing import LOADERS
-from pipeline import build_graph, run
+from pipeline import build_graph, checkpointer, run
 from seed_inventory import seed
 
 
@@ -66,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="SQLite ledger of invoices seen and payments made (default: ledger.db)")
     ap.add_argument("--fresh", action="store_true",
                     help="set the existing ledger aside and start with an empty one. Invoices it had paid will be paid again")
+    ap.add_argument("--checkpoints", default="checkpoints.db",
+                    help="SQLite file of saved runs, so a held invoice can be released later (default: checkpoints.db)")
     ap.add_argument("--trace", action="store_true", help="print each pipeline step to stderr as it happens")
     model_options(ap)
     args = ap.parse_args(argv)
@@ -88,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.fresh:
         set_aside(Path(args.ledger))
     ledger = Ledger(args.ledger)
-    graph = build_graph(provider_from(args), inventory, ledger)
+    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints))
     results = []
     for file in normalizer.expand([path], LOADERS.keys() | TEXT_SUFFIXES):
         on_step = None
@@ -109,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
     if unconfirmed:
         print(f"{len(unconfirmed)} payment(s) sent but not confirmed; check with the bank before anything is "
               f"paid again: {', '.join(Path(f).name for f in unconfirmed)}", file=sys.stderr)
+    held = [r for r in results if r.get("result", {}).get("status") == "HELD"]
+    if held:
+        print(f"{len(held)} held for review. See them with: python review.py --ledger {args.ledger} "
+              f"--checkpoints {args.checkpoints}", file=sys.stderr)
     print(f"{len(results)} files: paid {len(paid)} now, ${sum(p['amount'] for p in paid):,.2f}. "
           f"Ledger {args.ledger}: {len(ledger.payments())} payments, ${ledger.total_paid():,.2f} in all.", file=sys.stderr)
     return emit(results)

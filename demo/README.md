@@ -103,6 +103,30 @@ whole folder is run again.
 What not to claim: that payments are real or retried. `mock_payment` always succeeds; what is
 tested is that a payment which never confirmed is not blindly sent again.
 
+## Holding an invoice for a person, and releasing it
+
+After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to both commands to
+keep the demo's saved runs apart too):
+
+```bash
+python review.py --ledger demo.db                                     # seven invoices waiting
+python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
+python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014 in EUR: refused, with the reason
+python review.py --ledger demo.db reject 6 --by "Dana Lee" --note "We pay in USD only"
+```
+
+What to point at:
+
+- **`main.py` has exited.** Each held invoice is a pipeline run saved mid-flight; `review.py` is a
+  separate process that picks one up and lets it finish.
+- **The revision pays $4,050.00, not $5,940.00,** because $1,890.00 already went out.
+- **The EUR invoice can't be approved by anyone,** only rejected: a person can overrule the
+  policy, but not into paying euros as dollars.
+- **Every decision carries a name and a note** in the ledger.
+
+How to say it: the system never asks a person to do what it can do, and never does what a person
+should decide. A model can make it stricter; only a named person can release a hold.
+
 ## Watching one invoice move through the pipeline
 
 ```bash

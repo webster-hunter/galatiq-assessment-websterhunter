@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_key TEXT PRIMARY KEY, vendor TEXT NOT NULL, amount TEXT NOT NULL,
     status TEXT NOT NULL, created_at TEXT NOT NULL
 );
+-- Invoices waiting for a person. thread_id names the paused pipeline run that resumes with their answer.
+CREATE TABLE IF NOT EXISTS review_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE,
+    vendor_key TEXT, number_key TEXT, revision INTEGER,
+    source_file TEXT NOT NULL, vendor TEXT, total TEXT, reasons TEXT NOT NULL,
+    status TEXT NOT NULL, action TEXT, reviewer TEXT, note TEXT,
+    created_at TEXT NOT NULL, resolved_at TEXT
+);
 """
 
 
@@ -162,7 +170,11 @@ class Ledger:
         paid = [r for r in older if r["status"] in MONEY_MAY_HAVE_MOVED]
         open_ = tuple(r for r in older if r["status"] in OPEN)  # held or unfinished: replaced by this revision
         if paid:
-            return Seen(REVISION_OF_PAID, paid[-1], paid_total=sum((Decimal(r["total"]) for r in paid), Decimal(0)),
+            # What actually went out, from the payments table: a reviewer may have released an
+            # earlier revision for only part of its total.
+            keys = [payment_key(r["vendor_key"], r["number_key"], r["revision"]) for r in paid]
+            sent = self._db.execute(f"SELECT amount FROM payments WHERE payment_key IN ({','.join('?' * len(keys))})", keys)
+            return Seen(REVISION_OF_PAID, paid[-1], paid_total=sum((Decimal(r["amount"]) for r in sent), Decimal(0)),
                         replaces=open_)
         if open_:
             return Seen(REVISION_OF_UNPAID, open_[-1], replaces=open_)
@@ -187,15 +199,26 @@ class Ledger:
                  self._now().isoformat()))
 
     def supersede(self, earlier: dict, by_file: str) -> None:
-        """Mark an earlier, open revision as replaced, so it is not paid or reviewed on its own."""
+        """Mark an earlier, open revision as replaced, so it is not paid or reviewed on its own.
+
+        If it was waiting in the review queue, that entry is closed too: the reviewer should see
+        the revision that replaced it, not both.
+        """
         with self._db:
+            self._db.execute("UPDATE review_queue SET status='SUPERSEDED', note=?, resolved_at=? "
+                             "WHERE vendor_key=? AND number_key=? AND revision=? AND status='WAITING'",
+                             (f"by {by_file}", self._now().isoformat(),
+                              earlier["vendor_key"], earlier["number_key"], earlier["revision"]))
             self._db.execute("UPDATE invoices SET status='SUPERSEDED', detail=?, updated_at=? "
                              "WHERE vendor_key=? AND number_key=? AND revision=?",
                              (f"by {by_file}", self._now().isoformat(),
                               earlier["vendor_key"], earlier["number_key"], earlier["revision"]))
 
-    def pay(self, inv: Invoice) -> dict:
+    def pay(self, inv: Invoice, amount: Decimal | None = None) -> dict:
         """Pay the invoice once. A second call for the same invoice pays nothing and says so.
+
+        amount, if given, is paid in place of the invoice total: a reviewer releasing a revision
+        of an invoice that was already paid pays only the difference.
 
         The payment row is written as PENDING before the payment function is called, and marked
         PAID after it returns. If the call raises (a timeout, a dropped connection), or the
@@ -215,24 +238,56 @@ class Ledger:
                 send one here; this is the last guard before money moves.
         """
         key = identity(inv)
-        if key is None or inv.total is None or inv.total <= 0:
-            raise ValueError(f"refusing to pay {inv.source_file}: no invoice number or no positive total")
+        amount = inv.total if amount is None else amount
+        if key is None or amount is None or amount <= 0:
+            raise ValueError(f"refusing to pay {inv.source_file}: no invoice number or no positive amount")
         pkey = payment_key(*key)
         try:
             with self._db:  # the PRIMARY KEY on payment_key is the lock: only one insert can succeed
                 self._db.execute("INSERT INTO payments VALUES (?,?,?,?,?)",
-                                 (pkey, inv.vendor_name, _plain(inv.total), "PENDING", self._now().isoformat()))
+                                 (pkey, inv.vendor_name, _plain(amount), "PENDING", self._now().isoformat()))
         except sqlite3.IntegrityError:
             row = self._db.execute("SELECT amount, status FROM payments WHERE payment_key=?", (pkey,)).fetchone()
             return {"payment_key": pkey, "amount": Decimal(row["amount"]), "status": row["status"], "repeated": True}
         try:
-            self._pay(inv.vendor_name, inv.total)
+            self._pay(inv.vendor_name, amount)
         except Exception as e:  # whatever the payment API throws: we can't know whether money moved
-            return {"payment_key": pkey, "amount": inv.total, "status": "PENDING", "repeated": False,
+            return {"payment_key": pkey, "amount": amount, "status": "PENDING", "repeated": False,
                     "error": f"{type(e).__name__}: {e}"}
         with self._db:
             self._db.execute("UPDATE payments SET status='PAID' WHERE payment_key=?", (pkey,))
-        return {"payment_key": pkey, "amount": inv.total, "status": "PAID", "repeated": False}
+        return {"payment_key": pkey, "amount": amount, "status": "PAID", "repeated": False}
+
+    def enqueue(self, thread_id: str, inv: Invoice, reasons: list[str]) -> int:
+        """Put an invoice in the review queue and return its queue number.
+
+        Safe to repeat: the same thread_id always maps to the same entry, so a pipeline step
+        that runs twice does not queue the invoice twice.
+        """
+        key = identity(inv) or (None, None, None)
+        with self._db:
+            self._db.execute(
+                "INSERT OR IGNORE INTO review_queue (thread_id, vendor_key, number_key, revision, source_file, vendor, "
+                "total, reasons, status, created_at) VALUES (?,?,?,?,?,?,?,?,'WAITING',?)",
+                (thread_id, *key, inv.source_file, inv.vendor_name, _plain(inv.total), ", ".join(reasons),
+                 self._now().isoformat()))
+        return self._db.execute("SELECT id FROM review_queue WHERE thread_id=?", (thread_id,)).fetchone()["id"]
+
+    def queue(self, status: str | None = "WAITING") -> list[dict]:
+        """Review-queue entries, oldest first. status=None returns every entry, resolved ones included."""
+        sql = "SELECT * FROM review_queue" + (" WHERE status=?" if status else "") + " ORDER BY id"
+        return [dict(r) for r in self._db.execute(sql, (status,) if status else ())]
+
+    def queue_entry(self, queue_id: int) -> dict | None:
+        row = self._db.execute("SELECT * FROM review_queue WHERE id=?", (queue_id,)).fetchone()
+        return dict(row) if row else None
+
+    def resolve(self, thread_id: str, action: str, reviewer: str, note: str | None) -> None:
+        """Record a person's decision on a queued invoice: who, what, and why."""
+        with self._db:
+            self._db.execute("UPDATE review_queue SET status='RESOLVED', action=?, reviewer=?, note=?, resolved_at=? "
+                             "WHERE thread_id=? AND status='WAITING'",
+                             (action, reviewer, note, self._now().isoformat(), thread_id))
 
     def invoices(self) -> list[dict]:
         """Every invoice on record, oldest identity first."""
