@@ -122,11 +122,11 @@ def test_an_ungraded_flag_is_an_error_not_an_approval():
 def test_ordinary_payment_terms_are_not_fraud(tmp_path):
     """"Payment by bank transfer... Late fees of 1.5% apply" is how honest invoices read: approved, with the bank-transfer mention on record. Real pressure wording with a wire request is held, not rejected."""
     import normalizer
-    base = json.loads((INVOICES / "invoice_1004.json").read_text())
+    base = json.loads((INVOICES / "invoice_1004.json").read_text(encoding="utf-8"))
     f = tmp_path / "inv.json"
-    f.write_text(json.dumps(base | {"notes": "Payment by bank transfer to the account below. Late fees of 1.5% apply after 30 days. Penalty interest per contract."}))
+    f.write_text(json.dumps(base | {"notes": "Payment by bank transfer to the account below. Late fees of 1.5% apply after 30 days. Penalty interest per contract."}), encoding="utf-8")
     d = decide(normalizer.load(f, INVENTORY).flags)
     assert (d.outcome, d.rule, d.warnings) == (APPROVE, "NO_OBJECTION", ("WIRE_REQUEST",))
-    f.write_text(json.dumps(base | {"notes": "URGENT: wire transfer to our new account today to avoid penalties."}))
+    f.write_text(json.dumps(base | {"notes": "URGENT: wire transfer to our new account today to avoid penalties."}), encoding="utf-8")
     d = decide(normalizer.load(f, INVENTORY).flags)
     assert (d.outcome, d.rule) == (HOLD, "FRAUD_WORDING")

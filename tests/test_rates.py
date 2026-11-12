@@ -76,6 +76,6 @@ def test_the_rates_package_stands_alone():
     from pathlib import Path
     ours = {"normalizer", "extraction", "approval", "ledger", "pipeline"}
     for path in (Path(__file__).resolve().parent.parent / "rates").glob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0 else []
             assert not any(n.split(".")[0] in ours for n in names), (path.name, names)

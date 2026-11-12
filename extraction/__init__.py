@@ -44,13 +44,20 @@ FALLBACK_SUFFIXES = frozenset({".dat", ".edi", ".tsv"})
 
 
 def _decode(data: bytes) -> str:
-    """Bytes as text, by the encodings an invoice export is likely to be in."""
+    """Bytes as text, by the encodings an invoice export is likely to be in, with line endings as \\n.
+
+    Windows (\\r\\n) and old Mac (\\r) line endings become \\n. A file is the same invoice
+    whichever machine saved it or checked it out, and a recording is found by a hash of the
+    text sent to the model: left as they came, the same file would miss its recording on Windows.
+    """
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16", errors="replace")
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return data.decode("cp1252", errors="replace")  # every byte maps to something; binary data is caught by its control characters
+        text = data.decode("utf-16", errors="replace")
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("cp1252", errors="replace")  # every byte maps to something; binary data is caught by its control characters
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _other_invoice_numbers(number: str | None, text: str) -> list[str]:

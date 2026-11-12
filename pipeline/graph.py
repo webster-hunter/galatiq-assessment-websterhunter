@@ -54,7 +54,7 @@ import sqlite3
 import uuid
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -457,6 +457,8 @@ def _plain(value):
         return value.isoformat()
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return dataclasses.asdict(value)
+    if isinstance(value, PurePath):
+        return value.as_posix()  # forward slashes on every system, so a log reads the same wherever it was written
     return str(value)  # a record for people to read: an unfamiliar value is better written as text than not at all
 
 

@@ -117,7 +117,7 @@ def test_the_page_is_served_and_never_writes_vendor_text_as_html(client):
     assert "Invoice review" in client.get("/").text
     script = client.get("/static/app.js").text
     assert "/api/queue" in script and "innerHTML" not in script and "insertAdjacentHTML" not in script
-    source = (ROOT / "web" / "frontend" / "src" / "app.ts").read_text()
+    source = (ROOT / "web" / "frontend" / "src" / "app.ts").read_text(encoding="utf-8")
     assert "innerHTML" not in source
     # Every id the script looks up exists once in the page: a repeated id silently answers with the wrong element.
     import re
@@ -227,7 +227,7 @@ def test_the_compiled_script_matches_its_source(tmp_path):
     frontend = ROOT / "web" / "frontend"
     built = subprocess.run(["tsc", "-p", str(frontend), "--outDir", str(tmp_path)], capture_output=True, text=True)
     assert built.returncode == 0, built.stdout
-    assert (tmp_path / "app.js").read_text() == (ROOT / "web" / "static" / "app.js").read_text(), \
+    assert (tmp_path / "app.js").read_text(encoding="utf-8") == (ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8"), \
         "web/static/app.js is out of date: run `npm run build` in web/frontend"
 
 
@@ -279,7 +279,7 @@ def test_a_persons_decision_is_not_listed_as_automatic_and_a_rerun_adds_nothing(
 def test_a_file_that_could_not_be_read_is_listed_too(paths, tmp_path, capsys):
     """An unreadable file has no invoice, but it is still an outcome someone should see."""
     bad = tmp_path / "broken.json"
-    bad.write_text("{not json")
+    bad.write_text("{not json", encoding="utf-8")
     main.main([f"--invoice_path={bad}", "--offline", *[x for k, v in paths.items() for x in (f"--{k}", str(v))]])
     capsys.readouterr()
     client = browser(create_app(paths["ledger"], paths["checkpoints"], paths["rates"]))
@@ -445,7 +445,7 @@ def test_a_file_in_a_format_nothing_reads_is_reported_not_passed_over(paths, tmp
     """A folder holds a spreadsheet and a Word file among the invoices. Each ends as an ERROR naming the formats that can be read, and shows on the screen; a hidden file and a subfolder are left alone. No model is asked to read them."""
     inbox = tmp_path / "inbox"
     (inbox / "archive").mkdir(parents=True)
-    (inbox / "invoice_1004.json").write_text((INVOICES / "invoice_1004.json").read_text())
+    (inbox / "invoice_1004.json").write_text((INVOICES / "invoice_1004.json").read_text(encoding="utf-8"))
     (inbox / "invoice_2001.docx").write_bytes(b"PK\\x03\\x04 not really a document")
     (inbox / "invoice_2002.xlsx").write_bytes(b"PK\\x03\\x04")
     (inbox / ".DS_Store").write_bytes(b"\\x00")

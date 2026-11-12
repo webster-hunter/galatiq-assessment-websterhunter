@@ -217,12 +217,12 @@ def test_the_critic_cannot_undo_a_hold_the_agent_added():
     import json as _json
     path = INVOICES.parent / "invoices" / "invoice_1004.json"
     # A warned approval: 1004 with one item on two lines.
-    warned = _json.loads(path.read_text())
+    warned = _json.loads(path.read_text(encoding="utf-8"))
     warned["line_items"] = [{"item": "WidgetA", "quantity": 3, "unit_price": 250.0}, {"item": "WidgetA", "quantity": 4, "unit_price": 250.0}]
     warned["subtotal"], warned["tax_amount"], warned["total"] = 1750.0, 140.0, 1890.0
     import tempfile
     f = Path(tempfile.mkdtemp()) / "warned.json"
-    f.write_text(_json.dumps(warned))
+    f.write_text(_json.dumps(warned), encoding="utf-8")
     state = run(graph, f)
     assert decide(state["invoice"].flags).outcome == APPROVE
     assert [(s["recommendation"], s["outcome"]) for s in steps(state, "reviewer")] == [(HOLD, HOLD), (APPROVE, HOLD)]

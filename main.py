@@ -111,9 +111,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.fresh:
         set_aside(Path(args.ledger))
-    ledger = Ledger(args.ledger)
+    ledger, saved_runs = Ledger(args.ledger), checkpointer(args.checkpoints)
+    try:
+        return emit(process(args, path, inventory, rates, ledger, saved_runs))
+    finally:
+        # Closed whatever happens. An open SQLite file can't be renamed or deleted on Windows, so
+        # a ledger left open here could not be set aside by --fresh later in the same process.
+        ledger.close()
+        saved_runs.conn.close()
+
+
+def process(args, path: Path, inventory: dict, rates, ledger: Ledger, saved_runs) -> list[dict]:
+    """Run every file under path through the pipeline, print the summary on stderr, and return one entry per file."""
     fallback_types = {t if t.startswith(".") else f".{t}" for t in (x.strip().lower() for x in args.fallback_types.split(",")) if t}
-    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints), rates, fallback_types)
+    graph = build_graph(provider_from(args), inventory, ledger, saved_runs, rates, fallback_types)
     results = []
     # Every file in a folder, whatever its extension: one in a format nothing here reads ends as
     # an ERROR with its name, where a person will see it. Skipping it would lose an invoice quietly.
@@ -151,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         now[p["currency"]] = now.get(p["currency"], 0) + p["amount"]
     print(f"{len(results)} files: paid {len(paid)} now ({_sums(now)}). "
           f"Ledger {args.ledger}: {len(ledger.payments())} payments ({_sums(ledger.paid_totals())}) in all.", file=sys.stderr)
-    return emit(results)
+    return results
 
 
 if __name__ == "__main__":

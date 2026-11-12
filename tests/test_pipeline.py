@@ -120,9 +120,9 @@ def test_a_revision_of_a_paid_invoice_is_held_for_the_difference(graph, ledger):
 
 def test_a_revision_of_an_unpaid_invoice_replaces_it(graph, ledger, tmp_path):
     """If the original was held, not paid, the revision supersedes it and is judged on its own."""
-    original = json.loads((INVOICES / "invoice_1004.json").read_text())
+    original = json.loads((INVOICES / "invoice_1004.json").read_text(encoding="utf-8"))
     original["currency"] = "EUR"  # held for currency, so never paid
-    (tmp_path / "invoice_1004.json").write_text(json.dumps(original))
+    (tmp_path / "invoice_1004.json").write_text(json.dumps(original), encoding="utf-8")
     assert run(graph, tmp_path / "invoice_1004.json")["result"]["status"] == "HELD"
     state = run(graph, INVOICES / "invoice_1004_revised.json")
     assert state["result"]["status"] == "PAID" and state["result"]["amount"] == Decimal("5940.00")
@@ -138,7 +138,7 @@ def test_same_number_with_different_content_is_held(graph, ledger, tmp_path):
     """A second file claiming the same vendor, number and revision but a different total is not a duplicate to skip: it is held, and the first invoice's record is untouched."""
     assert run(graph, INVOICES / "invoice_1015.csv")["result"]["status"] == "PAID"
     other = tmp_path / "copy.csv"
-    other.write_text((INVOICES / "invoice_1015.csv").read_text().replace("WidgetA,10,250.00,2500.00", "WidgetA,12,250.00,3000.00")
+    other.write_text((INVOICES / "invoice_1015.csv").read_text(encoding="utf-8").replace("WidgetA,10,250.00,2500.00", "WidgetA,12,250.00,3000.00")
                      .replace("6500.00", "7000.00"))
     state = run(graph, other)
     assert state["decision"].because == ("DUPLICATE_CONFLICT",) and state["result"]["status"] == "HELD"
@@ -148,7 +148,7 @@ def test_same_number_with_different_content_is_held(graph, ledger, tmp_path):
 def test_an_unreadable_file_goes_to_failed_and_never_reaches_approval(graph, tmp_path):
     """A file that can't be loaded takes the other branch after ingest: no invoice, no decision, an error result."""
     bad = tmp_path / "broken.json"
-    bad.write_text("{not json")
+    bad.write_text("{not json", encoding="utf-8")
     state = run(graph, bad)
     assert nodes(state) == ["ingest", "failed"]
     assert "invoice" not in state and "decision" not in state
@@ -204,10 +204,10 @@ def test_the_readme_diagram_matches_the_graph(graph):
 # --- Fixes from the code review ---------------------------------------------------------------------
 
 def revision_of_1004(tmp_path, label):
-    r = json.loads((INVOICES / "invoice_1004_revised.json").read_text())
+    r = json.loads((INVOICES / "invoice_1004_revised.json").read_text(encoding="utf-8"))
     r["revision"] = label
     path = tmp_path / f"invoice_1004_{label}.json"
-    path.write_text(json.dumps(r))
+    path.write_text(json.dumps(r), encoding="utf-8")
     return path
 
 
@@ -267,7 +267,7 @@ def test_the_same_bill_under_another_vendor_name_is_held(graph, ledger, tmp_path
     """The same number, lines and total with the vendor written differently is not a new invoice to pay: it is held as a possible duplicate, pointing at the first."""
     assert run(graph, INVOICES / "invoice_1015.csv")["result"]["status"] == "PAID"
     other = tmp_path / "other_vendor.csv"
-    other.write_text((INVOICES / "invoice_1015.csv").read_text().replace("Reliable Components Inc.", "Reliable Components (formerly RC Ltd.)"))
+    other.write_text((INVOICES / "invoice_1015.csv").read_text(encoding="utf-8").replace("Reliable Components Inc.", "Reliable Components (formerly RC Ltd.)"))
     state = run(graph, other)
     [f] = [f for f in state["invoice"].flags if f["code"] == "POSSIBLE_DUPLICATE"]
     assert (f["severity"], f["earlier_file"], f["earlier_vendor"]) == ("REVIEW", "invoice_1015.csv", "Reliable Components Inc.")
@@ -276,9 +276,9 @@ def test_the_same_bill_under_another_vendor_name_is_held(graph, ledger, tmp_path
 
 def test_an_original_is_processed_when_its_only_newer_revision_was_rejected(graph, ledger, tmp_path):
     """R1 arrives first and is rejected (its total doesn't add up). The original, arriving after, is not skipped as superseded: it is the only good version, and is paid."""
-    bad = json.loads((INVOICES / "invoice_1004_revised.json").read_text())
+    bad = json.loads((INVOICES / "invoice_1004_revised.json").read_text(encoding="utf-8"))
     bad["total"] = 9999.00
-    (tmp_path / "a_revised.json").write_text(json.dumps(bad))
+    (tmp_path / "a_revised.json").write_text(json.dumps(bad), encoding="utf-8")
     assert run(graph, tmp_path / "a_revised.json")["result"]["status"] == "REJECTED"
     state = run(graph, INVOICES / "invoice_1004.json")
     assert state["result"]["status"] == "PAID" and state["trail"][2]["seen"] == "NEW"
@@ -387,10 +387,10 @@ def test_some_holds_can_only_be_rejected(graph, ledger, tmp_path):
     """A reviewer can overrule a hold, within limits: an invoice that conflicts with one on record, or has no invoice number, can't be paid correctly whoever approves it. It stays in the queue until rejected."""
     run(graph, INVOICES / "invoice_1015.csv")
     conflict = tmp_path / "copy.csv"
-    conflict.write_text((INVOICES / "invoice_1015.csv").read_text().replace("WidgetA,10,250.00,2500.00", "WidgetA,12,250.00,3000.00")
+    conflict.write_text((INVOICES / "invoice_1015.csv").read_text(encoding="utf-8").replace("WidgetA,10,250.00,2500.00", "WidgetA,12,250.00,3000.00")
                         .replace("6500.00", "7000.00"))
     unnumbered = tmp_path / "unnumbered.json"
-    unnumbered.write_text(json.dumps(json.loads((INVOICES / "invoice_1004.json").read_text()) | {"invoice_number": None}))
+    unnumbered.write_text(json.dumps(json.loads((INVOICES / "invoice_1004.json").read_text(encoding="utf-8")) | {"invoice_number": None}))
     for path, why in ((conflict, "already on record"), (unnumbered, "no invoice number")):
         state = run(graph, path)
         queue_id = state["result"]["queue_id"]
@@ -454,11 +454,11 @@ def test_the_dollar_thresholds_apply_to_the_estimate(ledger, rates, tmp_path):
 def test_no_usable_rate_means_no_estimate_and_no_approval(ledger, rates, tmp_path):
     """A currency the service doesn't carry, a date before any rate, and a rate more than a week old: each is held as unsupported with the reason, and can't be approved while no rate exists."""
     graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
-    base = json.loads((INVOICES / "invoice_1004.json").read_text())
+    base = json.loads((INVOICES / "invoice_1004.json").read_text(encoding="utf-8"))
     cases = (("CHF", "2026-01-22", "NO_RATE"), ("EUR", "2026-01-05", "NO_RATE"), ("EUR", "2026-02-20", "STALE_RATE"))
     for n, (currency, on, reason) in enumerate(cases):
         f = tmp_path / f"fx{n}.json"
-        f.write_text(json.dumps(base | {"invoice_number": f"INV-80{n}", "currency": currency, "date": on, "due_date": "2026-03-20"}))
+        f.write_text(json.dumps(base | {"invoice_number": f"INV-80{n}", "currency": currency, "date": on, "due_date": "2026-03-20"}), encoding="utf-8")
         state = run(graph, f)
         [flag] = [x for x in state["invoice"].flags if x["code"] == "CURRENCY_UNSUPPORTED"]
         assert flag["reason"] == reason, (currency, on)
@@ -772,7 +772,7 @@ def test_an_unfamiliar_value_in_the_state_is_logged_as_text():
 def test_a_file_that_ends_the_same_way_every_run_is_logged_once_and_by_its_path(graph, ledger, tmp_path):
     """An unreadable file and a second copy reach the same outcome on every run over their folder: each is logged the first time only. The key is the file's full path, so a file with the same name in another folder is its own file."""
     broken = tmp_path / "broken.json"
-    broken.write_text("{not json")
+    broken.write_text("{not json", encoding="utf-8")
     for _ in range(3):
         assert run(graph, broken)["result"]["status"] == "ERROR"
     assert [r["status"] for r in ledger.runs()] == ["ERROR"]
@@ -780,7 +780,7 @@ def test_a_file_that_ends_the_same_way_every_run_is_logged_once_and_by_its_path(
     run(graph, INVOICES / "invoice_1004.json")
     for folder in ("january", "february"):
         (tmp_path / folder).mkdir()
-        (tmp_path / folder / "copy.json").write_text((INVOICES / "invoice_1004.json").read_text())
+        (tmp_path / folder / "copy.json").write_text((INVOICES / "invoice_1004.json").read_text(encoding="utf-8"))
     for folder in ("january", "february", "january"):
         assert run(graph, tmp_path / folder / "copy.json")["result"]["status"] == "SKIPPED_DUPLICATE"
     skipped = [r for r in ledger.runs() if r["status"] == "SKIPPED_DUPLICATE"]

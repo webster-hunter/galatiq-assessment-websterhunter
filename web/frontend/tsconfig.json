@@ -4,6 +4,7 @@
     "lib": ["ES2020", "DOM"],
     "strict": true,
     "noUnusedLocals": true,
+    "newLine": "lf",
     "rootDir": "src",
     "outDir": "../static",
     "types": []

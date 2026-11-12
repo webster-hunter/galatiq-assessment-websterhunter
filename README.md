@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 python main.py --invoice_path=data/invoices/invoice_1001.txt --offline     # one invoice
 python main.py --invoice_path=data/invoices --offline                      # the whole folder
 python -m web                                                              # the review screen, at http://127.0.0.1:8000
-pytest                                                                     # 334 tests, about 20 seconds
+pytest                                                                     # 336 tests, about 20 seconds
 ```
 
 `--offline` replays the model's recorded replies from `data/replays`, so no key is needed. To
@@ -272,5 +272,5 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/unfamiliar/`, `data/replays/` | The 20 sample invoices; four files in formats no parser knows; the model's recorded replies |
 | `docs/design-and-demo.pdf` | Design decisions, a demo walkthrough with the command for each step, how the outcomes changed as each stage was built, and what was left out |
-| `tests/` | 334 tests. Each one's first line says the behaviour it pins |
+| `tests/` | 336 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

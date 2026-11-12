@@ -151,13 +151,13 @@ def test_only_listed_types_are_given_to_the_model_and_only_if_they_are_text(tmp_
 def test_an_unknown_type_the_model_cannot_help_with_is_an_error_not_a_guess(tmp_path):
     """Text, but no model to read it, or a model that finds no invoice in it (a README, a log): an error naming the file. Nothing is invented, and an oversized file is not sent at all."""
     notes = tmp_path / "readme.dat"
-    notes.write_text("These are the delivery notes for February.\n")
+    notes.write_text("These are the delivery notes for February.\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"No reader for \.dat files \(readme\.dat\).*the model was not available"):
         read(notes, Model())
     with pytest.raises(ValueError, match="the model found no invoice in it"):
         read(notes, Model(transcription()))
     big, model = tmp_path / "dump.dat", Model(T3004)
-    big.write_text("x" * 200_001)
+    big.write_text("x" * 200_001, encoding="utf-8")
     with pytest.raises(ValueError, match="too large to give to the model"):
         read(big, model)
     assert model.sent == []
@@ -203,7 +203,7 @@ def test_a_line_item_with_a_nested_object_is_grounded():
 def test_a_structured_file_too_large_to_send_keeps_the_parsers_result(tmp_path):
     """The size limit holds for JSON, CSV and XML too: a large export in an unknown layout is not put into a model request. The parser's result stands, saying why the model was not asked."""
     big = tmp_path / "export.json"
-    big.write_text('{"invoiceNo": "INV-1", "blob": "' + "x" * 200_000 + '"}')
+    big.write_text('{"invoiceNo": "INV-1", "blob": "' + "x" * 200_000 + '"}', encoding="utf-8")
     model = Model(T3001)
     invoice, method = read(big, model)
     [flag] = [f for f in invoice.flags if f["code"] == "UNFAMILIAR_FORMAT"]
@@ -214,14 +214,14 @@ def test_a_structured_file_too_large_to_send_keeps_the_parsers_result(tmp_path):
 def test_a_file_holding_several_invoices_is_not_passed_off_as_one(tmp_path):
     """The model returns one invoice. A JSON list of several records is refused before anything is sent. A file the model does read that names other invoice numbers carries a flag listing them, so the person holding it knows only one was read."""
     batch = tmp_path / "batch.json"
-    batch.write_text('[{"invoiceNo": "INV-1"}, {"invoiceNo": "INV-2"}, {"invoiceNo": "INV-3"}]')
+    batch.write_text('[{"invoiceNo": "INV-1"}, {"invoiceNo": "INV-2"}, {"invoiceNo": "INV-3"}]', encoding="utf-8")
     model = Model(T3004)
     with pytest.raises(ValueError, match="top level is a JSON list.*a list of 3 records.*nothing of it was sent"):
         read(batch, model)
     assert model.sent == []
 
     dat = tmp_path / "batch.dat"
-    dat.write_text((UNFAMILIAR / "invoice_3004.dat").read_text() + "HDR|INV-3005|Coastal Bearings Co.|2026-02-07|2026-03-09|NET30\nLIN|WidgetB|1|500.00\nTOT|500.00\n")
+    dat.write_text((UNFAMILIAR / "invoice_3004.dat").read_text(encoding="utf-8") + "HDR|INV-3005|Coastal Bearings Co.|2026-02-07|2026-03-09|NET30\nLIN|WidgetB|1|500.00\nTOT|500.00\n")
     invoice, method = read(dat, Model(T3004))
     assert method == "llm_fallback"
     assert [f for f in invoice.flags if f["code"] == "POSSIBLY_SEVERAL_INVOICES"] == [
@@ -234,7 +234,7 @@ def test_a_file_holding_several_invoices_is_not_passed_off_as_one(tmp_path):
 def test_text_in_the_usual_windows_encodings_is_read(tmp_path):
     """An export is not always UTF-8. UTF-16 with its byte-order mark, UTF-8 with one, and Windows-1252 are all text a person can read, and are read. A .txt that is really binary says so, without claiming .txt has no reader."""
     from extraction import read_text
-    text = (UNFAMILIAR / "invoice_3004.dat").read_text() + "NOTE|Total due \u00a33000\n"
+    text = (UNFAMILIAR / "invoice_3004.dat").read_text(encoding="utf-8") + "NOTE|Total due \u00a33000\n"
     for name, data in (("utf16.dat", text.encode("utf-16")), ("bom.dat", text.encode("utf-8-sig")), ("win.dat", text.encode("cp1252"))):
         (tmp_path / name).write_bytes(data)
         assert read_text(tmp_path / name) == text, name
@@ -295,3 +295,27 @@ def test_a_misreading_by_the_model_is_caught_by_the_arithmetic_and_rejected(unfa
     assert invoice.total is None and [str(li.amount) for li in invoice.line_items] == ["1250.00", "1250.00"]
     assert (state["result"]["status"], state["decision"].rule) == ("REJECTED", "BLOCKING_FLAG")
     assert set(state["decision"].because) == {"TOTAL_MISSING", "LINE_AMOUNT_MISMATCH"}
+
+
+def test_a_file_with_windows_line_endings_is_the_same_invoice_and_finds_its_recording(tmp_path):
+    """A checkout on Windows can turn every line ending into CRLF. The text read is the same either way, so the recording made from the LF file is found and the invoice comes out identical. Without this, every replay missed on Windows."""
+    from extraction import Replay, extract, read_text
+    replay = Replay(ROOT / "data" / "replays")
+    for name in ("invoice_1001.txt", "invoice_1012.txt"):
+        original = (INVOICES / name).read_bytes()
+        assert b"\r\n" not in original
+        windows = tmp_path / name
+        windows.write_bytes(original.replace(b"\n", b"\r\n"))
+        assert read_text(windows) == read_text(INVOICES / name) and "\r" not in read_text(windows)
+        assert extract(windows, replay) == extract(INVOICES / name, replay)       # no "no recording" error: the hash matched
+    mac = tmp_path / "old_mac.txt"
+    mac.write_bytes(b"Invoice INV-1\rTotal 5\r")
+    assert read_text(mac) == "Invoice INV-1\nTotal 5\n"
+
+
+def test_a_path_in_a_run_log_reads_the_same_on_every_system():
+    """A Path is logged with forward slashes, including one built the Windows way."""
+    import json
+    from pathlib import PureWindowsPath
+    from pipeline.graph import _plain
+    assert json.loads(json.dumps({"p": PureWindowsPath("x\\y.txt"), "q": Path("x") / "y.txt"}, default=_plain)) == {"p": "x/y.txt", "q": "x/y.txt"}

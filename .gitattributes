@@ -1,0 +1,10 @@
+# Text files are checked out with LF line endings on every machine. Without this, a Windows
+# checkout with core.autocrlf=true rewrites them to CRLF: the invoice text sent to the model
+# changes, its hash no longer matches a recording in data/replays, and every replay misses.
+* text=auto eol=lf
+
+# The sample invoices and the recorded model replies are data, not source: byte for byte as stored.
+data/** -text
+
+*.pdf binary
+*.png binary
