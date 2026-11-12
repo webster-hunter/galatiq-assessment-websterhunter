@@ -237,13 +237,39 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | Not built | Why |
 |---|---|
 | OCR for scanned images | The sample PDFs have a text layer. A scan is refused with a message saying so |
-| Reading Word, Excel or image files | Each is reported as an error for a person. Converting one to text would put it on the same path as a PDF |
+| Reading Word, Excel or image files | Each is reported as an error for a person. See the extensions below |
 | Matching to purchase orders and goods receipts | No such data in the brief. It is the first thing to add with real systems |
 | A vendor list | Would catch a changed bank account, a billing currency, and a vendor name spelled two ways |
 | Real exchange rates | The brief rules out internet access. `rates/` is a local mock with made-up rates |
 | Retrying a failed payment | `mock_payment` always succeeds. An unconfirmed payment is held for a person, never resent blindly |
 | Processing invoices from the browser | The screen is for decisions. Invoices are still processed by `main.py` |
 | Deployment, logins, concurrency | Out of scope for a local prototype |
+
+## Possible extensions: Word and spreadsheet files
+
+Neither is read today: a `.docx` or `.xlsx` ends as an error naming the file, on the review
+screen. Adding them is small, because everything after "turn the file into text" already exists.
+The fallback takes any text and puts it through the model, the grounding check and the policy.
+
+| Type | What it would take | Why it isn't in yet |
+|---|---|---|
+| Word, `.docx` | Extract paragraphs and tables, writing each table row as one line so a line item's values stay together. Roughly 30 to 50 lines and tests | No sample in the brief to build against, so the table handling would be untested guesswork. It also adds a dependency (or hand-written zip and XML reading) to a prototype that so far needs one library for PDFs |
+| Excel, `.xlsx` | Write each row as a line of cells, per sheet. Roughly 60 to 100 lines and tests | The same, plus a real risk: a cell stores `1250` and shows `$1,250.00`, a date is stored as a serial number, `8%` as `0.08`, and a total is often a formula whose value may never have been calculated. If the text given to the model is not what a person sees in the sheet, the grounding check verifies the wrong thing. That needs real spreadsheets from real suppliers to get right |
+| Legacy `.doc`, `.xls` | An external converter such as LibreOffice | A heavy dependency for formats that are disappearing. I would leave these as reported, for a person |
+
+Three things would be decided when adding them:
+
+- **Held or not.** I would treat Word like a PDF (payable automatically if clean) and hold
+  spreadsheets at first, as unfamiliar formats are held now, until the stored-versus-shown risk
+  has been checked on real files.
+- **Safety.** Both formats are zip archives: a size limit against zip bombs, and the same refusal
+  of XML entity tricks the XML loader has. Macros are never run, since the file is only parsed.
+- **Pinned versions.** Recorded model replies are keyed by the extracted text, so the library
+  that extracts it must be pinned, as `pymupdf` is.
+
+In short: not added because there is nothing in the brief to test them against, and a reader that
+has never met a real file is a liability in a system that pays money. A file of either type is
+not lost in the meantime. It is reported, and a person deals with it.
 
 ## What I would not claim
 
