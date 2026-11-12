@@ -141,6 +141,8 @@ JSON list on stdout, one `{"file", "result", "decision", "trail", "invoice"}` or
 - `--fresh` sets the existing ledger aside (renamed with a timestamp, never deleted) and starts
   with an empty one, to see a first run again. It warns that the invoices the old ledger had
   paid will be paid again: fine with the mock payment, not something to do with a real one.
+- `--rates` names the exchange-rate table (default `rates.db`, created from made-up seed rates if
+  missing).
 - `--checkpoints` names the file of saved runs (default `checkpoints.db`), which is what lets a
   held invoice be released later.
 - `inventory.db` is created from the seed data if it doesn't exist.
@@ -336,7 +338,6 @@ python review.py                                  # what is waiting
 python review.py show 3                           # one invoice in full: flags, and the steps so far
 python review.py approve 3 --by "Dana Lee" --note "Stock arriving Friday"
 python review.py reject 3 --by "Dana Lee" --note "Quantity exceeds the PO; send a corrected invoice"
-python review.py approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.0861, treasury rate 26 Jan"
 ```
 
 ```
@@ -352,12 +353,11 @@ python review.py approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.086
 - **A person can overrule a hold, within limits.** Some holds can only be rejected, because the
   invoice can't be paid correctly whoever approves it: one with no invoice number, or one that
   conflicts with an invoice already on record. The command says why.
-- **An invoice in another currency is approved with a dollar amount.** The system holds no
-  exchange rates and never guesses one. The reviewer states the dollars to pay (`--amount`) and,
-  in the note, the rate and where it came from. That amount is paid, and the invoice's own
-  total, its currency and the rate the amount implies are kept with the decision, so a slipped
-  digit shows. `--amount` is refused for an invoice already in dollars, whose amount comes from
-  the invoice.
+- **An invoice in another currency is approved like any other.** It is listed with its dollar
+  estimate, `4,125.00 EUR (~$4,480.16)`, from the [rate service](#exchange-rates). The reviewer
+  types no amount and no rate. Approval pays the invoiced amount in the invoiced currency.
+- **An invoice the rate service has no rate for waits.** It can't be approved until a rate exists
+  (the service is asked again when the reviewer comes to it), since its cost isn't known.
 - **A revision of a paid invoice is released for the difference.** Approving 1004's revision
   ($5,940.00) after the original was paid ($1,890.00) pays $4,050.00.
 - **A rejection needs a note,** since it is what goes back to the vendor.
@@ -365,6 +365,33 @@ python review.py approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.086
 
 The policy can never be loosened by a model. It can be overruled by a named person, and that is
 recorded.
+
+## Exchange rates
+
+An invoice billed in another currency (1014, in EUR) is paid in that currency: the vendor is owed
+what they billed, and dollars at some rate would leave them short or over once their bank
+converted back. The system still needs a dollar figure, to judge the invoice against the dollar
+thresholds and to show a reviewer what it costs. That estimate comes from a rate service.
+
+**The rate service is a mock.** The brief rules out internet access, so, like the inventory
+database and `mock_payment`, it is simulated locally: `rates/` reads a small SQLite table,
+`rates.db`, which `python seed_rates.py` fills (and `main.py` creates on first run). **The seeded
+rates are made up**, for EUR, GBP, CAD and JPY in the weeks the samples fall in. Everything that
+needs a rate calls one method, `usd_rate(currency, on)`; a real service is one more class with
+that method.
+
+- **Lookup:** the most recent rate on or before the invoice date. A rate dated later is never used.
+- **With a rate:** `CURRENCY_CONVERTED` (REVIEW) carries the rate, its date and the dollar
+  estimate. The `$10,000` threshold and near-threshold checks run on the estimate, so 9,500 EUR
+  is over the limit. The invoice is held so a person sees each foreign-currency payment; setting
+  the flag to WARN in `severity.py` would let clean ones through on the estimate.
+- **Without a usable rate** (currency not carried, no rate that early, or one more than 7 days
+  old): `CURRENCY_UNSUPPORTED` (REVIEW) with the reason. No threshold check is possible.
+- **Payment:** `mock_payment(vendor, amount, currency)`. Dollar payments still use the brief's
+  two-argument call. The ledger records each payment's currency and never adds currencies together.
+
+The estimate is an estimate: the real dollar cost is whatever the bank charges when the payment
+settles.
 
 ## LLM extraction
 
@@ -630,7 +657,8 @@ Each code names one problem, in `SCREAMING_SNAKE_CASE`. Flags about a value carr
 | `DUE_DATE_BEFORE_INVOICE_DATE` | `due_date` | REVIEW | Due date earlier than the invoice date (the flag carries both) |
 | `INVOICE_NUMBER_MISSING` | `invoice_number` | REVIEW | No invoice number, so duplicates of this invoice can't be detected |
 | `OVER_APPROVAL_THRESHOLD` | `total`, with `threshold` | REVIEW | A dollar total of $10,000 or more: the brief's "over $10K requires additional scrutiny", with exactly $10,000 included. Not applied to a non-USD total |
-| `CURRENCY_UNSUPPORTED` | `currency` | REVIEW | A stated currency isn't USD; amounts can't be compared without a rate |
+| `CURRENCY_CONVERTED` | `currency`, with `usd_per_unit`, `rate_date`, `rate_source`, `usd_estimate` | REVIEW | Billed in another currency; the rate service gives a dollar estimate. Paid in its own currency |
+| `CURRENCY_UNSUPPORTED` | `currency`, with `reason` (`NO_RATE`, `STALE_RATE`, `NO_RATE_SERVICE`) | REVIEW | Billed in another currency and there is no usable rate, so its dollar cost isn't known |
 | `EXTRACTION_RETRIED` | `attempts`, `outcome` (`RESOLVED` or `UNRESOLVED`), `stopped` | INFO | LLM extraction only: the file needed more than one model attempt |
 | `SUPERSEDES_UNPAID` | `earlier_file`, `earlier_status` | INFO | From the ledger: this revision replaces an earlier one that had not been paid |
 | `CURRENCY_ASSUMED` | `currency`, with `assumed` | INFO | No currency is named (or only `$`), so the invoice is read as USD. Recorded so the assumption is visible, not silent |
@@ -700,8 +728,7 @@ also carries `CURRENCY_ASSUMED`.
 - Scanned PDFs with no text layer (they need OCR first; the loader says so).
 - Fuzzy product matching: a typo or a longer name such as "WidgetA (rush order)" in a structured
   file is left as written and flagged `UNKNOWN_PRODUCT`. Only spacing, hyphen and case variants are matched.
-- Automatic currency conversion: a non-USD invoice is held, and the reviewer who approves it
-  supplies the dollar amount. There is no rate table.
+- Real exchange rates: the rate service is a local mock with made-up rates (see Exchange rates).
 - Confirming an assumed currency. An invoice that names none is read as USD and says so
   (`CURRENCY_ASSUMED`). A vendor who bills in another dollar and writes only `$` can't be told apart
   from the invoice alone; that needs a vendor record giving each vendor's billing currency.

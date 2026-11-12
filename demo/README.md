@@ -111,8 +111,7 @@ keep the demo's saved runs apart too):
 ```bash
 python review.py --ledger demo.db                                     # seven invoices waiting
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014 in EUR: asks for a dollar amount
-python review.py --ledger demo.db approve 6 --by "Dana Lee" --amount 4480.00 --note "EUR at 1.0861, treasury rate 26 Jan"
+python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
 ```
 
 What to point at:
@@ -120,10 +119,10 @@ What to point at:
 - **`main.py` has exited.** Each held invoice is a pipeline run saved mid-flight; `review.py` is a
   separate process that picks one up and lets it finish.
 - **The revision pays $4,050.00, not $5,940.00,** because $1,890.00 already went out.
-- **The EUR invoice needs a dollar amount.** The system holds no exchange rates and won't guess
-  one, so approving it bare is refused. With `--amount` and a note giving the rate, it pays that
-  amount and shows the invoice's own total, currency and the implied rate beside it. (1.0861 is
-  an example rate for the demo, not a quoted one.)
+- **The EUR invoice is approved like any other.** The queue shows what it costs in dollars, from
+  the rate service, and the reviewer types nothing. The vendor is paid 4,125.00 EUR, what they
+  billed. Say plainly that the rate service is a local mock with made-up rates, as the brief's
+  no-internet rule requires; a real one is one class with the same method.
 - **Every decision carries a name and a note** in the ledger.
 
 How to say it: the system never asks a person to do what it can do, and never does what a person

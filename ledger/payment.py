@@ -2,13 +2,14 @@
 import sys
 
 
-def mock_payment(vendor, amount):
-    """The brief's mock payment API, unchanged except that it reports on stderr.
+def mock_payment(vendor, amount, currency="USD"):
+    """The brief's mock payment API, with two changes.
 
-    The brief's version prints to stdout; here stdout carries the JSON results, so the line goes
-    to stderr instead.
+    It reports on stderr: the brief's version prints to stdout, which here carries the JSON
+    results. And it takes an optional currency, so an invoice billed in euros can be paid in
+    euros. Called with two arguments, as in the brief, it pays dollars and prints the same line.
     """
-    print(f"Paid {amount} to {vendor}", file=sys.stderr)
+    print(f"Paid {amount} to {vendor}" if currency == "USD" else f"Paid {amount} {currency} to {vendor}", file=sys.stderr)
     return {"status": "success"}
 
 

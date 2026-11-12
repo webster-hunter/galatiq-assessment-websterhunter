@@ -37,7 +37,10 @@ SEVERITY = {
     "DUE_DATE_BEFORE_INVOICE_DATE": "REVIEW",  # data error, or pressure to pay at once
     "INVOICE_NUMBER_MISSING": "REVIEW",  # payable in principle, but duplicates can't be caught
     "OVER_APPROVAL_THRESHOLD": "REVIEW",  # the brief: over $10K needs additional scrutiny
-    "CURRENCY_UNSUPPORTED": "REVIEW",  # no conversion: hold rather than compare EUR to USD
+    "CURRENCY_UNSUPPORTED": "REVIEW",  # another currency and no usable rate: can't be weighed in dollars
+    # Another currency, with a dollar estimate from the rate service. Held so a person sees each
+    # foreign-currency payment; change to WARN to let clean ones through on the estimate.
+    "CURRENCY_CONVERTED": "REVIEW",
     "STOCK_EXCEEDED": "REVIEW",
     "STOCK_UNKNOWN": "REVIEW",
     # From LLM extraction: the model returned a value the document doesn't contain.

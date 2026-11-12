@@ -35,7 +35,16 @@ from ledger import Ledger
 from normalizer.__main__ import _json_default
 from normalizer.parsing import LOADERS
 from pipeline import build_graph, checkpointer, run
+from rates import MockRates
+from rates import seed as seed_rates
 from seed_inventory import seed
+
+
+def _sums(totals: dict) -> str:
+    """Amounts per currency as text: "$26,325.00" or "$26,325.00 + 4,125.00 EUR"."""
+    if not totals:
+        return "$0.00"
+    return " + ".join(f"${v:,.2f}" if c == "USD" else f"{v:,.2f} {c}" for c, v in sorted(totals.items(), key=lambda kv: kv[0] != "USD"))
 
 
 def set_aside(ledger_path: Path) -> Path | None:
@@ -69,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="SQLite ledger of invoices seen and payments made (default: ledger.db)")
     ap.add_argument("--fresh", action="store_true",
                     help="set the existing ledger aside and start with an empty one. Invoices it had paid will be paid again")
+    ap.add_argument("--rates", default="rates.db",
+                    help="SQLite table of exchange rates, the mock rate service (default: rates.db, created from "
+                         "made-up seed rates if missing)")
     ap.add_argument("--checkpoints", default="checkpoints.db",
                     help="SQLite file of saved runs, so a held invoice can be released later (default: checkpoints.db)")
     ap.add_argument("--trace", action="store_true", help="print each pipeline step to stderr as it happens")
@@ -85,15 +97,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not Path(args.inventory).exists():
         seed(args.inventory)
+    if not Path(args.rates).exists():
+        seed_rates(args.rates)
     try:
         inventory = normalizer.inventory_from_db(args.inventory)
+        rates = MockRates(args.rates)
     except sqlite3.Error as e:
-        return emit([{"file": args.inventory, "error": f"{type(e).__name__}: {e}"}])
+        return emit([{"file": f"{args.inventory} / {args.rates}", "error": f"{type(e).__name__}: {e}"}])
 
     if args.fresh:
         set_aside(Path(args.ledger))
     ledger = Ledger(args.ledger)
-    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints))
+    graph = build_graph(provider_from(args), inventory, ledger, checkpointer(args.checkpoints), rates)
     results = []
     for file in normalizer.expand([path], LOADERS.keys() | TEXT_SUFFIXES):
         on_step = None
@@ -118,8 +133,11 @@ def main(argv: list[str] | None = None) -> int:
     if held:
         print(f"{len(held)} held for review. See them with: python review.py --ledger {args.ledger} "
               f"--checkpoints {args.checkpoints}", file=sys.stderr)
-    print(f"{len(results)} files: paid {len(paid)} now, ${sum(p['amount'] for p in paid):,.2f}. "
-          f"Ledger {args.ledger}: {len(ledger.payments())} payments, ${ledger.total_paid():,.2f} in all.", file=sys.stderr)
+    now: dict = {}
+    for p in paid:  # per currency: euros and dollars are never added together
+        now[p["currency"]] = now.get(p["currency"], 0) + p["amount"]
+    print(f"{len(results)} files: paid {len(paid)} now ({_sums(now)}). "
+          f"Ledger {args.ledger}: {len(ledger.payments())} payments ({_sums(ledger.paid_totals())}) in all.", file=sys.stderr)
     return emit(results)
 
 

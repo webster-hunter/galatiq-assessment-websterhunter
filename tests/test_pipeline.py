@@ -10,6 +10,8 @@ from approval import decide
 from extraction import Replay
 from ledger import Ledger
 from pipeline import build_graph, cannot_approve, checkpointer, release, run
+from rates import MockRates
+from rates import seed as seed_rates
 
 ROOT = Path(__file__).resolve().parent.parent
 INVOICES, REPLAYS = ROOT / "data" / "invoices", ROOT / "data" / "replays"
@@ -157,7 +159,7 @@ def test_steps_are_reported_as_they_happen(graph):
 
 def test_main_trace_prints_one_json_line_per_step(capsys, tmp_path):
     """--trace writes the steps to stderr as JSON lines, leaving stdout as the JSON result."""
-    code = main.main([f"--invoice_path={INVOICES / 'invoice_1007.csv'}", "--offline", "--trace", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")])
+    code = main.main([f"--invoice_path={INVOICES / 'invoice_1007.csv'}", "--offline", "--trace", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")])
     out = capsys.readouterr()
     [entry] = json.loads(out.out)
     lines = [json.loads(line) for line in out.err.splitlines() if line.startswith("{")]
@@ -168,7 +170,7 @@ def test_main_trace_prints_one_json_line_per_step(capsys, tmp_path):
 
 def test_main_keeps_its_ledger_between_runs_and_fresh_resets_it(capsys, tmp_path):
     """Run a file twice through main.py: paid once, then recognised. --fresh forgets, and it is paid again."""
-    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")]
+    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
     statuses = []
     for extra in ([], [], ["--fresh"]):
         assert main.main(args + extra) == 0
@@ -292,7 +294,7 @@ def test_nodes_do_not_change_the_state_they_are_given(ledger):
 def test_fresh_keeps_the_old_ledger_and_says_what_it_means(capsys, tmp_path):
     """--fresh renames the ledger, never deletes it, and warns that the payments it recorded will be made again."""
     path = tmp_path / "l.db"
-    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(path), "--checkpoints", str(tmp_path / "cp.db")]
+    args = [f"--invoice_path={INVOICES / 'invoice_1006.csv'}", "--offline", "--ledger", str(path), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
     assert main.main(args) == 0
     capsys.readouterr()
     assert main.main(args + ["--fresh"]) == 0
@@ -388,51 +390,82 @@ def test_some_holds_can_only_be_rejected(graph, ledger, tmp_path):
     assert ledger.total_paid() == Decimal("6500")  # only the original 1015
 
 
-def test_an_invoice_in_another_currency_is_approved_with_a_dollar_amount(graph, ledger):
-    """1014 is billed 4,125.00 EUR. The reviewer states the dollars to pay and the rate; that amount is paid, and the invoice's own total, currency and the implied rate are kept with the decision."""
-    queue_id, _ = held(graph, "invoice_1014.xml")
-    state = release(graph, ledger, queue_id, "approve", "Dana Lee", "EUR at 1.0861, treasury rate 26 Jan", amount=Decimal("4480.00"))
-    converted = {"invoice_total": Decimal("4125.00"), "invoice_currency": "EUR", "implied_rate": Decimal("1.0861")}
-    assert state["result"]["status"] == "PAID" and state["result"]["amount"] == Decimal("4480.00")
-    assert state["result"]["converted"] == converted and state["review"]["converted"] == converted
-    [entry] = ledger.queue(status=None)
-    assert (entry["action"], entry["reviewer"], entry["amount"], entry["note"]) == (
-        "approve", "Dana Lee", "4480", "EUR at 1.0861, treasury rate 26 Jan")
-    assert [Decimal(p["amount"]) for p in ledger.payments()] == [Decimal("4480")]
+@pytest.fixture
+def rates(tmp_path):
+    seed_rates(tmp_path / "rates.db")
+    return MockRates(tmp_path / "rates.db")
 
 
-def test_the_dollar_amount_is_required_explained_and_only_for_other_currencies(graph, ledger):
-    """No rate is ever guessed: a EUR approval without an amount is refused, as is an amount without a note, a zero amount, an amount on a rejection, and an amount on an invoice already in dollars."""
-    eur, _ = held(graph, "invoice_1014.xml")
-    usd, _ = held(graph, "invoice_1016.json")
-    for kwargs, message in (
-            (dict(action="approve"), "give the dollar amount to pay"),
-            (dict(action="approve", amount=Decimal("4480")), "an amount needs a note"),
-            (dict(action="approve", amount=Decimal("0"), note="rate"), "more than zero"),
-            (dict(action="reject", amount=Decimal("4480"), note="no"), "only applies to an approval")):
-        with pytest.raises(ValueError, match=message):
-            release(graph, ledger, eur, reviewer="Dana Lee", **kwargs)
-    with pytest.raises(ValueError, match="billed in dollars"):
-        release(graph, ledger, usd, "approve", "Dana Lee", "rounding", amount=Decimal("3000"))
-    assert [e["status"] for e in ledger.queue(status=None)] == ["WAITING", "WAITING"] and ledger.payments() == []
-    # The dollar invoice is approved the ordinary way, for its own total.
-    assert release(graph, ledger, usd, "approve", "Dana Lee")["result"]["amount"] == Decimal("3233.00")
+def test_an_invoice_in_another_currency_is_estimated_held_and_paid_in_its_own_currency(ledger, rates):
+    """1014 is billed 4,125.00 EUR. The rate service prices it at $4,480.16 for the reviewer; approving it (nothing to type) pays 4,125.00 EUR, with the estimate and rate kept beside the payment."""
+    paid = []
+    ledger._pay = lambda *args: paid.append(args)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
+    queue_id, state = held(graph, "invoice_1014.xml")
+    [f] = [f for f in state["invoice"].flags if f["code"] == "CURRENCY_CONVERTED"]
+    assert (f["severity"], f["value"], f["usd_per_unit"], f["rate_date"].isoformat(), f["usd_estimate"]) == (
+        "REVIEW", "EUR", Decimal("1.0861"), "2026-01-26", Decimal("4480.16"))
+    assert state["decision"].because == ("CURRENCY_CONVERTED",)
+
+    final = release(graph, ledger, queue_id, "approve", "Dana Lee")
+    assert paid == [("TechParts International", Decimal("4125.00"), "EUR")]
+    result = final["result"]
+    assert (result["status"], result["amount"], result["currency"]) == ("PAID", Decimal("4125.00"), "EUR")
+    assert result["usd_estimate"] == {"usd_estimate": Decimal("4480.16"), "usd_per_unit": Decimal("1.0861"),
+                                      "rate_date": f["rate_date"], "rate_source": "mock"}
+    # Euros and dollars are never added together.
+    assert ledger.paid_totals() == {"EUR": Decimal("4125")} and ledger.total_paid() == 0
 
 
-def test_a_ledger_from_before_the_amount_column_still_opens(tmp_path):
-    """A ledger file created before reviewers could set an amount gains the column on opening, and works."""
-    import sqlite3
-    path = tmp_path / "old.db"
-    Ledger(path).close()
-    db = sqlite3.connect(path)
-    db.execute("ALTER TABLE review_queue DROP COLUMN amount")
-    db.commit()
-    db.close()
-    ledger = Ledger(path, pay=lambda vendor, amount: None)
-    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)
-    queue_id, _ = held(graph, "invoice_1014.xml")
-    release(graph, ledger, queue_id, "approve", "Dana", "rate 1.09", amount=Decimal("4496.25"))
-    assert ledger.queue(status=None)[0]["amount"] == "4496.25"
+def test_dollar_payments_still_use_the_briefs_two_argument_call(ledger, rates):
+    """A dollar invoice is paid with mock_payment(vendor, amount), exactly as the brief has it; only another currency adds the third argument."""
+    paid = []
+    ledger._pay = lambda *args: paid.append(args)
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
+    assert run(graph, INVOICES / "invoice_1006.csv")["result"]["currency"] == "USD"
+    assert paid == [("Acme Industrial Supplies", Decimal("2750.00"))]
+
+
+def test_the_dollar_thresholds_apply_to_the_estimate(ledger, rates, tmp_path):
+    """9,500 EUR is about $10,318: over the $10K threshold although the number 9,500 is not. 9,100 EUR ($9,883.51) is near it."""
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
+    for n, (qty, code) in enumerate((("38", "OVER_APPROVAL_THRESHOLD"), ("36.4", "NEAR_THRESHOLD"))):
+        f = tmp_path / f"eur{n}.json"
+        total = Decimal(qty) * 250
+        f.write_text(json.dumps({"invoice_number": f"INV-70{n}", "vendor": {"name": "Euro Parts"}, "date": "2026-01-26",
+                                 "due_date": "2026-02-25", "currency": "EUR", "total": float(total),
+                                 "line_items": [{"item": "WidgetA", "quantity": float(qty), "unit_price": 250}]}))
+        flags = {x["code"]: x for x in run(graph, f)["invoice"].flags}
+        assert code in flags and flags[code]["value"] == (total * Decimal("1.0861")).quantize(Decimal("0.01"))
+
+
+def test_no_usable_rate_means_no_estimate_and_no_approval(ledger, rates, tmp_path):
+    """A currency the service doesn't carry, a date before any rate, and a rate more than a week old: each is held as unsupported with the reason, and can't be approved while no rate exists."""
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger, rates=rates)
+    base = json.loads((INVOICES / "invoice_1004.json").read_text())
+    cases = (("CHF", "2026-01-22", "NO_RATE"), ("EUR", "2026-01-05", "NO_RATE"), ("EUR", "2026-02-20", "STALE_RATE"))
+    for n, (currency, on, reason) in enumerate(cases):
+        f = tmp_path / f"fx{n}.json"
+        f.write_text(json.dumps(base | {"invoice_number": f"INV-80{n}", "currency": currency, "date": on, "due_date": "2026-03-20"}))
+        state = run(graph, f)
+        [flag] = [x for x in state["invoice"].flags if x["code"] == "CURRENCY_UNSUPPORTED"]
+        assert flag["reason"] == reason, (currency, on)
+        assert not any(x["code"] in ("OVER_APPROVAL_THRESHOLD", "NEAR_THRESHOLD", "CURRENCY_CONVERTED") for x in state["invoice"].flags)
+        with pytest.raises(ValueError, match="no usable rate"):
+            release(graph, ledger, state["result"]["queue_id"], "approve", "Dana Lee", rates=rates)
+    assert ledger.payments() == [] and len(ledger.queue()) == 3
+
+
+def test_an_invoice_held_without_a_rate_can_be_approved_once_one_exists(ledger, rates):
+    """Held by a graph with no rate service (CURRENCY_UNSUPPORTED). When the reviewer comes to it, the service is asked again: now there is a rate, so it is approved, paid in EUR, with the estimate recorded."""
+    graph = build_graph(Replay(REPLAYS), INVENTORY, ledger)   # no rates when it was processed
+    queue_id, state = held(graph, "invoice_1014.xml")
+    assert [f["reason"] for f in state["invoice"].flags if f["code"] == "CURRENCY_UNSUPPORTED"] == ["NO_RATE_SERVICE"]
+    with pytest.raises(ValueError, match="no usable rate"):
+        release(graph, ledger, queue_id, "approve", "Dana Lee")
+    final = release(graph, ledger, queue_id, "approve", "Dana Lee", rates=rates)
+    assert (final["result"]["amount"], final["result"]["currency"]) == (Decimal("4125.00"), "EUR")
+    assert final["review"]["converted"]["usd_estimate"] == Decimal("4480.16")
 
 
 def test_a_decision_needs_a_name_a_reason_to_reject_and_a_waiting_invoice(graph, ledger):
@@ -482,28 +515,28 @@ def test_a_run_paused_in_one_process_is_resumed_from_another(tmp_path):
 
 
 def test_review_command_lists_shows_and_decides(capsys, tmp_path):
-    """review.py against what main.py left behind: the list, one invoice in full, a refused approval (exit 1), and an approval with a dollar amount."""
+    """review.py against what main.py left behind: the list with a dollar estimate, one invoice in full, a refused rejection (exit 1), and a plain approval paid in euros."""
     import review
-    where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db")]
+    where = ["--ledger", str(tmp_path / "l.db"), "--checkpoints", str(tmp_path / "cp.db"), "--rates", str(tmp_path / "rates.db")]
     main.main([f"--invoice_path={INVOICES / 'invoice_1014.xml'}", "--offline", *where])
     assert "1 held for review" in capsys.readouterr().err
 
     assert review.main(where) == 0
     listing = capsys.readouterr().out
-    assert "invoice_1014.xml" in listing and "CURRENCY_UNSUPPORTED" in listing and "1 waiting" in listing
+    assert "invoice_1014.xml" in listing and "4,125.00 EUR (~$4,480.16)" in listing and "1 waiting" in listing
 
     assert review.main([*where, "show", "1"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert shown["approval_needs_dollar_amount"] is True and shown["cannot_approve_because"] is None
+    assert shown["cannot_approve_because"] is None and shown["usd_estimate"]["usd_estimate"] == "4480.16"
     assert shown["invoice"]["currency"] == "EUR"
 
-    assert review.main([*where, "approve", "1", "--by", "Dana"]) == 1
-    assert "give the dollar amount to pay (--amount)" in capsys.readouterr().err
-    assert review.main([*where, "approve", "1", "--by", "Dana", "--amount", "lots", "--note", "rate"]) == 1
-    assert "plain dollar amount" in capsys.readouterr().err
+    assert review.main([*where, "reject", "1", "--by", "Dana"]) == 1          # a rejection needs a note
+    assert "needs a note" in capsys.readouterr().err
 
-    assert review.main([*where, "approve", "1", "--by", "Dana", "--amount", "$4,480.00", "--note", "EUR at 1.0861"]) == 0
-    out = json.loads(capsys.readouterr().out)
-    assert (out["result"]["status"], out["result"]["amount"], out["review"]["reviewer"]) == ("PAID", "4480.00", "Dana")
-    assert out["result"]["converted"] == {"invoice_total": "4125.00", "invoice_currency": "EUR", "implied_rate": "1.0861"}
+    assert review.main([*where, "approve", "1", "--by", "Dana"]) == 0         # nothing to type: no amount, no rate
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert (out["result"]["status"], out["result"]["amount"], out["result"]["currency"]) == ("PAID", "4125.00", "EUR")
+    assert out["result"]["usd_estimate"]["usd_estimate"] == "4480.16" and out["review"]["reviewer"] == "Dana"
+    assert "Paid 4125.00 EUR to TechParts International" in captured.err
     assert review.main(where) == 0 and "Nothing is waiting" in capsys.readouterr().out

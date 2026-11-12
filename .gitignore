@@ -4,6 +4,7 @@ __pycache__/
 # Rebuilt by `python seed_inventory.py`
 *.db
 *.db.*.bak
+# rates.db is rebuilt by `python seed_rates.py` (or by main.py on first run)
 
 prep/
 *.egg-info/

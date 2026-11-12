@@ -56,6 +56,7 @@ from approval import APPROVE, HOLD, REJECT, Decision, decide
 from ledger import Ledger
 from ledger import ledger as seen
 from extraction import TEXT_SUFFIXES, Provider, ProviderError, extract
+from normalizer.checks import MAX_RATE_AGE_DAYS
 from normalizer.models import Invoice
 from normalizer.parsing import LOADERS
 
@@ -77,6 +78,8 @@ class State(TypedDict, total=False):
     recorded: bool  # True once this invoice has its own row in the ledger, so later nodes may update it
     decision: Decision
     review: dict    # a person's decision on a held invoice: {"action", "reviewer", "note", "amount"[, "converted"]}
+                    # amount: set only for a revision of a paid invoice (the difference). converted: the dollar
+                    # estimate, for an invoice in another currency.
     result: dict
     error: str
     trail: Annotated[list[dict], operator.add]
@@ -108,7 +111,8 @@ def checkpointer(path: str | Path | None = None):
     return SqliteSaver(sqlite3.connect(str(path), check_same_thread=False), serde=serde)
 
 
-def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledger | None = None, checkpoints=None):
+def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledger | None = None, checkpoints=None,
+                rates=None):
     """Build and compile the pipeline.
 
     The provider, inventory and ledger are not in the State. State is the data about one invoice, and it
@@ -122,6 +126,8 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         ledger: Where invoices and payments are recorded. Defaults to one in memory, which lasts
             as long as the graph: duplicates within a batch are caught, nothing is kept after.
         checkpoints: The checkpointer (see checkpointer()). Defaults to one in memory.
+        rates: The rate service for invoices in another currency (see the rates package). None:
+            such an invoice has no dollar estimate and is held as unsupported.
 
     Returns:
         The compiled graph. Call .invoke({"path": ...}) for the final state, or .stream(...) to
@@ -159,7 +165,7 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         # handed: if LangGraph runs it again (after a crash, or resuming a paused run) it would
         # then start from an invoice that already has those flags and add them a second time.
         # So work on a copy and return it.
-        invoice = normalizer.check(copy.deepcopy(state["invoice"]), inventory)
+        invoice = normalizer.check(copy.deepcopy(state["invoice"]), inventory, rates=rates)
         return {"invoice": invoice, "trail": _step("validate", flags=[f["code"] for f in invoice.flags])}
 
     def register(state: State) -> dict:
@@ -233,8 +239,10 @@ def build_graph(provider: Provider, inventory: dict | None = None, ledger: Ledge
         # PENDING means the payment was sent, now or earlier, and never confirmed. It is not PAID
         # and must not be retried: it is reported for a person to check.
         status = "PAID" if payment["status"] == "PAID" else "PAYMENT_UNCONFIRMED"
+        # For another currency: what was paid is in that currency; the dollar figure is an estimate.
+        estimate = review.get("converted") or conversion(state["invoice"])
         result = {**payment, "status": status, **({"approved_by": review["reviewer"]} if review else {}),
-                  **({"converted": review["converted"]} if review.get("converted") else {})}
+                  **({"usd_estimate": estimate} if estimate else {})}
         settle(state, status, payment.get("error") or payment["payment_key"])
         return {"result": result, "trail": _step("pay", **result)}
 
@@ -372,20 +380,21 @@ def run(graph, path: str | Path, on_step=None, thread_id: str | None = None) -> 
     return _stream(graph, {"path": str(path), "trail": []}, thread_id or uuid.uuid4().hex, on_step)
 
 
-def needs_dollar_amount(invoice: Invoice) -> bool:
-    """Whether paying this invoice needs a reviewer to say how many dollars: it is billed in another currency."""
-    return any(f["code"] == "CURRENCY_UNSUPPORTED" for f in invoice.flags)
-
-
-def cannot_approve(invoice: Invoice) -> str | None:
-    """Why a held invoice can't be released for payment at all, or None if it can.
+def cannot_approve(invoice: Invoice, rates=None) -> str | None:
+    """Why a held invoice can't be released for payment, or None if it can.
 
     A reviewer can overrule a hold, within limits. These holds mean the invoice as it stands
     can't be paid correctly whoever approves it, so the only way out of the queue is to reject
-    it (the vendor then sends a corrected one).
+    it (the vendor then sends a corrected one), or, for a missing exchange rate, to wait until
+    the rate service has one.
 
-    An invoice in another currency is not one of them: it can be approved, with the dollar
-    amount to pay supplied by the reviewer (see needs_dollar_amount and release).
+    An invoice in another currency with a rate is approved like any other: it is paid in its own
+    currency, and the reviewer sees the dollar estimate.
+
+    Args:
+        invoice: The held invoice.
+        rates: The rate service, asked again now for an invoice that had no usable rate when it
+            was checked: one may have been published since.
     """
     codes = {f["code"] for f in invoice.flags}
     if "INVOICE_NUMBER_MISSING" in codes:
@@ -394,11 +403,33 @@ def cannot_approve(invoice: Invoice) -> str | None:
         return "another invoice with the same vendor, number and revision is already on record"
     if invoice.total is None or invoice.total <= 0:
         return "it has no positive total to pay"
+    if "CURRENCY_UNSUPPORTED" in codes and conversion(invoice, rates) is None:
+        return (f"it is billed in {invoice.currency} and the rate service has no usable rate for it, so its cost in "
+                "dollars isn't known. Approve it once a rate is available")
     return None
 
 
+def conversion(invoice: Invoice, rates=None) -> dict | None:
+    """The dollar estimate for an invoice in another currency, or None if there is none (or it is in dollars).
+
+    Taken from the invoice's CURRENCY_CONVERTED flag if it has one. Otherwise, for an invoice that
+    had no usable rate when it was checked, the rate service is asked again.
+    """
+    for f in invoice.flags:
+        if f["code"] == "CURRENCY_CONVERTED":
+            return {k: f[k] for k in ("usd_estimate", "usd_per_unit", "rate_date", "rate_source")}
+    if rates is None or not any(f["code"] == "CURRENCY_UNSUPPORTED" for f in invoice.flags) or invoice.total is None:
+        return None
+    rate = rates.usd_rate(invoice.currency, invoice.date)
+    age = rate.age_days(invoice.date) if rate else None
+    if rate is None or (age is not None and age > MAX_RATE_AGE_DAYS):
+        return None
+    return {"usd_estimate": rate.to_usd(invoice.total), "usd_per_unit": rate.usd_per_unit, "rate_date": rate.as_of,
+            "rate_source": rate.source}
+
+
 def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, note: str | None = None, on_step=None,
-            amount: Decimal | None = None) -> State:
+            rates=None) -> State:
     """Apply a person's decision to a held invoice and let its run finish.
 
     Looks up the paused run by its queue number, checks the decision is allowed, records who
@@ -406,11 +437,10 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
     its value becomes what interrupt() returns inside await_review.
 
     What is paid on approval:
-    - normally, the invoice total;
-    - for a revision of an invoice that was already paid, the difference;
-    - for an invoice in another currency, the dollar amount the reviewer gives. The system holds
-      no exchange rates and never guesses one: the person who knows the rate states the amount,
-      with a note saying the rate and where it came from, and both are recorded under their name.
+    - normally, the invoice total, in the invoice's currency;
+    - for a revision of an invoice that was already paid, the difference.
+    The reviewer never enters an amount or a rate. For an invoice in another currency the dollar
+    estimate comes from the rate service and is recorded with the decision.
 
     Args:
         graph: The compiled graph, built with the same checkpointer the run was paused under.
@@ -418,18 +448,16 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
         queue_id: The queue number shown when the invoice was held.
         action: "approve" or "reject".
         reviewer: Who is deciding. Recorded.
-        note: Why. Required for a rejection (it goes back to the vendor) and with an amount.
+        note: Why. Required for a rejection, since it is what goes back to the vendor.
         on_step: Called with each new trail entry as the run continues.
-        amount: Dollars to pay, for an invoice billed in another currency. Not accepted for a
-            dollar invoice, whose amount comes from the invoice itself.
+        rates: The rate service, for an invoice that had no usable rate when it was held.
 
     Returns:
         The final state of the run.
 
     Raises:
         ValueError: No such waiting entry, an action that isn't approve or reject, a missing
-            name or note, an amount where none is allowed or none where one is needed, or an
-            approval that isn't possible (see cannot_approve).
+            name or note, or an approval that isn't possible (see cannot_approve).
     """
     entry = ledger.queue_entry(queue_id)
     if entry is None or entry["status"] != "WAITING":
@@ -441,34 +469,18 @@ def release(graph, ledger: Ledger, queue_id: int, action: str, reviewer: str, no
         raise ValueError("a reviewer name is required: the decision is recorded against it")
     if action == "reject" and not (note or "").strip():
         raise ValueError("a rejection needs a note: it is the reason that goes back to the vendor")
-    if action == "reject" and amount is not None:
-        raise ValueError("an amount only applies to an approval")
     # get_state() reads a thread's saved state without running anything.
     saved = graph.get_state(_thread(entry["thread_id"]))
     if not saved.next:
         raise ValueError(f"queue number {queue_id} has no paused run to resume (was it held under other checkpoints?)")
     invoice = saved.values["invoice"]
-    basis = None
+    amount, basis = None, None
     if action == "approve":
-        if reason := cannot_approve(invoice):
-            raise ValueError(f"{invoice.source_file} can't be approved: {reason}. Reject it with a note instead.")
+        if reason := cannot_approve(invoice, rates):
+            raise ValueError(f"{invoice.source_file} can't be approved: {reason}, or reject it with a note.")
+        basis = conversion(invoice, rates)
         revision = next((f for f in invoice.flags if f["code"] == "REVISION_OF_PAID"), None)
-        if needs_dollar_amount(invoice):
-            if amount is None:
-                raise ValueError(f"{invoice.source_file} is billed {invoice.total} {invoice.currency}, and the system holds no "
-                                 "exchange rates. To approve it, give the dollar amount to pay (--amount) and a note "
-                                 "saying the rate and where it came from. Or reject it with a note.")
-            if amount <= 0:
-                raise ValueError("the amount to pay must be more than zero")
-            if not (note or "").strip():
-                raise ValueError("an amount needs a note: say the exchange rate and where it came from")
-            # The rate the amount implies, shown back so a slipped digit (44,800 for 4,480) is visible.
-            basis = {"invoice_total": invoice.total, "invoice_currency": invoice.currency,
-                     "implied_rate": (amount / invoice.total).quantize(Decimal("0.0001"))}
-        elif amount is not None:
-            raise ValueError(f"{invoice.source_file} is billed in dollars, so the amount comes from the invoice "
-                             "and can't be set by hand.")
-        elif revision:
+        if revision:
             amount = revision["difference"]
             if amount is None or amount <= 0:
                 raise ValueError(f"{invoice.source_file} revises an invoice already paid {revision['already_paid']}, "

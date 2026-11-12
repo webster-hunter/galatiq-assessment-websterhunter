@@ -45,7 +45,11 @@ PRESSURE_WORDS = re.compile(r"\b(urgent(ly)?|immediate(ly)?|asap|right away|fina
 WIRE_WORDS = re.compile(r"\b(wire(d| transfers?)?|bank transfers?|(new|updated|changed) (bank )?(account|details)|routing number)\b", re.I)
 
 
-def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
+# A rate published more than this many days before the invoice date is too old to estimate with.
+MAX_RATE_AGE_DAYS = 7
+
+
+def flag(inv: Invoice, inventory: dict[str, int] | None = None, rates=None) -> list[dict]:
     """Run the format-agnostic checks on a loaded invoice.
 
     Covers invalid line values, missing invoice number, vendor, due date and total, an invoice
@@ -58,6 +62,8 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     Args:
         inv: A loaded Invoice. Its existing flags are read, not modified.
         inventory: Item name -> stock on hand. None skips the unknown-product and stock checks.
+        rates: A rate service: anything with usd_rate(currency, on) returning a rate (see the
+            rates package). None means an invoice in another currency has no dollar estimate.
 
     Returns:
         New flag dicts (without severity; load() adds it), in check order.
@@ -133,27 +139,40 @@ def flag(inv: Invoice, inventory: dict[str, int] | None = None) -> list[dict]:
     if inv.tax_rate is not None and inv.tax_rate < 0:
         invoice_invalid("tax_rate", inv.tax_rate, "TAX_NEGATIVE")
 
-    # Thresholds, prices and stock values are all USD; 4,125 EUR can't be compared to them without a
-    # rate, so a stated non-USD currency is held. An invoice that names no currency (most do not:
-    # every CSV, TXT and PDF sample) is read as USD, and so is a bare "$", which several currencies
-    # share. That is an assumption, so it is recorded (INFO: it blocks nothing, but it is on the
-    # invoice for audit) instead of being made silently. The cases that would contradict it are
-    # held by other checks: a named non-USD currency here, and "€1,250" or "£1,250" as UNPARSEABLE.
+    # Thresholds, prices and stock values are all in dollars. An invoice that names no currency
+    # (most do not: every CSV, TXT and PDF sample) is read as USD, and so is a bare "$", which
+    # several currencies share. That is an assumption, so it is recorded (INFO: it blocks nothing,
+    # but it is on the invoice for audit) instead of being made silently. The cases that would
+    # contradict it are held by other checks: a named non-USD currency here, and "€1,250" or
+    # "£1,250" as UNPARSEABLE.
+    usd_total = inv.total  # the total in dollars, for the threshold checks; None if it can't be known
     if inv.currency is None or inv.currency.upper() in ("US$", "$"):
         flags.append({"code": "CURRENCY_ASSUMED", "field": "currency", "value": inv.currency, "assumed": "USD"})
     elif inv.currency.upper() != "USD":
-        flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency})
+        # Billed in another currency. The vendor is owed that amount in that currency, and is
+        # paid so. The rate service supplies a dollar ESTIMATE, used to judge the invoice against
+        # the dollar thresholds and to show a reviewer what it costs. Without a usable rate the
+        # invoice can't be weighed at all.
+        rate = rates.usd_rate(inv.currency, inv.date) if rates is not None else None
+        age = rate.age_days(inv.date) if rate else None
+        if rate is None or (age is not None and age > MAX_RATE_AGE_DAYS):
+            usd_total = None
+            flags.append({"code": "CURRENCY_UNSUPPORTED", "field": "currency", "value": inv.currency,
+                          "reason": "NO_RATE_SERVICE" if rates is None else "NO_RATE" if rate is None else "STALE_RATE",
+                          **({"rate_date": rate.as_of, "rate_age_days": age} if rate else {})})
+        else:
+            usd_total = rate.to_usd(inv.total) if inv.total is not None else None
+            flags.append({"code": "CURRENCY_CONVERTED", "field": "currency", "value": inv.currency,
+                          "usd_per_unit": rate.usd_per_unit, "rate_date": rate.as_of, "rate_source": rate.source,
+                          "usd_estimate": usd_total})
 
-    # Only for a dollar total: 4,125 EUR can't be compared to a dollar threshold, and that invoice
-    # is already held by CURRENCY_UNSUPPORTED.
-    in_dollars = not any(f["code"] == "CURRENCY_UNSUPPORTED" for f in flags)
-    if inv.total is not None and in_dollars and inv.total >= APPROVAL_THRESHOLD:
-        flags.append({"code": "OVER_APPROVAL_THRESHOLD", "field": "total", "value": inv.total,
+    # Judged on the dollar figure: the invoice's own total, or its estimate for another currency.
+    if usd_total is not None and usd_total >= APPROVAL_THRESHOLD:
+        flags.append({"code": "OVER_APPROVAL_THRESHOLD", "field": "total", "value": usd_total,
                       "threshold": APPROVAL_THRESHOLD})
-
-    elif inv.total is not None and in_dollars and inv.total >= APPROVAL_THRESHOLD * (1 - NEAR_THRESHOLD_BAND):
-        flags.append({"code": "NEAR_THRESHOLD", "field": "total", "value": inv.total,
-                      "threshold": APPROVAL_THRESHOLD, "under_by": APPROVAL_THRESHOLD - inv.total})
+    elif usd_total is not None and usd_total >= APPROVAL_THRESHOLD * (1 - NEAR_THRESHOLD_BAND):
+        flags.append({"code": "NEAR_THRESHOLD", "field": "total", "value": usd_total,
+                      "threshold": APPROVAL_THRESHOLD, "under_by": APPROVAL_THRESHOLD - usd_total})
 
     # The vendor's own free text: notes, terms, and anything kept in unexpected_fields.
     texts = [("notes", inv.notes), ("payment_terms", inv.payment_terms)] + [

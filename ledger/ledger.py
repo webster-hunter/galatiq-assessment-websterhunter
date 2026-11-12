@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE TABLE IF NOT EXISTS payments (
     payment_key TEXT PRIMARY KEY, vendor TEXT NOT NULL, amount TEXT NOT NULL,
-    status TEXT NOT NULL, created_at TEXT NOT NULL
+    status TEXT NOT NULL, created_at TEXT NOT NULL, currency TEXT NOT NULL DEFAULT 'USD'
 );
 -- Invoices waiting for a person. thread_id names the paused pipeline run that resumes with their answer.
 CREATE TABLE IF NOT EXISTS review_queue (
@@ -80,6 +80,12 @@ def identity(inv: Invoice) -> tuple[str, str, int] | None:
         return None
     digits = re.sub(r"\D", "", inv.revision or "")
     return _alnum(inv.vendor_name), number, int(digits) if digits else 0
+
+
+def currency_of(inv: Invoice) -> str:
+    """The currency an invoice is paid in: the one it names, or dollars if it names none (or only "$")."""
+    named = (inv.currency or "").upper()
+    return "USD" if named in ("", "$", "US$") else named
 
 
 def content_hash(inv: Invoice) -> str:
@@ -126,6 +132,8 @@ class Ledger:
         # file made before then gets the column here, since CREATE TABLE IF NOT EXISTS won't add it.
         if "amount" not in {row["name"] for row in self._db.execute("PRAGMA table_info(review_queue)")}:
             self._db.execute("ALTER TABLE review_queue ADD COLUMN amount TEXT")
+        if "currency" not in {row["name"] for row in self._db.execute("PRAGMA table_info(payments)")}:
+            self._db.execute("ALTER TABLE payments ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'")
         self._pay, self._now = pay, now
 
     def close(self) -> None:
@@ -224,6 +232,10 @@ class Ledger:
         amount, if given, is paid in place of the invoice total: a reviewer releasing a revision
         of an invoice that was already paid pays only the difference.
 
+        The payment is made in the invoice's own currency: an invoice for 4,125.00 EUR pays
+        4,125.00 EUR. The vendor is owed what they billed; dollars at some rate would leave them
+        short or over once their bank converted back.
+
         The payment row is written as PENDING before the payment function is called, and marked
         PAID after it returns. If the call raises (a timeout, a dropped connection), or the
         process dies in between, the PENDING row stays: the payment may have gone through, so it
@@ -233,7 +245,7 @@ class Ledger:
         payment costs one invoice and the rest of a batch carries on.
 
         Returns:
-            {"payment_key", "amount", "status", "repeated"}: status is PAID, or PENDING for a
+            {"payment_key", "amount", "currency", "status", "repeated"}: status is PAID, or PENDING for a
             payment that never confirmed (with "error" if it failed just now); repeated is True
             if nothing was sent now.
 
@@ -246,21 +258,25 @@ class Ledger:
         if key is None or amount is None or amount <= 0:
             raise ValueError(f"refusing to pay {inv.source_file}: no invoice number or no positive amount")
         pkey = payment_key(*key)
+        currency = currency_of(inv)
         try:
             with self._db:  # the PRIMARY KEY on payment_key is the lock: only one insert can succeed
-                self._db.execute("INSERT INTO payments VALUES (?,?,?,?,?)",
-                                 (pkey, inv.vendor_name, _plain(amount), "PENDING", self._now().isoformat()))
+                self._db.execute("INSERT INTO payments (payment_key, vendor, amount, status, created_at, currency) "
+                                 "VALUES (?,?,?,?,?,?)",
+                                 (pkey, inv.vendor_name, _plain(amount), "PENDING", self._now().isoformat(), currency))
         except sqlite3.IntegrityError:
-            row = self._db.execute("SELECT amount, status FROM payments WHERE payment_key=?", (pkey,)).fetchone()
-            return {"payment_key": pkey, "amount": Decimal(row["amount"]), "status": row["status"], "repeated": True}
+            row = self._db.execute("SELECT amount, currency, status FROM payments WHERE payment_key=?", (pkey,)).fetchone()
+            return {"payment_key": pkey, "amount": Decimal(row["amount"]), "currency": row["currency"],
+                    "status": row["status"], "repeated": True}
         try:
-            self._pay(inv.vendor_name, amount)
+            # Dollars use the brief's two-argument call; another currency is named.
+            self._pay(inv.vendor_name, amount) if currency == "USD" else self._pay(inv.vendor_name, amount, currency)
         except Exception as e:  # whatever the payment API throws: we can't know whether money moved
-            return {"payment_key": pkey, "amount": amount, "status": "PENDING", "repeated": False,
+            return {"payment_key": pkey, "amount": amount, "currency": currency, "status": "PENDING", "repeated": False,
                     "error": f"{type(e).__name__}: {e}"}
         with self._db:
             self._db.execute("UPDATE payments SET status='PAID' WHERE payment_key=?", (pkey,))
-        return {"payment_key": pkey, "amount": amount, "status": "PAID", "repeated": False}
+        return {"payment_key": pkey, "amount": amount, "currency": currency, "status": "PAID", "repeated": False}
 
     def enqueue(self, thread_id: str, inv: Invoice, reasons: list[str]) -> int:
         """Put an invoice in the review queue and return its queue number.
@@ -301,5 +317,14 @@ class Ledger:
         """Every payment on record, in the order made."""
         return [dict(r) for r in self._db.execute("SELECT * FROM payments ORDER BY created_at, payment_key")]
 
+    def paid_totals(self) -> dict[str, Decimal]:
+        """What has been paid, per currency. Amounts in different currencies are never added together."""
+        totals: dict[str, Decimal] = {}
+        for p in self.payments():
+            if p["status"] == "PAID":
+                totals[p["currency"]] = totals.get(p["currency"], Decimal(0)) + Decimal(p["amount"])
+        return totals
+
     def total_paid(self) -> Decimal:
-        return sum((Decimal(p["amount"]) for p in self.payments() if p["status"] == "PAID"), Decimal(0))
+        """What has been paid in dollars. Payments in other currencies are in paid_totals()."""
+        return self.paid_totals().get("USD", Decimal(0))
