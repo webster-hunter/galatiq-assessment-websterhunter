@@ -35,8 +35,8 @@ Three things in that table are easy to get wrong, and each is a test in this rep
 - **1003's "URGENT - pay immediately" changes nothing.** It is one of four signals counted by
   code. No model is asked whether the invoice looks suspicious.
 
-[`demo/approvals-over-time.md`](demo/approvals-over-time.md) shows how these 20 outcomes changed
-as each stage was built.
+[`docs/design-and-demo.pdf`](docs/design-and-demo.pdf) has the design decisions, a demo walkthrough,
+and how these 20 outcomes changed as each stage was built.
 
 ## Run it
 
@@ -271,6 +271,6 @@ The brief leaves these open. Each is a decision I made, and would confirm with A
 | `ledger/`, `rates/` | What has been seen and paid; the mock rate service. [Reference](docs/ledger-and-review.md) |
 | `pipeline/` | The graph, checkpoints, holding and releasing. [Reference](docs/pipeline.md) |
 | `data/invoices/`, `data/unfamiliar/`, `data/replays/` | The 20 sample invoices; four files in formats no parser knows; the model's recorded replies |
-| `demo/` | Numbers and examples for a walkthrough, each with the command that reproduces it |
+| `docs/design-and-demo.pdf` | Design decisions, a demo walkthrough with the command for each step, how the outcomes changed as each stage was built, and what was left out |
 | `tests/` | 334 tests. Each one's first line says the behaviour it pins |
 | `ASSESSMENT.md` | The brief |

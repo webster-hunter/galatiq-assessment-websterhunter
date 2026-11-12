@@ -54,7 +54,7 @@ def test_report_prints_a_table_and_a_missing_recording_is_an_error_row(tmp_path,
     assert "seed_inventory.py" in capsys.readouterr().err
 
 
-def test_the_saved_demo_report_is_current():
-    """demo/self_correction_report.txt is what the report prints today, so the demo numbers can't drift from the code."""
-    saved = (ROOT / "demo" / "self_correction_report.txt").read_text(encoding="utf-8")
+def test_the_saved_report_is_current():
+    """docs/self_correction_report.txt is what the report prints today, so the numbers quoted in the docs can't drift from the code."""
+    saved = (ROOT / "docs" / "self_correction_report.txt").read_text(encoding="utf-8")
     assert saved.rstrip("\n") == render(list(rows().values()))
