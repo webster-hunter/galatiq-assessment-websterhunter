@@ -80,13 +80,13 @@ python main.py --invoice_path=data/invoices --offline --ledger demo.db > /dev/nu
 
 | | First run | Second run |
 |---|---|---|
-| Paid | 6 invoices, $26,325.00 | 0 |
-| Held | 7 | |
+| Paid | 5 invoices, $19,140.00 | 0 |
+| Held | 8 | |
 | Rejected | 4 | |
 | Skipped as a duplicate | 3 | 3 |
 | Already processed | | 17 |
 
-- **Paid:** 1001, 1004, 1006, 1010, 1011, 1015.
+- **Paid:** 1001, 1004, 1006, 1011, 1015.
 - **Duplicates caught:** 1011, 1012 and 1013 each arrive in two formats. The second copy is
   recognised by content, not file name, and skipped. Without that, 1011 would be paid twice
   ($3,000.00), and 1012 would be in the review queue twice.
@@ -109,9 +109,9 @@ After the folder run above (same `demo.db`; add `--checkpoints demo-cp.db` to bo
 keep the demo's saved runs apart too):
 
 ```bash
-python review.py --ledger demo.db                                     # seven invoices waiting
+python review.py --ledger demo.db                                     # eight invoices waiting, with the agent's advice
 python review.py --ledger demo.db approve 2 --by "Dana Lee"           # 1004 revised: pays the $4,050.00 difference
-python review.py --ledger demo.db approve 6 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
+python review.py --ledger demo.db approve 7 --by "Dana Lee"           # 1014: listed as 4,125.00 EUR (~$4,480.16); pays 4,125.00 EUR
 ```
 
 What to point at:
@@ -127,6 +127,35 @@ What to point at:
 
 How to say it: the system never asks a person to do what it can do, and never does what a person
 should decide. A model can make it stricter; only a named person can release a hold.
+
+## The reviewer agent: a model that looks things up, and can only add caution
+
+```bash
+python main.py --invoice_path=data/invoices --offline --ledger demo.db --trace 2>&1 >/dev/null | grep '"reviewer"'
+```
+
+One line per invoice showing who wrote the reason (the agent or the policy), its recommendation,
+and which tools it called. `python review.py --ledger demo.db` then prints its advice under the queue.
+
+What to point at:
+
+- **1016.** The agent chose two lookups itself: products like WidgetC (it found WidgetA and
+  WidgetB) and the vendor's history (one earlier invoice, paid). Its question to the reviewer:
+  is WidgetC something we mean to order?
+- **1010.** The policy approves it. The agent held it, because WidgetA is billed at $250 on one
+  line and $300 on another. This is the one place a model changed an outcome, and it made it
+  stricter.
+- **1003 and 1013.** Rejected by the policy with no model call at all.
+
+How to say it: the model can add a hold and advise a person. It cannot approve, reject or pay,
+and that is enforced in code, so nothing a vendor writes on an invoice can talk it into paying.
+
+A true story worth telling: its first replies suspected four invoices of being duplicates. The
+cause was my tool, which listed the invoice under review in the vendor's history. Reading real
+output, not just passing tests, is what found it.
+
+What not to claim: that its reasoning is checked. Nothing yet verifies a rationale's claims
+against the invoice; one early reply invented a quantity change. That check is the critic, next.
 
 ## Watching one invoice move through the pipeline
 

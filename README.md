@@ -149,8 +149,6 @@ JSON list on stdout, one `{"file", "result", "decision", "trail", "invoice"}` or
 
 Held invoices wait in the [review queue](#review-queue); `python review.py` lists and decides them.
 
-Not built yet: the reviewer agent that explains and can tighten a decision.
-
 ## Pipeline
 
 `pipeline/graph.py` wires the stages together as a [LangGraph](https://langchain-ai.github.io/langgraph/)
@@ -248,8 +246,7 @@ people who own it without touching a prompt.
   narrow keyword matches in code ("late fees apply" is not pressure; "avoid penalties" is), so a
   rejection never depends on a model noticing something.
 - **INFO notes are never a reason** for any outcome.
-- **It is a floor.** Later stages may make an outcome stricter (approve, then hold, then reject),
-  never looser.
+- **It is a floor.** The [reviewer agent](#reviewer-agent) may make an outcome stricter, never looser.
 
 Each decision records the rule that fired and the flags that caused it:
 
@@ -275,6 +272,61 @@ Each decision records the rule that fired and the flags that caused it:
 
 The policy decides each invoice on its flags alone. What happens across files (a second copy, a
 revision) is the ledger's job, below.
+
+## Reviewer agent
+
+`approval/reviewer.py` is the model's part in approval. The policy has already decided; the agent
+adds what code can't: it follows a flag up with a lookup, and writes the reason in plain language.
+
+**It runs a tool-calling loop.** The model is sent the invoice, its flags, the policy floor and
+three tools. It may ask for tools; the code runs them and sends back the results; when it
+answers, that is its assessment: a recommendation, a short rationale, and questions for a reviewer.
+
+| Tool | Returns |
+|---|---|
+| `get_stock(item)` | How many of a product are in stock, or that it isn't an inventory product |
+| `find_similar_products(name)` | Up to three inventory products with similar names, and their stock |
+| `get_vendor_history(vendor)` | The vendor's other invoices on record, with totals and outcomes |
+
+All three only read. The model names a tool and arguments; the code decides whether and how to
+run it, and answers an unknown tool or bad arguments with an error the model can read.
+
+**Its authority is fixed in code, not requested in the prompt:**
+
+| Policy floor | What the agent can do |
+|---|---|
+| APPROVE with warnings | Add a HOLD. The only way it changes an outcome; even a "reject" from it only holds |
+| HOLD | Advise the person who decides. Its recommendation is shown in the review queue |
+| REJECT, or a clean APPROVE | Nothing: it isn't called, and the reason is written from the flags |
+
+So a model can make the system stricter, never looser. The invoice text it reads was written by
+the vendor, and is sent as delimited data with an instruction to treat pressure as a reason for
+care; if that fails entirely, the worst outcome is an extra hold. If the model can't be reached,
+or answers unusably, the policy's decision stands and says so.
+
+### What it did on the samples
+
+From recorded replies (`grok-4`), on the folder run in order. It reviewed eight invoices: the
+seven policy holds, and 1010.
+
+- **1010: it added a hold.** The policy approves 1010 with warnings. The agent held it: WidgetA is
+  billed on two lines at $250 and $300, and there is an unexplained Bill To line. It asks why the
+  prices differ. The invoice goes to the review queue.
+- **1016:** it looked for products like WidgetC (WidgetA and WidgetB) and checked the vendor's
+  history (one earlier invoice, paid), and asks whether WidgetC is something Acme means to order.
+- **1008:** it looked up both unknown items, found nothing similar, and found no history for the
+  vendor.
+- **1004 revised:** it explains that $1,890 was already paid and $4,050 is the difference, and
+  asks whether the PO amendment the vendor cites was approved.
+
+Reading its first recorded replies found a bug in a tool, not in the model: vendor history listed
+the invoice under review, and the model took it for an earlier duplicate. The tool now leaves it
+out, and a test checks no rationale reports one.
+
+Limits: its rationale for 1010 still uses two flag codes, against the prompt. Nothing yet checks
+a rationale's claims against the invoice; that is the critic's job, not built. Recordings cover
+the folder run; an invoice run on its own, or one not in the samples, gets a different history
+from the tools, has no recording, and offline falls back to the policy's wording.
 
 ## Ledger and payment
 
@@ -319,13 +371,13 @@ python main.py --invoice_path=data/invoices --offline --fresh
 
 | Result | Invoices |
 |---|---|
-| PAID, 6 invoices, $26,325.00 | 1001, 1004, 1006, 1010, 1011 (pdf), 1015 |
-| HELD, 7 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016, and 1004 revised (the original was already paid; $4,050.00 difference) |
+| PAID, 5 invoices, $19,140.00 | 1001, 1004, 1006, 1011 (pdf), 1015 |
+| HELD, 8 | 1002, 1005, 1008, 1012 (pdf), 1014, 1016; 1004 revised (the original was already paid; $4,050.00 difference); and 1010, which the policy approves and the reviewer agent holds |
 | REJECTED, 4 | 1003, 1007, 1009, 1013 (json) |
 | SKIPPED_DUPLICATE, 3 | 1011 (txt), 1012 (txt), 1013 (pdf) |
 
-Run it again without `--fresh` and nothing is paid: 17 files are `ALREADY_PROCESSED` and the 3
-second copies are still duplicates.
+Run it again and nothing is paid: 17 files are `ALREADY_PROCESSED` and the 3 second copies are
+still duplicates.
 
 Files are processed one at a time in name order, so what an invoice is compared with depends on
 what came before it. 1004 is paid before its revision is read, which is why the revision is held
